@@ -764,6 +764,117 @@ Changes to be committed:
 
 ---
 
+## E49. 第一次推送到 GitHub（2026-09-29 15:44）
+
+**指令與結果：**
+
+```
+> git add docs
+> git status
+Changes to be committed:
+        modified:   docs/evidence/m1-evidence-log.md
+        new file:   docs/screenshots/（8 張 M1 截圖）
+
+> git commit -m "docs: update M1 evidence log and screenshots"
+[main c9b093b] docs: update M1 evidence log and screenshots
+ 9 files changed, 129 insertions(+)
+
+> git remove add origin https://github.com/Poyu-Tu/llm-gateway.git
+git: 'remove' is not a git command. See 'git --help'.
+The most similar command is
+        remote
+
+> git remote add origin https://github.com/Poyu-Tu/llm-gateway.git
+> git push -u origin main
+Enumerating objects: 117, done.
+Writing objects: 100% (117/117), 6.48 MiB | 3.25 MiB/s, done.
+To https://github.com/Poyu-Tu/llm-gateway.git
+ * [new branch]      main -> main
+branch 'main' set up to track 'origin/main'.
+```
+
+**判讀：**
+- `git add docs` 只加入 `docs/` 底下的檔案，`git status` 確認只有證據紀錄與 8 張截圖 ✅
+- **小挫折：** `remote` 打成 `remove`，Git 回報不是指令，並建議最接近的 `remote`。重打後成功
+- **推送成功**：117 個物件、6.48 MiB（大部分是截圖），本機 `main` 與 GitHub 的 `origin/main` 建立追蹤關係，之後只需 `git push`
+- **推送保護沒有擋下任何東西**：與 E45 的本機掃描結果一致，三筆 commit 中沒有 GitHub 支援格式的金鑰
+- **沒有跳出登入視窗**：Git Credential Manager 使用了先前（其他專案）已存在 Windows 認證管理員中的 GitHub 憑證
+
+**GitHub 上的 commit 歷史（3 筆）：**
+
+| commit | 訊息 |
+|---|---|
+| `59c33f5` | chore: initialize project skeleton |
+| `858b6a6` | chore: enforce LF line ending |
+| `c9b093b` | docs: update M1 evidence log and screenshots |
+
+**截圖：** `m1-first-push.png`（使用者資料夾名稱已遮蔽）
+
+---
+
+## E50. 保護 `main` 分支的規則集與實測（2026-09-29 15:49～15:54）
+
+**要防的兩種操作：**
+
+| 操作 | 生活比喻 | 後果 |
+|---|---|---|
+| 強制推送（force push） | 撕掉帳本的幾頁，重寫一份蓋上去 | 歷史被竄改，舊紀錄消失 |
+| 刪除分支 | 整本帳本丟進碎紙機 | 全部歷史消失 |
+
+**設定（Settings → Rules → Rulesets → New branch ruleset）：**
+- Ruleset Name：`protect-main`
+- Enforcement status：**Active**
+- Bypass list：**空白**（連 repo 擁有者本人也不能例外；只防別人不防自己的規則，等於沒有保護）
+- Target branches：**Default**（預設分支，即 `main`）
+- Rules：Restrict deletions、Block force pushes（本人確認已勾選；Rules 區塊的畫面沒有截到，以下方的實測結果作為證據）
+
+**刻意先不加的規則：** D21 的「`main` 要求 CI 通過才能合併」。CI 尚未建立，現在加上會讓每次推送都卡住；10/12 那週建好 CI（pytest、tfsec、Trivy）後回來補上（已列入待決）
+
+**截圖：** `m1-github-ruleset.png`（大頭貼已遮蔽）
+
+**實測前的安全檢查（15:51）：**
+- 測試會用到 `git reset --hard`，事先約定：`git status` 不是 `working tree clean` 就先停下來
+- 結果：沒有 `working tree clean`，只有兩張未追蹤的截圖（`m1-first-push.png`、`m1-github-ruleset.png`）。本人**依約定停下來回報**，沒有繼續執行
+- 判讀：`git reset --hard` 只會丟掉「**已追蹤檔案**的未 commit 修改」，不會刪除**未追蹤**的檔案（刪除未追蹤檔案是 `git clean` 的工作）。所以兩張截圖不受影響，可以繼續
+- 原本的約定比實際需要更嚴格。對會刪資料的指令，寧可條件設嚴、停下來確認，也不要讓人在不確定時繼續執行
+
+**截圖：** `m1-ruleset-test-precheck.png`（使用者資料夾名稱已遮蔽）
+
+**實測：故意強制推送（15:54）**
+
+```
+> git commit --amend --no-edit
+[main c7101fa] docs: update M1 evidence log and screenshots
+ Date: Tue Sep 29 15:42:17 2026 +0800
+
+> git push --force
+remote: error: GH013: Repository rule violations found for refs/heads/main.
+remote: - Cannot force-push to this branch
+ ! [remote rejected] main -> main (push declined due to repository rule violations)
+error: failed to push some refs to 'https://github.com/Poyu-Tu/llm-gateway.git'
+
+> git reset --hard origin/main
+HEAD is now at c9b093b docs: update M1 evidence log and screenshots
+
+> git log --oneline -1
+c9b093b (HEAD -> main, origin/main) docs: update M1 evidence log and screenshots
+```
+
+**判讀：**
+- `--amend --no-edit` 只重新封裝最後一筆 commit：內容與訊息不變，編號從 `c9b093b` 變成 `c7101fa`（原始作者時間 `15:42:17` 保留）。本機歷史因此與 GitHub 分岔
+- `git push --force` 被 GitHub 拒絕：**`GH013` + `Cannot force-push to this branch`** ✅。規則集確實生效，而且 bypass 清單為空，repo 擁有者本人也被擋下
+- 被拒絕之前，物件其實已經上傳（`Writing objects: 100%`）；拒絕發生在最後「更新分支指標」那一步。GitHub 收下了包裹，但不准它換掉帳本
+- `reset --hard origin/main` 讓本機回到與 GitHub 相同的 `c9b093b`；兩張未追蹤的截圖不受影響
+- 刪除分支的規則未實測：`main` 是預設分支，GitHub 本來就不允許刪除預設分支，即使實測被擋，也分不出是規則集還是預設行為擋的
+
+**面試講法：** 「分支保護我不是設好就算了。我故意對 `main` 做一次強制推送，確認 GitHub 回 GH013 拒絕，而且我自己也不在例外名單裡。規則要看到它真的擋下來，才算數。」
+
+**截圖：** `m1-force-push-blocked.png`（使用者資料夾名稱已遮蔽）
+
+**步驟 3 狀態：✅ 完成**（公開 repo、Advanced Security 各項防線、noreply Email、第一次推送、`main` 規則集與實測）
+
+---
+
 ## 待決（尚未定案）
 
 | 項目 | 目前的建議 | 何時定 |
@@ -771,3 +882,5 @@ Changes to be committed:
 | M1 稽核紀錄的存放位置 | JSON Lines 檔，外面包一層存放函式；M2 啟動 DynamoDB Local 時只換存放函式的實作。不選 SQLite（關聯式，M2 全部作廢）；不選 M1 就上 DynamoDB Local（第一次成功對話前，要先搞定 docker-compose、boto3、建表） | 步驟 6 開工前 |
 | ~~VS Code 擴充套件~~ | ✅ 已定案：專用設定檔 `llm-gateway`，6 個官方套件（E36、E37） | 步驟 1 |
 | ~~專用設定檔關閉內建 AI 功能~~ | ✅ 已完成（E38） | 步驟 1 |
+| `protect-main` 加上「CI 通過才能合併」（D21） | CI 建立後補上；屆時決定是否改為 PR 流程 | 10/12 那週（CI 建立時） |
+| CodeQL 與 Copilot Autofix（E48） | 有 Python 程式碼後評估 | M1 結案前 |
