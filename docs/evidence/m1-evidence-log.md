@@ -635,6 +635,135 @@ Count Name
 
 ---
 
+## E46. 第一次 commit（2026-09-29 15:20）
+
+**指令與結果：**
+
+```
+> git add .
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+（共 34 行同類警告）
+
+> git diff --cached --name-only | sls "\.env$"
+（無輸出）
+
+> git commit -m "chore: initialize project skeleton"
+[main (root-commit) 59c33f5] chore: initialize project skeleton
+ 90 files changed, 8867 insertions(+)
+
+> git log --format="%an <%ae> | %s"
+Terry <GitHub noreply 地址> | chore: initialize project skeleton
+```
+
+**判讀：**
+- **封箱前最後檢查：** 暫存區的檔名清單中沒有任何以 `.env` 結尾的檔案 ✅
+- **第一筆 commit `59c33f5`**，分支為 `main`（E40 的改名生效），共 90 個檔案
+- **作者 Email 是 noreply 地址** ✅：E41 的問題在第一筆 commit 就沒有發生。repo 公開後，commit 歷史中不會出現個人 Email
+- **commit 訊息格式：** 採用 Conventional Commits（`chore:` 雜務、`feat:` 新功能、`fix:` 修錯、`docs:` 文件），之後看歷史就能分類
+- `docs/screenshots/` 中沒有 `m1-workspace-trust-enabled.png`、`m1-workspace-trust-list.png`：後者已被 `m1-workspace-trust-cleaned.png` 取代，前者可之後補進；`m0-openai-key-list-inherited.png` 仍缺（E21 列出）
+
+**換行符號警告（LF / CRLF）：**
+- 每一行文字結尾都有一個看不見的「換行符號」。Linux 與 macOS 用 LF（一個字元），Windows 慣用 CRLF（兩個字元）
+- Git for Windows 預設開啟 `core.autocrlf=true`：存進版本庫時統一成 LF，但下次從版本庫取出檔案時，會在 Windows 工作資料夾中轉成 CRLF。警告就是在說這件事，**目前不影響任何內容**
+- 為什麼仍要處理：本專題的程式會跑在 Linux 容器（M1 第 9 步）、Lambda 與 GitHub Actions 上。含 CRLF 的 shell 腳本在 Linux 會出錯（例如 `/bin/sh^M: bad interpreter`）。現在只有文件與設定檔，是處理的最好時機
+- 處理方式見 E47
+
+**截圖：** `m1-first-commit.png`（使用者資料夾名稱與 noreply 地址已遮蔽）
+
+---
+
+## E47. `.gitattributes` 統一換行符號為 LF（2026-09-29 15:26～15:30）
+
+**做法：** 本人在 VS Code 於根目錄新增 `.gitattributes`：
+
+```
+* text=auto eol=lf
+*.png binary
+```
+
+- 第一行：所有 Git 判定為文字的檔案，工作資料夾中也一律用 LF
+- 第二行：`.png` 視為二進位檔，Git 不轉換換行、不做文字比對，避免圖片被當成文字「修正」而損壞
+- **為什麼用 `.gitattributes` 而不是改電腦的 `core.autocrlf`：** 規則跟著 repo 走，GitHub Actions 與任何人下載 repo 都自動套用；改電腦設定只對這台電腦有效
+
+**指令與結果：**
+
+```
+> git add --renormalize
+Nothing specified, nothing added.
+hint: Maybe you wanted to say 'git add .'?
+
+> git add --renormalize .
+（無輸出）
+
+> git add .gitattributes
+warning: in the working copy of '.gitattributes', CRLF will be replaced by LF the next time Git touches it
+
+> git status
+Changes to be committed:
+        new file:   .gitattributes
+```
+
+**判讀：**
+- **小挫折：** 第一次少打了最後的 `.`（代表「目前資料夾全部」），Git 回「Nothing specified」並提示可能要加 `.`。補上後正常執行
+- `--renormalize .` 沒有產生任何變更：E46 存進版本庫的檔案本來就是 LF，與預期相同 ✅
+- `git status` 只有 `.gitattributes` 一個新檔案 ✅
+- **新發現：** `.gitattributes` 本身是用 CRLF 存的。VS Code 在 Windows 上新建檔案預設用 CRLF（設定 `files.eol` 為 `auto`）。Git 存進版本庫時會轉成 LF，內容不受影響；但之後在 VS Code 新增的每個檔案都會是 CRLF，所以把 `llm-gateway` 設定檔的 `files.eol` 改為 `\n`，從來源統一
+
+**VS Code 設定與 commit（15:30）：**
+- `llm-gateway` 設定檔的「Files: Eol」改為 `\n`（LF）。設定名稱旁顯示「（也在其他地方修改）」，代表同一個設定在其他範圍（例如工作區）也有值；repo 內目前沒有 `.vscode/` 資料夾，待確認是哪裡
+- commit：
+
+```
+> git commit -m "chore: enforce LF line ending"
+[main 858b6a6] chore: enforce LF line ending
+ 1 file changed, 2 insertions(+)
+ create mode 100644 .gitattributes
+
+> git log --oneline
+858b6a6 (HEAD -> main) chore: enforce LF line ending
+59c33f5 chore: initialize project skeleton
+```
+
+- 兩筆 commit，第二筆只有 `.gitattributes` 一個檔案 ✅
+
+**截圖：** `m1-gitattributes-lf.png`、`m1-commit-gitattributes.png`（使用者資料夾名稱與 noreply 地址已遮蔽）、`m1-vscode-files-eol-lf.png`（無需遮蔽）
+
+**步驟 2 狀態：✅ 完成**（`uv init`、D22 結構、`.venv`、兩道 commit 前防線、總檢查、兩筆 commit）
+
+---
+
+## E48. 建立 GitHub repo 並先開安全功能（2026-09-29 15:34～15:37）
+
+**原則：先裝防線，再推程式。** 秘密掃描與推送保護對個人免費帳號只在**公開** repo 提供（私人 repo 需付費的 GitHub Advanced Security）。D21 定案公開，除了作品集，也是為了取得這兩道免費防線
+
+**建立方式：** 新建 `Poyu-Tu/llm-gateway`，Public，**不勾選** README、`.gitignore`、license。本機已有這些檔案，GitHub 端若也建立，兩邊歷史不同源，第一次推送會被拒絕
+
+**介面判讀：** 按鈕顯示的是「可以執行的動作」，不是目前狀態。按鈕寫「Disable」＝目前**開啟**
+
+**Settings → Advanced Security 最終狀態：**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Private vulnerability reporting | ✅ 開啟（本人手動開啟） | 發現漏洞的人可以私下回報，不必在公開 issue 寫出來 |
+| Dependency graph | ✅ 開啟（預設） | 列出專案使用的套件 |
+| Automatic dependency submission | 關閉 | 建置時自動偵測相依套件；本專題有 `uv.lock`，不需要 |
+| Dependabot alerts | ✅ 開啟（預設） | 套件有已知漏洞時通知 |
+| Dependabot malware alerts | ✅ 開啟（本人於 15:40 手動開啟） | 相依套件被偵測為惡意程式時通知。10.3 第 3 點的 litellm 1.82.7、1.82.8 被植入竊取憑證程式，正是這類情況 |
+| Dependabot security updates | ✅ 開啟 | 有修補版本時自動發 PR |
+| Grouped security updates | 關閉 | 把多個修補合成一個 PR；專案小，暫不需要 |
+| Dependabot version updates | 關閉 | 需要 `dependabot.yml`；D19 採鎖版本策略，一般版本更新的 PR 會製造雜訊，M6 建 CI 時再評估 |
+| CodeQL analysis | 未設定 | 程式碼靜態掃描。repo 目前沒有程式碼，等有 Python 程式後再評估（公開 repo 免費） |
+| AI Scan for pull requests | 關閉 | 預覽功能，不使用 |
+| Copilot Autofix | 開啟（預設） | 需搭配 CodeQL 才有作用，目前無效果；與「程式碼自己寫」原則有關，CodeQL 定案時一併決定 |
+| **Secret Protection** | ✅ **開啟** | 掃描 repo 中的金鑰；公開 repo 偵測到的金鑰也會通知該服務商（例如 OpenAI）讓對方撤銷 |
+| **Push protection** | ✅ **開啟** | 推送時發現支援格式的金鑰，直接擋下 |
+
+**截圖：** `m1-github-advanced-security-1.png`（大頭貼已遮蔽）、`m1-github-advanced-security-2.png`、`m1-github-advanced-security-3.png`、`m1-github-malware-alerts.png`（無需遮蔽）
+
+**截圖處理的失誤：** 第一次遮蔽大頭貼時，以畫面顯示的尺寸估算座標，但原始截圖解析度約為 1.4 倍，灰色方塊畫在錯的位置、沒有遮到，就回傳了。發現後重新遮蔽並回傳更正版。之後遮蔽一律以原始解析度計算，並放大確認後再回傳
+
+---
+
 ## 待決（尚未定案）
 
 | 項目 | 目前的建議 | 何時定 |
