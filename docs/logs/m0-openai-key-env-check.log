@@ -1,0 +1,11 @@
+# M0 OpenAI 金鑰寫入 .env 後的驗證（2026-09-26，第二台電腦）
+# 只印出前綴與長度，不印出金鑰本體；金鑰從 .env 讀進變數，未出現在指令列
+
+PS C:\Users\<user>> notepad C:\Users\<user>\llm-gateway\scripts\litellm-lab\.env
+PS C:\Users\<user>> cd C:\Users\<user>\llm-gateway\scripts\litellm-lab\
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $ok = (gc .env) -match '^OPENAI_API_KEY=' -replace '^OPENAI_API_KEY=',''
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $ok = $ok[0]
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $ok.Substring(0,11); $ok.Length
+
+sk-svcacct-
+167

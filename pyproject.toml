@@ -1,0 +1,10 @@
+[project]
+name = "llm-gateway"
+version = "0.1.0"
+description = "Enterprise LLM Gateway with cost governance"
+readme = "README.md"
+authors = [
+    { name = "Terry" }
+]
+requires-python = ">=3.12"
+dependencies = []

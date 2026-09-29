@@ -1,0 +1,31 @@
+# M0.5 觀察 4 A 段：把 gpt-6-luna 加進 LiteLLM，不填單價（2026-09-26 17:11，第二台電腦）
+# 管理金鑰從 .env 讀進變數 $mk，未出現在指令列
+# api_key 填的是環境變數參照 "os.environ/OPENAI_API_KEY"，不是金鑰本體
+
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $mk = (gc .env) -match '^LITELLM_MASTER_KEY=' -replace '^LITELLM_MASTER_KEY=',''
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $mk = $mk[0]
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $mh = @{Authorization="Bearer $mk"}
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $m = '{"model_name":"gpt-6-luna","litellm_params":{"model":"openai/gpt-6-luna","api_key":"os.environ/OPENAI_API_KEY"}}'
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> irm http://127.0.0.1:4000/model/new -Method Post -Headers $mh -ContentType application/json -Body $m
+
+
+model_id       : de259380-5cd0-4789-ad14-1b3f9e72f7ec
+model_name     : gpt-6-luna
+litellm_params : @{model=jfB8_6G9qlQOYc9W39MZO9Gf6tNiXIzoZv7716yL12IfN02zsMzfN62m
+                 BDy-g5Kc0LKZqquJrwXs; api_key=6gz4Av37obImZ-QirQ4arSGXwTWDh_On05
+                 vUteSmiR9YP5IIOS_WUOtKDbcHxezS_iXpkXbctNbn-inr3OtRHu0=; use_xai_
+                 oauth=False; use_litellm_proxy=False; use_in_pass_through=False;
+                  allow_client_keepalive_override=False; merge_reasoning_content_
+                 in_choices=False}
+model_info     : @{id=de259380-5cd0-4789-ad14-1b3f9e72f7ec; db_model=False}
+blocked        : False
+created_at     : 2026-09-26T09:11:47.768000Z
+created_by     : default_user_id
+updated_at     : 2026-09-26T09:11:47.768000Z
+updated_by     : default_user_id
+
+# 判讀：
+# - 回應中沒有 sk- 金鑰
+# - litellm_params 的 model、api_key 都回傳為密文（以 LITELLM_SALT_KEY 加密後存入資料庫）
+#   連不是機密的模型名稱 "openai/gpt-6-luna"、環境變數參照 "os.environ/OPENAI_API_KEY" 都一起加密
+# - 上面兩串密文解開後只是模型名稱與「指路文字」，不含金鑰，因此保留原樣

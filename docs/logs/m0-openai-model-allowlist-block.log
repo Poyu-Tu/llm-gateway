@@ -1,0 +1,17 @@
+# M0 反向測試：Project 模型白名單是否真的擋下（2026-09-26 17:00，第二台電腦）
+# Project 只允許 gpt-6-luna、gpt-6-sol（見 s21-part1-allowed-models.png）
+# 改呼叫不在白名單的 gpt-6-astra（每百萬 token 輸入 $10 / 輸出 $50）
+# Project ID 已遮蔽，保留前綴 proj_
+
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $b2 = $b -replace 'gpt-6-luna','gpt-6-astra'
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> try { irm https://api.openai.com/v1/chat/completions -Method Post -Headers $h -ContentType application/json -Body $b2 } catch { $_.ErrorDetails.Message }
+{
+    "error": {
+        "message": "Project `proj_XXXXXXXXXXXXXXXXXXXXXXXX` does not have access to model `gpt-6-astra`",
+        "type": "invalid_request_error",
+        "param": null,
+        "code": "model_not_found"
+    }
+}
+
+# 判讀：白名單生效，請求在 OpenAI 端被擋下，未產生費用

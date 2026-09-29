@@ -1,0 +1,31 @@
+# M0.5 觀察 4 A 段：直接查 PostgreSQL，確認沒標價模型的花費（2026-09-26 17:32，第二台電腦）
+# 呼叫時間 17:29:53（台北）；查詢時距呼叫約 2 分鐘
+
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> docker compose exec db psql -U llmproxy -d litellm -c 'SELECT spend, max_budget, models FROM \"LiteLLM_VerificationToken\";'
+ spend | max_budget |    models
+-------+------------+--------------
+     0 |          0 | {}
+     0 |       0.01 | {gpt-6-luna}
+(2 rows)
+
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> docker compose exec db psql -U llmproxy -d litellm -c 'SELECT model, spend, total_tokens, \"startTime\" FROM \"LiteLLM_SpendLogs\";'
+       model       | spend | total_tokens |        startTime
+-------------------+-------+--------------+-------------------------
+ gpt-test          |     0 |            0 | 2026-09-25 05:33:53.268
+ unknown-model     |     0 |            0 | 2026-09-25 05:34:04.362
+ gpt-test          |     0 |            0 | 2026-09-25 05:48:40.764
+ gpt-test          |     0 |            0 | 2026-09-25 05:49:50.719
+ gpt-test          |     0 |            0 | 2026-09-25 05:54:50.136
+ gpt-test          |     0 |            0 | 2026-09-25 05:55:00.042
+ gpt-test          |     0 |            0 | 2026-09-25 05:56:26.639
+ gpt-test          |     0 |            0 | 2026-09-25 05:56:31.456
+ openai/gpt-6-luna |     0 |           23 | 2026-09-26 09:29:50.622
+(9 rows)
+
+# 判讀：
+# - SpendLogs 最後一列：total_tokens 23（與 OpenAI 回傳 usage 一致），spend 0
+# - 虛擬金鑰（max_budget 0.01）累計 spend 仍為 0 → 這把金鑰可以無限呼叫，預算永遠不會觸發
+# - LiteLLM「知道用了多少 token，卻不知道值多少錢」；用戶端、回應標頭都沒有任何錯誤或警告
+# - 附帶觀察 1：9/25 用 gpt-test 探針被擋下的請求也記進了 SpendLogs（失敗請求同樣留紀錄）
+# - 附帶觀察 2：startTime 以 UTC 儲存（09:29:50 = 台北 17:29:50）
+# - 附帶觀察 3：紀錄的 model 是底層的 openai/gpt-6-luna，不是對外名稱 gpt-6-luna

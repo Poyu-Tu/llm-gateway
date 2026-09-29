@@ -1,0 +1,23 @@
+# M0.5 第 5c～6 步：恢復正常網路 + 待機記憶體（觀察 2）
+# 日期：2026-09-25
+# 主設定已加入 LITELLM_LOCAL_MODEL_COST_MAP: "True"（E13 強化第 7 項）
+
+## 5c 恢復正常網路（只用主設定）
+> docker compose down
+ ✔ Container litellm-lab-litellm-1 Removed   2.6s
+ ✔ Container litellm-lab-db-1      Removed   0.2s
+ ✔ Network litellm-lab_default     Removed   0.2s
+> docker compose up -d
+ ✔ Network litellm-lab_default     Created   0.0s
+ ✔ Container litellm-lab-db-1      Healthy   5.9s
+ ✔ Container litellm-lab-litellm-1 Started   6.0s
+> curl.exe -sS http://127.0.0.1:4000/health/liveliness
+"I'm alive!"
+
+## 6 待機記憶體（無任何請求）
+> docker stats --no-stream
+NAME                   CPU %   MEM USAGE / LIMIT     MEM %   BLOCK I/O          PIDS
+litellm-lab-litellm-1  0.15%   584MiB / 7.567GiB     7.54%   311MB / 48.3MB     22
+litellm-lab-db-1       0.72%   34.46MiB / 7.567GiB   0.44%   24.9MB / 586kB     10
+（同時執行的其他無關專案容器已從截圖裁掉；LIMIT 7.567GiB 為 Docker Desktop 的 WSL 虛擬機可用記憶體）
+（截圖：s20-litellm-memory.png）

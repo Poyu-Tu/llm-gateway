@@ -1,0 +1,8 @@
+services:
+  litellm:
+    environment:
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+
+networks:
+  default:
+    internal: true

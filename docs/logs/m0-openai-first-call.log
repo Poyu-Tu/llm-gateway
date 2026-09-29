@@ -1,0 +1,45 @@
+# M0 收尾：第一次成功呼叫 OpenAI（2026-09-26 16:57，第二台電腦，Windows PowerShell 5.1）
+# 金鑰只存在變數 $ok / $h 中，未出現在指令列；本日誌無任何金鑰內容
+# 模型 gpt-6-luna（便宜模型），reasoning_effort=none，max_completion_tokens=50
+
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $h = @{Authorization="Bearer $ok"}
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $b = '{"model":"gpt-6-luna","reasoning_effort":"none","max_completion_tokens":50,"messages":[{"role":"user","content":"Say hi in 5 words."}]}'
+
+# --- 第一次：網址打錯（completion 少了 s）---
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $r = irm https://api.openai.com/v1/chat/completion -Method Post -Headers $h -ContentType application/json -Body $b
+irm : 遠端伺服器傳回一個錯誤: (404) 找不到。
+位於 線路:1 字元:6
++ $r = irm https://api.openai.com/v1/chat/completion -Method Post -Head ...
++      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (System.Net.HttpWebRequest:HttpW
+   ebRequest) [Invoke-RestMethod]，WebException
+    + FullyQualifiedErrorId : WebCmdletWebResponseException,Microsoft.PowerShell
+   .Commands.InvokeRestMethodCommand
+
+# --- 第二次：修正網址後成功 ---
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $r = irm https://api.openai.com/v1/chat/completions -Method Post -Headers $h -ContentType application/json -Body $b
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $r.model; $r.choices[0].message.content
+gpt-6-luna
+Hi there, how are you today?
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $r.usage | ConvertTo-Json
+{
+    "prompt_tokens":  13,
+    "completion_tokens":  11,
+    "total_tokens":  24,
+    "prompt_tokens_details":  {
+                                  "cached_tokens":  0,
+                                  "cache_write_tokens":  0,
+                                  "audio_tokens":  0
+                              },
+    "completion_tokens_details":  {
+                                      "reasoning_tokens":  0,
+                                      "audio_tokens":  0,
+                                      "accepted_prediction_tokens":  0,
+                                      "rejected_prediction_tokens":  0
+                                  }
+}
+
+# --- 成本換算（gpt-6-luna：輸入 $0.10、輸出 $0.50 / 百萬 token）---
+# 輸入 13 × 0.10 / 1,000,000 = $0.0000013
+# 輸出 11 × 0.50 / 1,000,000 = $0.0000055
+# 合計 $0.0000068 = 6.8 micro-USD（D1 以 micro-USD 整數儲存 → 需決定進位規則）

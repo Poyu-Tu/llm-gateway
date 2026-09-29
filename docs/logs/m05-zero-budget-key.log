@@ -1,0 +1,34 @@
+# M0.5 第 7 步：預算 0 的虛擬金鑰（S19 後半）
+# 日期：2026-09-25
+# 方法：用「不存在的模型 gpt-test」當探針，從錯誤訊息判斷檢查順序；不需要任何模型供應商金鑰
+# 遮蔽：錯誤訊息中虛擬金鑰的末 4 碼以 XXXX 取代；管理金鑰與虛擬金鑰全程未印出
+
+## 7-1 從 .env 讀出管理金鑰（指令中不含密碼）
+> $mk = ((gc .env) -match '^LITELLM_MASTER_KEY=') -replace '^LITELLM_MASTER_KEY=',''
+> $mk.Length
+1                      ← -match 作用在陣列上，結果仍是陣列（1 個元素），不是字串
+> $mk = $mk[0]
+> $mk.Length
+35                     ← sk- 3 字 + 32 字亂數，正確
+
+## 7-2 發一把 max_budget = 0 的虛擬金鑰
+> $h = @{Authorization = "Bearer $mk"}
+> $r = irm -Method Post -Uri http://127.0.0.1:4000/key/generate -Headers $h -ContentType application/json -Body '{"max_budget":0,"key_alias":"m05-zero-budget"}'
+> $vk = $r.key
+> $r.key_alias; $r.max_budget
+m05-zero-budget
+0.0
+
+## 7-3 實驗組：0 元虛擬金鑰呼叫不存在的模型
+> irm ... -Headers $vh ... -Body '{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}'
+{"error":{"message":"Budget has been exceeded! Key=m05-zero-budget (sk-...XXXX) Current cost: 0.0, Max budget: 0.0","type":"budget_exceeded","param":null,"code":"429"}}
+
+## 7-4 對照組：管理金鑰呼叫同一個不存在的模型
+> irm ... -Headers $h ... -Body '{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}'
+{"error":{"message":"/chat/completions: Invalid model name passed in model=gpt-test. Call `/v1/models` to view available models for your key.","type":"invalid_request_error","param":null,"code":"400", ...}}
+
+## 判讀
+- 預算檢查排在模型檢查之前：0 元金鑰連「模型存不存在」都還沒查就被擋
+- max_budget = 0 被當成嚴格上限（花費 0 ≥ 上限 0 → 擋），沒有被誤當成「無上限」
+- 管理金鑰不受預算限制，只會走到模型檢查 → 兩組差異來自預算
+- 預算超出的回應 code 為 429（type: budget_exceeded）

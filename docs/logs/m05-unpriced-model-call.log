@@ -1,0 +1,34 @@
+# M0.5 觀察 4 A 段：用內建價格表沒有的 gpt-6-luna 透過 LiteLLM 呼叫（2026-09-26 17:29，第二台電腦）
+# 虛擬金鑰：max_budget 0.01、只允許 gpt-6-luna；金鑰只存在變數 $k，未印出
+
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $k = irm http://127.0.0.1:4000/key/generate -Method Post -Headers $mh -ContentType application/json -Body '{"max_budget":0.01,"models":["gpt-6-luna"]}'
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $vh = @{Authorization="Bearer $($k.key)"}
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $b = '{"model":"gpt-6-luna","reasoning_effort":"none","max_completion_tokens":50,"messages":[{"role":"user","content":"Say hi in 5 words."}]}'
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $w = iwr http://127.0.0.1:4000/v1/chat/completions -Method Post -Headers $vh -ContentType application/json -Body $b -UseBasicParsing
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> (Get-Date).ToString('HH:mm:ss')
+
+17:29:53
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $w.Headers['x-litellm-response-cost']
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> ($w.Content | ConvertFrom-Json).usage | ConvertTo-Json
+{
+    "completion_tokens":  10,
+    "prompt_tokens":  13,
+    "total_tokens":  23,
+    "completion_tokens_details":  {
+                                      "accepted_prediction_tokens":  0,
+                                      "audio_tokens":  0,
+                                      "reasoning_tokens":  0,
+                                      "rejected_prediction_tokens":  0
+                                  },
+    "prompt_tokens_details":  {
+                                  "audio_tokens":  0,
+                                  "cached_tokens":  0,
+                                  "cache_write_tokens":  0,
+                                  "cache_creation_tokens":  0
+                              }
+}
+
+# 判讀：
+# - 呼叫成功、實際用了 23 token（依官方單價應為約 $0.0000063）
+# - 回應標頭 x-litellm-response-cost 沒有值 → LiteLLM 沒有為這次呼叫算出費用
+# - 呼叫本身沒有任何錯誤或警告回給用戶端

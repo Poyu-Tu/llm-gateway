@@ -1,0 +1,32 @@
+# M0.5 第 8 步：執行中資料庫斷線（觀察 1，情境 A：有設資料庫但連不上）
+# 日期：2026-09-25
+# 探針：不存在的模型 gpt-test（回 Invalid model name = 身分與預算檢查已放行）
+# 金鑰：$vh = 預算 0 的虛擬金鑰（E17）；$fh = 不存在的假金鑰 sk-fake-1234
+# 遮蔽：虛擬金鑰末 4 碼以 XXXX 取代
+
+## 8-1 關閉資料庫（LiteLLM 持續執行）
+> docker compose stop db
+ ✔ Container litellm-lab-db-1 Stopped   0.2s
+
+## 8-2 立刻測試
+[$vh] {"error":{"message":"Service Unavailable, the authentication database is temporarily unreachable. Please retry shortly.","type":"no_db_connection","param":"None","code":"503"}}
+[$fh] {"error":{"message":"Service Unavailable, the authentication database is temporarily unreachable. Please retry shortly.","type":"no_db_connection","param":"None","code":"503"}}
+
+## 8-3 等 120 秒後再測（截圖：m05-db-down-503.png）
+> Start-Sleep 120
+[$vh] 同上，503 no_db_connection
+[$fh] 同上，503 no_db_connection
+
+## 8-4 恢復資料庫（LiteLLM 未重啟）
+> docker compose start db
+ ✔ Container litellm-lab-db-1 Started   0.2s
+> Start-Sleep 15
+
+## 8-5 恢復後再測（截圖：m05-db-recovered.png）
+[$vh] {"error":{"message":"Budget has been exceeded! Key=m05-zero-budget (sk-...XXXX) Current cost: 0.0, Max budget: 0.0","type":"budget_exceeded","param":null,"code":"429"}}
+[$fh] {"error":{"message":"Authentication Error, Invalid proxy server token passed. Received API Key = sk-..., Key Hash (Token) =c57606c78f0fb967be7444793e622b24b89f1f7b37eee370f40568ae57cba90b. Unable to find token in cache or `LiteLLM_VerificationTokenTable`","type":"token_not_found_in_db","param":"key","code":"401"}}
+
+## 判讀
+- 斷線期間兩把金鑰一律 503，2 分鐘後仍是 503：fail-closed（LiteLLM v1.102.0 預設行為）
+- 資料庫恢復後不需重啟 LiteLLM，行為自動回到正常（自我恢復）
+- 假金鑰回傳的 Key Hash 經本機計算等於 SHA-256("sk-fake-1234")：LiteLLM 以未加鹽 SHA-256 存放金鑰雜湊，與本案 api_keys 表的設計相同

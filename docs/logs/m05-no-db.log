@@ -1,0 +1,36 @@
+# M0.5 第 8b 步：根本沒設資料庫（觀察 1，情境 B）
+# 日期：2026-09-25
+# 條件：nodb-compose.yml：沒有 db 服務、沒有 DATABASE_URL、埠 127.0.0.1:4001；其餘同主設定
+# 敏感資訊檢查：未出現密碼或金鑰
+
+## 8b-2 啟動與日誌（ASCII 標誌略）
+> docker compose -f .\nodb-compose.yml up -d
+ ✔ Network litellm-nodb_default     Created   0.0s
+ ✔ Container litellm-nodb-litellm-1 Started   0.2s
+> docker compose -f .\nodb-compose.yml logs litellm
+litellm-1  | INFO:     Started server process [1]
+litellm-1  | INFO:     Waiting for application startup.
+litellm-1  | INFO:     Application startup complete.
+litellm-1  | INFO:     Uvicorn running on http://0.0.0.0:4000 (Press CTRL+C to quit)
+（與有資料庫時相比：沒有 Prisma 準備、沒有資料表更新、沒有 query-engine，也沒有任何「預算功能不可用」的警告）
+
+## 8b-3 管理金鑰呼叫探針
+> irm -Method Post -Uri http://127.0.0.1:4001/chat/completions -Headers $h ... '{"model":"gpt-test",...}'
+{"error":{"message":"/chat/completions: Invalid model name passed in model=gpt-test. ...","type":"invalid_request_error","param":null,"code":"400"}}
+（身分檢查通過，走到模型檢查）
+
+## 8b-3 管理金鑰發一把預算 0 的虛擬金鑰
+> irm -Method Post -Uri http://127.0.0.1:4001/key/generate -Headers $h ... '{"max_budget":0}'
+{"error":{"message":"{'error': 'DB not connected. This endpoint needs a database; set DATABASE_URL to a PostgreSQL connection string (postgresql://...) to enable it. See https://docs.litellm.ai/docs/proxy/virtual_keys'}","type":"internal_server_error","param":null,"code":"500"}}
+
+## 8b-3 記憶體（無資料庫）
+> docker stats --no-stream litellm-nodb-litellm-1
+NAME                     CPU %   MEM USAGE / LIMIT     MEM %   NET I/O          BLOCK I/O        PIDS
+litellm-nodb-litellm-1   0.16%   473.5MiB / 7.567GiB   6.11%   3.2kB / 2.03kB   129MB / 42.3MB   6
+（對照有資料庫：584 MiB、PIDS 22，見 m05-memory-idle.log）
+
+## 判讀
+- 沒有資料庫就無法發虛擬金鑰（500 DB not connected）→ 沒有每人預算，只剩管理金鑰
+- 要讓應用程式使用，只能把管理金鑰發出去 = 把 root 權限交給每個應用程式
+- 服務照常啟動、健康檢查會過，日誌沒有任何警告：「安靜地降級」
+- 資料庫相關功能約占 110 MiB（584 → 473.5）；無資料庫時仍達 512 MiB 的 92%，沒有餘裕

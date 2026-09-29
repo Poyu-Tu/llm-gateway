@@ -1,0 +1,45 @@
+# M0.5 第 5 步：斷網實驗（觀察 3）
+# 日期：2026-09-25（容器時間為 UTC）
+# 條件：egress-test.yml 將 default 網路設為 internal: true（沒有對外出口）
+# 映像：ghcr.io/berriai/litellm-database:v1.102.0@sha256:70e3754699d2c5e969c65445e3b52cf58cf7998a815f2cb3551776152bbffaaf
+# 敏感資訊檢查：未出現密碼或金鑰
+
+## 5-1 對照組（一般網路）：從容器連 http://github.com
+> docker compose exec litellm python3 -c "import urllib.request as u;u.urlopen('http://github.com',timeout=5)"
+（無輸出 = 連線成功；見 m05-egress-test-up.png）
+
+## 5-3 切換為斷網設定
+> docker compose down
+> docker compose -f docker-compose.yml -f egress-test.yml up -d
+（見 m05-egress-test-up.png）
+
+## 5-4 斷網後的啟動日誌（節錄，ASCII 標誌略）
+litellm-1  | 04:54:37 - LiteLLM:WARNING: get_model_cost_map.py:300 - LiteLLM: model cost map fetch attempt 1/3 failed (ConnectError fetching https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: [Errno -3] Temporary failure in name resolution); retrying in 2.9s
+litellm-1  | 04:54:37 - LiteLLM:WARNING: get_model_cost_map.py:655 - LiteLLM: Failed to fetch remote model cost map from https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: ConnectError fetching https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: [Errno -3] Temporary failure in name resolution. Falling back to local backup.
+litellm-1  | 04:54:40 - LiteLLM:WARNING: get_model_cost_map.py:300 - LiteLLM: model cost map fetch attempt 2/3 failed (ConnectError fetching https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: [Errno -3] Temporary failure in name resolution); retrying in 4.0s
+litellm-1  | 04:54:44 - LiteLLM:WARNING: get_model_cost_map.py:576 - LiteLLM: Failed to fetch remote model cost map from https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json after 3 attempts; keeping local backup
+litellm-1  | 2026-09-25 04:54:47,354 - litellm_proxy_extras - INFO - Using custom Prisma CLI at /opt/prisma/binaries/node_modules/.bin/prisma
+litellm-1  | 2026-09-25 04:54:47,355 - litellm_proxy_extras - INFO - Preparing the Prisma CLI toolchain (timeout 600.0s)
+litellm-1  | 2026-09-25 04:54:47,873 - litellm_proxy_extras - INFO - Prisma CLI toolchain ready
+litellm-1  | 2026-09-25 04:54:47,873 - litellm_proxy_extras - INFO - Running prisma migrate deploy
+litellm-1  | 2026-09-25 04:54:48,320 - litellm_proxy_extras - INFO - prisma migrate deploy stdout: Prisma schema loaded from schema.prisma
+litellm-1  | Datasource "client": PostgreSQL database "litellm", schema "public" at "db:5432"
+litellm-1  | 171 migrations found in prisma/migrations
+litellm-1  | No pending migrations to apply.
+litellm-1  | 2026-09-25 04:54:48,320 - litellm_proxy_extras - INFO - prisma migrate deploy completed
+litellm-1  | 2026-09-25 04:54:48,320 - litellm_proxy_extras - INFO - No pending migrations — skipping post-migration sanity check
+litellm-1  | INFO:     Started server process [1]
+litellm-1  | INFO:     Waiting for application startup.
+litellm-1  | query-engine ac9d7041ed77bcc8a8dbd2ab6616b39013829574
+litellm-1  | INFO:     Application startup complete.
+litellm-1  | INFO:     Uvicorn running on http://0.0.0.0:4000 (Press CTRL+C to quit)
+
+## 5-5 控制檢查（斷網）：同一指令
+> docker compose exec litellm python3 -c "import urllib.request as u;u.urlopen('http://github.com',timeout=5)"
+socket.gaierror: [Errno -3] Temporary failure in name resolution
+urllib.error.URLError: <urlopen error [Errno -3] Temporary failure in name resolution>
+（完整 traceback 略；斷網確實生效）
+
+## 5-6 本機健康檢查（斷網）
+> curl.exe -s http://127.0.0.1:4000/health/liveliness
+（無回應；一般網路下回應為 "I'm alive!"）

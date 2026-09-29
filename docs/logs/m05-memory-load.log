@@ -1,0 +1,35 @@
+# M0.5 觀察 2 補測：輕度負載下的 LiteLLM 記憶體（2026-09-26 17:44，第二台電腦）
+# 方法：背景工作連續呼叫 gpt-6-luna 30 次（一次一個，非併發），前景每 3 秒量一次記憶體，共 10 次
+# 注意：LiteLLM 容器於 17:40 被 kill 後重新啟動，本次為重啟約 3 分鐘後的狀態
+
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $j = Start-Job { 1..30 | % { iwr http://127.0.0.1:4000/v1/chat/completions -Method Post -Headers $using:vh -ContentType application/json -Body $using:b -UseBasicParsing | Out-Null } }
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> 1..10 | % { docker stats --no-stream --format "{{.Name}} {{.MemUsage}}" litellm-lab-litellm-1; sleep 3 }
+litellm-lab-litellm-1 574.2MiB / 7.567GiB
+litellm-lab-litellm-1 575.6MiB / 7.567GiB
+litellm-lab-litellm-1 575.9MiB / 7.567GiB
+litellm-lab-litellm-1 576.1MiB / 7.567GiB
+litellm-lab-litellm-1 577.8MiB / 7.567GiB
+litellm-lab-litellm-1 577.8MiB / 7.567GiB
+litellm-lab-litellm-1 577.8MiB / 7.567GiB
+litellm-lab-litellm-1 578.3MiB / 7.567GiB
+litellm-lab-litellm-1 578.3MiB / 7.567GiB
+litellm-lab-litellm-1 578.3MiB / 7.567GiB
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> Receive-Job $j -Wait
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab>
+
+# 判讀：
+# - 輕度負載下 574.2 → 578.3 MiB，30 秒內只增加約 4 MiB，趨於平穩
+# - 與待機值 584 MiB（E16，當時為首次啟動後約 1 分鐘）同一量級 → 記憶體主要是「啟動就佔用」，不是隨請求成長
+# - 仍高於本案 Fargate 規格 512 MiB（0.5 GB），結論不變：LiteLLM 至少需要 1 GB
+# - Receive-Job 無輸出 → 30 次呼叫都沒有錯誤
+#
+# 限制（誠實記錄）：一次一個的連續呼叫，屬輕度負載；多人同時使用的併發負載未測
+
+# --- 收尾查帳（2026-09-26 17:49）：30 次呼叫是否全部記到 ---
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> docker compose exec db psql -U llmproxy -d litellm -tAc 'SELECT (SELECT spend FROM \"LiteLLM_VerificationToken\" WHERE max_budget=0.01), (SELECT count(*) FROM \"LiteLLM_SpendLogs\")'
+0.00020429999999999998|40
+
+# 判讀：
+# - 筆數 10 → 40，30 次全部寫入（正常運作、沒有當機時，批次寫入不會掉帳）
+# - 累計花費 0.0002043（實際應為 0.0002043），再次出現浮點數尾差 ...29999999999998
+# - 30 次平均約 $0.0000066，與單次 $0.0000063～0.0000068 一致（輸出 10～11 token 的差異）

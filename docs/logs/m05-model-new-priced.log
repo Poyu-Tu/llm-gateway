@@ -1,0 +1,34 @@
+# M0.5 觀察 4 B 段：刪除無單價的 gpt-6-luna，重新加入並手動填單價（2026-09-26 17:35，第二台電腦）
+# 單價換算（OpenAI 官方，每百萬 token）：輸入 $0.10 → 1e-7 / token；輸出 $0.50 → 5e-7 / token
+
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> irm http://127.0.0.1:4000/model/delete -Method Post -Headers $mh -ContentType application/json -Body '{"id":"de259380-5cd0-4789-ad14-1b3f9e72f7ec"}'
+
+message
+-------
+Model: de259380-5cd0-4789-ad14-1b3f9e72f7ec deleted successfully
+
+
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> $m = '{"model_name":"gpt-6-luna","litellm_params":{"model":"openai/gpt-6-luna","api_key":"os.environ/OPENAI_API_KEY","input_cost_per_token":1e-7,"output_cost_per_token":5e-7}}'
+PS C:\Users\<user>\llm-gateway\scripts\litellm-lab> irm http://127.0.0.1:4000/model/new -Method Post -Headers $mh -ContentType application/json -Body $m
+
+
+model_id       : 70562c57-616f-4f6d-9d74-a2507eae5d4b
+model_name     : gpt-6-luna
+litellm_params : @{model=arv828KP3uMPRmGAp2Tx-Amgaa8EGUEqiTUYgcUDVXCA5dxiYIiVcikM
+                 KoN4G0C0ck_zVa3Csud_; api_key=lHOsM7Rm1s1PgBHqFg7ktQQiXYgOK9gsFP
+                 JU_1Gq6WWrqZZMxNKWKrMif0llDskDs9DRKu6JBB4c9vMXzE2RjpQ=; use_xai_
+                 oauth=False; use_litellm_proxy=False; use_in_pass_through=False;
+                  input_cost_per_token=1E-07; output_cost_per_token=5E-07; allow_
+                 client_keepalive_override=False; merge_reasoning_content_in_choi
+                 ces=False}
+model_info     : @{id=70562c57-616f-4f6d-9d74-a2507eae5d4b; db_model=False}
+blocked        : False
+created_at     : 2026-09-26T09:34:56.799000Z
+created_by     : default_user_id
+updated_at     : 2026-09-26T09:34:56.799000Z
+updated_by     : default_user_id
+
+# 判讀：
+# - 單價以明文存放（1E-07 / 5E-07）；只有字串型參數（model、api_key）被加密
+# - 同樣的明文 "openai/gpt-6-luna" 兩次加密出的密文不同（jfB8... vs arv8...）
+#   → 每次加密使用隨機值，無法從密文比對出「兩筆設定是同一個模型」

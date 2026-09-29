@@ -1,0 +1,49 @@
+# M0.5 第 4 步：LiteLLM 首次啟動日誌（節錄）
+# 來源：docker compose logs litellm，2026-09-25（容器時間為 UTC）
+# 映像：ghcr.io/berriai/litellm-database:v1.102.0@sha256:70e3754699d2c5e969c65445e3b52cf58cf7998a815f2cb3551776152bbffaaf
+# 節錄說明：中間 171 筆 migration 清單與重複的目錄樹已省略，其餘原樣保留
+# 敏感資訊檢查：日誌中未出現資料庫密碼、LITELLM_MASTER_KEY、LITELLM_SALT_KEY
+
+litellm-1  | 2026-09-25 04:36:06,181 - litellm_proxy_extras - INFO - Using custom Prisma CLI at /opt/prisma/binaries/node_modules/.bin/prisma
+litellm-1  | 2026-09-25 04:36:06,182 - litellm_proxy_extras - INFO - Preparing the Prisma CLI toolchain (timeout 600.0s)
+litellm-1  | 2026-09-25 04:36:07,094 - litellm_proxy_extras - INFO - Prisma CLI toolchain ready
+litellm-1  | 2026-09-25 04:36:07,095 - litellm_proxy_extras - INFO - Running prisma migrate deploy
+litellm-1  | 2026-09-25 04:36:07,095 - litellm_proxy_extras - INFO - Using custom Prisma CLI at /opt/prisma/binaries/node_modules/.bin/prisma
+litellm-1  | 2026-09-25 04:36:10,480 - litellm_proxy_extras - INFO - prisma migrate deploy stdout: Prisma schema loaded from schema.prisma
+litellm-1  | Datasource "client": PostgreSQL database "litellm", schema "public" at "db:5432"
+litellm-1  |
+litellm-1  | 171 migrations found in prisma/migrations
+litellm-1  |
+litellm-1  | Applying migration `20250326162113_baseline`
+litellm-1  | Applying migration `20250326171002_add_daily_user_table`
+litellm-1  | ...（中略，共 171 筆）...
+litellm-1  | Applying migration `20260228110000_mcp_default_public_internet_true`
+litellm-1  | ...（中略）...
+litellm-1  | Applying migration `20260910000000_add_autorouter_session_baseline_models`
+litellm-1  | Applying migration `20260910000000_skills_on_object_permission`
+litellm-1  |
+litellm-1  | The following migrations have been applied:
+litellm-1  | ...（目錄樹略）...
+litellm-1  |
+litellm-1  | All migrations have been successfully applied.
+litellm-1  |
+litellm-1  | 2026-09-25 04:36:10,480 - litellm_proxy_extras - INFO - prisma migrate deploy completed
+litellm-1  | 2026-09-25 04:36:10,480 - litellm_proxy_extras - INFO - Running post-migration sanity check...
+litellm-1  | 2026-09-25 04:36:10,482 - litellm_proxy_extras - INFO - Generating migration diff between DB and schema.prisma...
+litellm-1  | 2026-09-25 04:36:10,482 - litellm_proxy_extras - INFO - Using custom Prisma CLI at /opt/prisma/binaries/node_modules/.bin/prisma
+litellm-1  | 2026-09-25 04:36:11,301 - litellm_proxy_extras - INFO - Migration diff created at /tmp/litellm_migration_diff_mmoc8jvz/migration.sql
+litellm-1  | 2026-09-25 04:36:11,601 - litellm_proxy_extras - INFO - Running prisma db execute to apply the migration diff...
+litellm-1  | 2026-09-25 04:36:11,601 - litellm_proxy_extras - INFO - Using custom Prisma CLI at /opt/prisma/binaries/node_modules/.bin/prisma
+litellm-1  | 2026-09-25 04:36:12,199 - litellm_proxy_extras - INFO - prisma db execute stdout: Script executed successfully.
+litellm-1  |
+litellm-1  | 2026-09-25 04:36:12,199 - litellm_proxy_extras - INFO - ✅ Migration diff applied successfully
+litellm-1  | 2026-09-25 04:36:12,199 - litellm_proxy_extras - INFO - ✅ Post-migration sanity check completed
+litellm-1  | INFO:     Started server process [1]
+litellm-1  | INFO:     Waiting for application startup.
+litellm-1  | LiteLLM Proxy: Using default (v1) migration resolver. If your deployment has seen schema thrashing during rolling deploys, try --use_v2_migration_resolver (safer: avoids the diff-and-force recovery that caused the thrash).
+litellm-1  |
+litellm-1  | （LiteLLM ASCII 標誌略）
+litellm-1  |
+litellm-1  | query-engine ac9d7041ed77bcc8a8dbd2ab6616b39013829574
+litellm-1  | INFO:     Application startup complete.
+litellm-1  | INFO:     Uvicorn running on http://0.0.0.0:4000 (Press CTRL+C to quit)

@@ -1,0 +1,33 @@
+# M0.5 第 5b 步：斷網 + 使用內建價格表（觀察 3 的解法驗證）
+# 日期：2026-09-25（容器時間為 UTC）
+# 條件：egress-test.yml = default 網路 internal: true + LITELLM_LOCAL_MODEL_COST_MAP: "True"
+# 對照：m05-egress-test.log（只有斷網，沒有關閉價格表下載）
+# 敏感資訊檢查：未出現密碼或金鑰
+
+## 5b-2 重新套用（只重建 LiteLLM 容器，網路未變）
+> docker compose -f .\docker-compose.yml -f .\egress-test.yml up -d
+ ✔ Container litellm-lab-db-1      Healthy    3.3s
+ ✔ Container litellm-lab-litellm-1 Started    3.5s
+
+## 5b-3 啟動日誌（ASCII 標誌略）
+## 重點：開頭 4 行 get_model_cost_map WARNING 全部消失，第一行直接是 Prisma
+litellm-1  | 2026-09-25 05:05:06,062 - litellm_proxy_extras - INFO - Using custom Prisma CLI at /opt/prisma/binaries/node_modules/.bin/prisma
+litellm-1  | 2026-09-25 05:05:06,063 - litellm_proxy_extras - INFO - Preparing the Prisma CLI toolchain (timeout 600.0s)
+litellm-1  | 2026-09-25 05:05:06,590 - litellm_proxy_extras - INFO - Prisma CLI toolchain ready
+litellm-1  | 2026-09-25 05:05:06,591 - litellm_proxy_extras - INFO - Running prisma migrate deploy
+litellm-1  | 2026-09-25 05:05:07,030 - litellm_proxy_extras - INFO - prisma migrate deploy stdout: Prisma schema loaded from schema.prisma
+litellm-1  | Datasource "client": PostgreSQL database "litellm", schema "public" at "db:5432"
+litellm-1  | 171 migrations found in prisma/migrations
+litellm-1  | No pending migrations to apply.
+litellm-1  | 2026-09-25 05:05:07,031 - litellm_proxy_extras - INFO - prisma migrate deploy completed
+litellm-1  | 2026-09-25 05:05:07,031 - litellm_proxy_extras - INFO - No pending migrations — skipping post-migration sanity check
+litellm-1  | INFO:     Started server process [1]
+litellm-1  | INFO:     Waiting for application startup.
+litellm-1  | query-engine ac9d7041ed77bcc8a8dbd2ab6616b39013829574
+litellm-1  | INFO:     Application startup complete.
+litellm-1  | INFO:     Uvicorn running on http://0.0.0.0:4000 (Press CTRL+C to quit)
+
+## 5b-4 本機健康檢查（斷網）
+> curl.exe -sS http://127.0.0.1:4000/health/liveliness
+curl: (7) Failed to connect to 127.0.0.1:4000 after 2056 ms: Could not connect to server
+（internal 網路沒有通往主機的閘道，埠對應一併失效：完全斷網 = 出不去也進不來）
