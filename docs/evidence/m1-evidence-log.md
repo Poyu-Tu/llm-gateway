@@ -871,7 +871,268 @@ c9b093b (HEAD -> main, origin/main) docs: update M1 evidence log and screenshots
 
 **截圖：** `m1-force-push-blocked.png`（使用者資料夾名稱已遮蔽）
 
+**收尾推送（15:58）：** `git commit -m "docs: record GitHub setup and ruleset test"` → `570792c`（5 個檔案），`git push` 成功；第一次推送時用了 `-u`，這次只需 `git push`（`m1-push-docs.png`）
+
 **步驟 3 狀態：✅ 完成**（公開 repo、Advanced Security 各項防線、noreply Email、第一次推送、`main` 規則集與實測）
+
+---
+
+## E51. 冷卻期與安裝第一批套件（2026-09-30 18:41）
+
+**冷卻期設定：** 本人在 `pyproject.toml` 加上
+
+```toml
+[tool.uv]
+exclude-newer = "2026-09-27T00:00:00Z"
+```
+
+- 把 D27「上架滿 3 天」的冷卻期規則，從 LiteLLM 映像擴大到**所有 Python 套件**。起因是 10.3 第 3 點：litellm 1.82.7、1.82.8 在 PyPI 上架數小時內就被下載，裡面藏有竊取憑證的程式
+- 日期寫死而非自動滾動：每次放寬都要手動改日期並 commit，版本變更可以追查，與 D30「單價放 repo，變更 = 經過審查的版本變更」同一個思路
+
+**指令與結果：**
+
+```
+> uv add fastapi uvicorn
+Resolving despite existing lockfile due to addition of global exclude newer 2026-09-27T00:00:00Z
+Resolved 14 packages / Installed 13 packages
+ + fastapi==0.141.1  + starlette==1.7.0  + pydantic==2.13.5  + pydantic-core==2.46.5
+ + uvicorn==0.54.0   + h11==0.16.0       + click==8.5.0      + anyio==4.15.1
+ + idna==3.20        + annotated-doc==0.0.5  + annotated-types==0.8.0
+ + typing-extensions==4.16.0  + typing-inspection==0.4.4
+
+> uv add --dev pytest httpx
+Resolved 23 packages / Installed 9 packages
+ + pytest==9.1.1  + pluggy==1.6.0  + iniconfig==2.3.0  + packaging==26.3  + pygments==2.21.0  + colorama==0.4.6
+ + httpx==0.28.1  + httpcore==1.0.9  + certifi==2026.7.22
+```
+
+**判讀：**
+- 第一行「Resolving despite existing lockfile due to addition of global exclude newer」：uv 發現冷卻期設定變了，重新計算所有版本，代表設定有被讀到 ✅
+- **正式執行只有 13 個套件**：要求的只有 2 個，其餘 11 個是它們的相依套件（FastAPI 靠 Starlette 處理網路請求、靠 Pydantic 檢查資料格式；uvicorn 靠 h11 處理 HTTP、靠 click 提供命令列）
+- 刻意裝 `uvicorn` 而不是 `uvicorn[standard]`、`fastapi` 而不是 `fastapi[standard]`：後兩者會多帶進十幾個套件（檔案監看、模板引擎、Email 驗證等）。多一個套件就多一個可能出事的供應鏈，要用到再加
+- **開發用的 9 個套件**放在 `[dependency-groups] dev`，與 `dependencies` 分開：建容器時不裝，正式環境看不到測試工具 ✅
+- `colorama` 是 pytest 在 Windows 上顯示顏色用的
+
+**`pyproject.toml` 與 `uv.lock` 的分工：**
+
+| 檔案 | 寫的是什麼 | 生活比喻 |
+|---|---|---|
+| `pyproject.toml` | `fastapi>=0.141.1`：最低需求 | 採購單：「至少要這個版本以上」 |
+| `uv.lock` | 每個套件的**確切版本 + SHA-256 雜湊** | 驗收單：「這一箱的批號與封條編號」 |
+
+建容器或 CI 時照 `uv.lock` 安裝，每次拿到的一定是同一批檔案；雜湊對不上就拒絕安裝（D18）
+
+**截圖：** `m1-uv-add-deps.png`、`m1-pyproject-deps.png`（使用者資料夾名稱已遮蔽）
+
+---
+
+## E52. 第一支程式 `app/main.py` 的第一版與檢查（2026-09-30 18:51）
+
+**本人撰寫的第一版：**
+
+```python
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("GET /health")
+def healthCheck():
+    return {"status": "ok"}
+```
+
+**檢查結果：**
+
+| 項目 | 結果 |
+|---|---|
+| 匯入 `FastAPI`、建立名為 `app` 的物件 | ✅ |
+| 裝飾器放在函式正上方、`return` 縮排 4 格 | ✅ |
+| 回應只有 `{"status": "ok"}`，沒有版本號等多餘資訊（資安要求） | ✅ |
+| **路徑寫成 `"GET /health"`** | ❌ HTTP 方法已經由 `.get` 表示，括號裡只放路徑 `"/health"`。照原本寫法，`/health` 這個網址不會對應到這個函式 |
+| 函式名稱 `healthCheck` | ⚠️ 可以執行，但 Python 慣例（PEP 8）是小寫加底線 `health_check`。FastAPI 也會用函式名稱產生 API 文件中的識別名稱 |
+| 空行 | ⚠️ PEP 8 建議最上層的函式（含裝飾器）前面空兩行；之後在 CI 加入格式檢查工具自動處理 |
+
+**第二版（18:53）：** 路徑改為 `"/health"`、函式改名 `health_check`、裝飾器前空兩行 → 全部正確 ✅
+
+**註解的原則（本人提問）：**
+- `#` 註解寫「**為什麼**」，不寫「做了什麼」（程式本身已經說明做了什麼）
+- 函式下方的 `"""..."""` 是 docstring，說明這個函式的用途；FastAPI 會把它顯示在自動文件頁 `/docs`
+- 因為 `/docs` 預設公開，docstring 裡不能寫內部資訊（網址、帳號、架構細節）
+- 公開作品集的註解建議用英文：業界慣例，也避免編碼問題
+
+**第三版（19:03，加上註解）：** 檔案最上方加 docstring `LLM Gateway API service.`；`health_check` 加上多行 docstring，說明給負載平衡器使用、刻意只回傳 status 的資安理由。英文由 Claude 提供建議句與單字表，內容與結構由本人決定並自行輸入。可執行；另建議去掉 `!` 與 `...`、刪除空行上的多餘空白，讓句子完整
+
+**觀念：** `@app.get("/health")` 拆開看，`get` 是「用什麼方法來」，`"/health"` 是「來哪個地址」。生活比喻：「外帶（方法）」和「3 號窗口（地址）」是兩件事，窗口的牌子上只寫「3 號」，不會寫「外帶 3 號」
+
+---
+
+## E53. 用 uvicorn 啟動服務並以瀏覽器驗證（2026-09-30 19:10）
+
+**指令：** `uv run uvicorn app.main:app --reload`
+
+| 片段 | 意思 |
+|---|---|
+| `uv run` | 在專案的 `.venv` 中執行，不需手動啟用虛擬環境 |
+| `app.main:app` | 「資料夾.檔案:變數」：`app/main.py` 裡名為 `app` 的物件 |
+| `--reload` | 存檔後自動重啟；只用於開發 |
+
+**啟動訊息：** `Uvicorn running on http://127.0.0.1:8000`
+- 只綁 `127.0.0.1`（uvicorn 預設值）：只有本機連得到，同網段的其他裝置連不進來。與 M0.5 讓 LiteLLM 只綁本機（E13 第 4 項）同一原則；刻意不加 `--host 0.0.0.0`
+- `--reload` 會監看整個專案資料夾的變更（`StatReload`）
+
+**瀏覽器驗證：**
+
+| 網址 | 結果 | 伺服器日誌 |
+|---|---|---|
+| `/health` | `{"status":"ok"}` ✅ | `"GET /health HTTP/1.1" 200 OK` |
+| `/abc` | `{"detail":"Not Found"}` ✅ | （404） |
+| `/docs` | FastAPI 自動文件頁，`/health` 展開後顯示 docstring ✅ | — |
+
+**觀察：**
+- 日誌中另有一筆 `GET /favicon.ico 404`：瀏覽器會自動要分頁的小圖示，不是程式問題
+- **docstring 真的公開顯示在 `/docs`**，而且頁面左上角有 `/openapi.json` 連結，任何人都能下載完整的 API 清單。E52 提到「docstring 不能寫內部資訊」的理由得到實證；正式環境是否關閉已列入待決（M4 上雲前）
+- 顯示為 `purpose.Extra`，句號後少了空格，待本人確認原始碼
+- 回應範例顯示為 `"string"`：函式沒有標註回傳型別，FastAPI 不知道回應的格式。之後寫 `/v1/chat` 時會用 Pydantic 定義回應格式，屆時一併處理
+
+**截圖：** `m1-uvicorn-start.png`（使用者資料夾名稱已遮蔽）、`m1-health-ok.png`、`m1-notfound-404.png`、`m1-docs-health.png`（瀏覽器大頭貼已遮蔽）
+
+---
+
+## E54. 第一個測試檔 `tests/test_health.py`（2026-09-30 19:37～19:55）
+
+**本人撰寫的第一版：**
+
+```python
+from fastapi.testclient import TestClient
+from app.main import app
+
+test_health_returns_ok = TestClient(app)
+
+response = TestClient.get("/health")
+response.status_code
+response.json()
+
+assert response == {"status": "ok"}
+```
+
+**檢查結果（新手常見的五個觀念混淆）：**
+
+| # | 問題 | 觀念 |
+|---|---|---|
+| 1 | 把測試名稱 `test_health_returns_ok` 當成變數名稱 | 測試名稱是**函式**（`def test_...():`），神秘客是另一個**變數**（例如 `client`） |
+| 2 | `TestClient.get(...)` | 要叫「建立出來的那一位」`client.get(...)`，不是叫類別本身。類別是職業名稱，物件才是真的那個人 |
+| 3 | `response.status_code`、`response.json()` 單獨一行 | 取出來沒有拿去用就丟掉了，要放進 `assert` 裡才有檢查作用 |
+| 4 | `assert response == {...}` | `response` 是整個回應（含狀態碼、標頭），要比對的是內容 `response.json()` |
+| 5 | 程式沒有放在函式裡，也少了第二個測試 | pytest 只執行名稱以 `test_` 開頭的**函式**，放在最外層的程式不算測試 |
+
+**處理：** 提供第三層提示（填空式骨架，保留關鍵處由本人填寫），第二個測試由本人照同一模式完成
+
+**第二版（19:47）：** 骨架填空正確；第二個測試 `test_unknown_path_returns_404` 由本人照同一模式獨立完成 ✅。僅剩函式之間空一行（慣例為兩行）的格式問題
+
+**第三版（19:55，加上註解與空行）：** 檔案 docstring `Tests for the health check endpoint.`；404 測試加上 docstring `Only routes we define should be reachable.`（說明「預設拒絕」的資安理由）；`test_health_returns_ok` 名稱已說明用途，刻意不加註解
+
+---
+
+## E55. 第一次執行 pytest：`ModuleNotFoundError`（預期中的失敗，2026-09-30 19:55）
+
+**指令：** `uv run pytest`
+
+```
+rootdir: C:\Users\<user>\llm-gateway
+configfile: pyproject.toml
+collected 0 items / 1 error
+ERROR collecting tests/test_health.py
+tests\test_health.py:4: in <module>
+    from app.main import app
+E   ModuleNotFoundError: No module named 'app'
+=== warnings summary ===
+StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+=== 1 warning, 1 error in 3.10s ===
+```
+
+**這是事先預告的失敗：** E42 選擇 `app/` 結構（不打包）時，已記錄代價是「pytest 找不到 `app` 模組，需要設定 `pythonpath`」。刻意先讓錯誤發生，再理解原因
+
+**錯誤訊息的讀法（由下往上）：**
+1. 最下面的 `E   ModuleNotFoundError: No module named 'app'`：**發生什麼事**，找不到叫 `app` 的模組
+2. 往上一行 `from app.main import app`：**哪一行程式**觸發的
+3. 再往上 `tests\test_health.py:4`：**哪個檔案第幾行**
+4. `collected 0 items / 1 error`：連測試都還沒開始跑，在「收集測試」階段就失敗了
+
+**原因：** Python 只會到一份「搜尋清單」（`sys.path`）裡的資料夾找模組。pytest 執行 `tests/test_health.py` 時，把 `tests/` 資料夾加進清單，但沒有加入專案根目錄，而 `app/` 在根目錄下。用 uvicorn 啟動時會成功，是因為 uvicorn 把「目前所在的資料夾」（根目錄）加進了清單
+
+**生活比喻：** 在 `tests` 會議室裡廣播「app 部門的人請過來」，但廣播只在這間會議室播，app 部門在隔壁大廳，聽不到
+
+**附帶警告：** Starlette 1.7 把 TestClient 使用的 `httpx` 標為不建議使用，改建議 `httpx2`（見 E56）
+
+**截圖：** `m1-pytest-module-not-found.png`（使用者資料夾名稱已遮蔽）
+
+**修正（20:09）：** 本人在 `pyproject.toml` 加上
+
+```toml
+[tool.pytest.ini_options]
+pythonpath = ["."]
+```
+
+- 把專案根目錄 `.` 加進 pytest 的搜尋清單
+- 不選「改用 `uv run python -m pytest`」：那會自動把目前資料夾加進清單，但要每個人、每次（包括 CI）都記得用這個指令；寫在設定檔，不論怎麼執行結果都一樣（與 `.gitattributes`「規則跟著 repo 走」同一思路）
+
+**結果：**
+
+```
+collected 2 items
+tests\test_health.py ..                                  [100%]
+=== 2 passed, 1 warning in 1.29s ===
+```
+
+- `collected 2 items`：兩個測試都被找到（名稱以 `test_` 開頭的規則生效）
+- `..`：每個點代表一個通過的測試
+- **2 passed** ✅；剩下的 1 個 warning 是 E55 提到的 `httpx` 淘汰警告，處理見 E56
+
+**截圖：** `m1-pytest-2-passed.png`（使用者資料夾名稱已遮蔽）
+
+---
+
+## E56. 測試工具由 `httpx` 換成 `httpx2`（2026-09-30 20:13）
+
+**起因：** E55 的警告 `Using httpx with starlette.testclient is deprecated; install httpx2 instead.`
+
+**換套件前的來源查證（名稱與熱門套件只差一個字，先排除冒名套件）：**
+- Starlette 官方文件：TestClient 現以 `httpx2` 為基礎，`httpx` 仍可用但已不建議（deprecated）
+- PyPI：`httpx2` 由 Pydantic 組織維護，說明為原 `httpx` 專案的延續；PyPI 上的維護者 Kludex 同時也是 Starlette 的維護者
+- 最新版 2.13.1 於 2026-09-23 上架，早於冷卻期日期 9/27
+
+**指令與結果：**
+
+```
+> uv remove --dev httpx
+Uninstalled 3 packages
+ - certifi==2026.7.22
+ - httpcore==1.0.9
+ - httpx==0.28.1
+
+> uv add --dev httpx2
+Installed 3 packages
+ + httpcore2==2.13.1
+ + httpx2==2.13.1
+ + truststore==0.10.4
+
+> uv run pytest
+collected 2 items
+tests\test_health.py ..                                  [100%]
+=== 2 passed in 0.91s ===
+```
+
+**判讀：**
+- 移除 `httpx` 時，只被它用到的 `httpcore`、`certifi` 也一起移除：uv 會清掉沒有人需要的相依套件，不會留下殘骸
+- `httpx2` 帶入 `truststore`：改用作業系統內建的憑證清單驗證 HTTPS 連線，取代 `certifi` 自帶的清單
+- **`2 passed`，警告消失** ✅（結果列由黃色變為綠色）
+- 一次只改一件事：先修 `ModuleNotFoundError`（E55），確認通過後才換套件，所以警告消失可以明確歸因於這次的更換
+- 為什麼處理「只是警告」：警告累積越多，真正重要的警告越容易被淹沒；與 SOC 調校告警規則、降低雜訊的道理相同
+
+**截圖：** `m1-httpx2-no-warning.png`（使用者資料夾名稱已遮蔽）
+
+**參考來源：**
+- [Starlette: TestClient](https://starlette.dev/testclient/)
+- [PyPI: httpx2](https://pypi.org/project/httpx2/)
 
 ---
 
@@ -884,3 +1145,4 @@ c9b093b (HEAD -> main, origin/main) docs: update M1 evidence log and screenshots
 | ~~專用設定檔關閉內建 AI 功能~~ | ✅ 已完成（E38） | 步驟 1 |
 | `protect-main` 加上「CI 通過才能合併」（D21） | CI 建立後補上；屆時決定是否改為 PR 流程 | 10/12 那週（CI 建立時） |
 | CodeQL 與 Copilot Autofix（E48） | 有 Python 程式碼後評估 | M1 結案前 |
+| FastAPI 自動文件頁 `/docs`、`/openapi.json` | 預設開啟，會公開列出所有 API；正式環境評估關閉 | M4 上雲前 |
