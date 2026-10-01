@@ -1136,6 +1136,215 @@ tests\test_health.py ..                                  [100%]
 
 ---
 
+## E57. 第 4 步的 commit 與推送（2026-09-30 20:29～20:40）
+
+**commit 前檢查（`m1-step4-status.png`）：** `git status` 顯示 3 個修改（證據紀錄、`pyproject.toml`、`uv.lock`）與新檔案（`app/main.py`、`tests/`、10 張截圖）；`.env`、`.venv`、`__pycache__`、`.pytest_cache` 都沒有出現
+- `__pycache__`：被 uv 產生的 `.gitignore` 排除
+- `.pytest_cache`：pytest 會在這個資料夾裡自己放一個 `.gitignore`，把整個資料夾排除
+
+**分成兩筆 commit：**
+
+```
+> git add app tests pyproject.toml uv.lock
+> git diff --cached --name-only
+app/main.py
+pyproject.toml
+tests/test_health.py
+uv.lock
+
+> git commit -m "feat: add health check endpoint and tests"
+[main 27fb02f] 4 files changed, 395 insertions(+), 1 deletion(-)
+
+> git add docs
+> git commit -m "docs: record M1 step 4 evdience"
+[main 583e9db] 12 files changed, 262 insertions(+)
+
+> git push
+   570792c..583e9db  main -> main
+```
+
+- 程式與文件分開：`feat:` 那筆只有程式、測試與相依套件，之後追查程式問題時可以直接略過文件的 commit
+- 放進箱子後先用 `git diff --cached --name-only` 確認只有預期的 4 個檔案，才 commit
+
+**小失誤：commit 訊息打錯字（`evdience`）而且已經推送。**
+- 推送前發現，可以用 `git commit --amend` 修改訊息
+- 推送後要修改，就必須強制推送，而 `protect-main` 規則集禁止強制推送（E50），連擁有者本人也不行
+- 決定：保留錯字，不為一個錯字改寫公開歷史。這也是規則集的實際效果：已公開的歷史不能被改寫
+- 教訓：按 Enter 前再看一次 commit 訊息
+
+**截圖：** `m1-step4-status.png`、`m1-step4-commit-push.png`（使用者資料夾名稱已遮蔽）
+
+**步驟 4 狀態：✅ 完成**（冷卻期 `exclude-newer`、FastAPI 與 uvicorn、`GET /health`、兩個 pytest 測試、`httpx2`、推送至 GitHub）
+
+---
+
+## E58. 薄介面 5-1：安裝 OpenAI 套件、定義 `ChatResult`（2026-09-30 21:07）
+
+**安裝：**
+
+```
+> uv add openai
+Resolved 27 packages / Installed 3 packages
+ + jiter==0.17.0
+ + openai==3.19.2
+ + sniffio==1.3.1
+```
+
+**判讀：**
+- **冷卻期實際擋下了新版本：** PyPI 上 openai 的最新版是 3.21.0（2026-09-29 發布），uv 裝的是 3.19.2。9/27 之後上架的版本都被排除，E51 的 `exclude-newer` 設定第一次看得到效果
+- 只多了 3 個套件：openai 3.x 預設使用 **`httpx2`** 當網路連線工具（官方 README），而 `httpx2` 在 E56 已經裝過
+- 連帶影響：`httpx2` 原本只是開發用套件，現在 openai 在正式執行時也需要它，所以之後建容器時它會被裝進去。這是正常的：套件是否進容器，取決於「正式執行的程式需不需要」，不是當初用什麼方式加入
+
+**openai SDK 的兩個預設值（官方 README），與 D10 相關：**
+
+| 設定 | 預設值 | 問題 |
+|---|---|---|
+| `max_retries` | 自動重試 **2 次**，包含 429 | 供應商預算用完（`project_spend_limit_exceeded`）也是 429，SDK 會白白重試；也會跟 M3 的降級邏輯疊加（D10、D32） |
+| `timeout` | **10 分鐘** | 使用者要等太久；Gateway 的連線也會被佔住 |
+
+→ 建立 OpenAI 連線物件時，明確設定較小的重試次數與逾時時間（步驟 8 建立連線時處理）
+
+**`ChatResult`（本人撰寫）：**
+
+```python
+"""Thin wrapper around the OpenAI SDK."""
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ChatResult:
+    """The fields we need from one chat call."""
+    text: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+```
+
+- `dataclass`：有固定欄位的表單；`frozen=True`：填好就不能改，像蓋了章的收據，計費資料不會被後面的程式偷偷改掉
+- 5 個欄位都正確 ✅；只差模組 docstring 與 `import` 之間慣例上空一行
+
+**截圖：** `m1-uv-add-openai.png`（使用者資料夾名稱已遮蔽）
+
+**參考來源：** [PyPI: openai](https://pypi.org/project/openai/)
+
+---
+
+## E59. 薄介面 5-2：`chat` 函式（2026-09-30 21:21）
+
+**本人撰寫：**
+
+```python
+def chat(client, model: str, messages: list[dict], reasoning_effort: str) -> ChatResult:
+    """Call the Chat Completions API and return the fields we need."""
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        reasoning_effort=reasoning_effort
+    )
+    return ChatResult(
+        text=response.choices[0].message.content,
+        model=response.model,
+        input_tokens=response.usage.prompt_tokens,
+        output_tokens=response.usage.completion_tokens,
+        reasoning_tokens=response.usage.completion_tokens_details.reasoning_tokens
+    )
+```
+
+**檢查：** 呼叫方式、5 個欄位的對應全部正確 ✅；格式上 `class` 與 `def` 之間慣例空兩行，多行參數的最後一項慣例加逗號（之後由自動排版工具處理）
+
+**設計重點：**
+- **名稱翻譯：** OpenAI 的 `prompt_tokens`、`completion_tokens` 在這裡換成我們的 `input_tokens`、`output_tokens`；之後的程式只看得到我們的名稱
+- **`client` 由外部傳入：** 函式不自己建立連線，測試時可以傳入假的連線物件，不需金鑰、不花錢（5-3）
+- **`client` 不標型別：** 測試傳入的是假物件，不是真正的 `OpenAI` 型別；標成 `OpenAI` 會讓型別檢查工具誤報
+
+**帶到後續步驟的注意事項：**
+- **計費不能重複計算思考 token：** OpenAI 的 `completion_tokens` **已經包含** `reasoning_tokens`。M3 算錢時用 `output_tokens` × 輸出單價即可，`reasoning_tokens` 是明細，不能再加一次
+- **可能是 `None` 的欄位：** 模型拒答或特殊情況時，`message.content` 可能是 `None`；部分情況 `completion_tokens_details` 也可能不存在。步驟 7 串接 `/v1/chat` 時決定處理方式
+
+---
+
+## E60. 時程評估：11/7 繳交的可行性與每週目標（2026-10-01）
+
+**背景：** 專題最晚 11/7 繳交（含技術文件、簡報、錄影）。本人可投入時間：平日每天至少 3 小時，假日約半天，換算**每週約 25 小時**。
+
+**估算：**
+
+| 項目 | 時數 |
+|---|---|
+| 10/1～11/7 可用時間（約 5.4 週） | 約 130 小時 |
+| 剩餘工作量估計 | 約 115～125 小時 |
+| 餘裕 | 約 5～15 小時 |
+
+**結論：** 可行，但餘裕小；最大風險是 M4（Terraform 上雲，新手第一次做，除錯時間難估）。
+
+**每週目標：**
+
+| 週次 | 日期 | 目標 | 估計時數 | 檢查點 |
+|---|---|---|---|---|
+| W1 | 10/1～10/4 | M1 完成（步驟 5～9）＋ M1 結案報告、決策書 v2.7 | 約 16 | 本機真實呼叫 OpenAI 成功、Docker 可執行 |
+| W2 | 10/5～10/11 | M2：API Key 驗證、額度、DynamoDB Local、fail-closed、個資遮罩 | 約 25 | 超額 429、資料庫斷線 503、遮罩生效 |
+| W3 | 10/12～10/18 | M3：路由、計費、降級；CI 先建（pytest、tfsec、Trivy） | 約 25 | 🚩 10/18 M3 完成 |
+| W4 | 10/19～10/25 | M4：Terraform、VPC、NAT、DNS 防火牆、Fargate、ALB | 約 25～30 | 🚩 10/25 雲端跑通 |
+| W5 | 10/26～11/1 | M5：SQS＋Lambda＋故障演練；M6：Demo Console、CI/CD 部署 | 約 25 | 🚩 11/1 M6 完成 |
+| 緩衝 | 11/2～11/4 | 補進度、補截圖 | — | 🚩 11/4 截圖到齊 |
+| 收尾 | 11/5～11/7 | 技術文件定稿、簡報、錄影 | 約 10～15 | 11/7 繳交 |
+
+**執行方式：**
+- 每週最後一天對一次進度；落後超過兩天，提早啟用決策書 8.4 的砍除順序
+- 不可砍的底線：受控出口（controlled egress）、pytest、CI/CD、技術文件
+
+**時程依賴的兩個前提（✅ 2026-10-01 19:36 本人確認兩項都採用）：**
+1. 減少例行截圖：只留 11.4 清單與出錯、決策、驗證的關鍵畫面；例行 git 操作改貼文字
+2. M4 的 Terraform 由 Claude 提供含註解的骨架，本人負責理解、修改、執行、除錯並能說明每個設定的理由；Python 程式維持本人自行撰寫
+   - 若不採用第 2 項，W4 約多 10～15 小時，需從緩衝或 M7 扣除
+
+**面試可用的說法：** 「我在動工前先把剩餘工作量換算成時數，跟可用時間對帳，排出每週檢查點，並事先定好落後時要砍什麼、什麼絕對不砍——這是把專案管理的範圍控制（scope control）用在自己身上。」
+
+---
+
+## E61. 薄介面 5-3：用假的 OpenAI 連線測試 `chat`（2026-10-01 22:53～23:18）
+
+**做法：** 不連真的 OpenAI（不需金鑰、不花錢、不用等網路），改用假物件假扮 `client.chat.completions`：
+- `FakeCompletions.create(**kwargs)`：把收到的參數整包存進 `last_request`（筆記本），再回傳一份固定的假回應
+- `make_fake_client()`：同時回傳 `client`（交給 `chat`）與 `completions`（讓測試事後翻筆記本）
+- 骨架由 Claude 提供（測試道具，非本步驟重點）；兩個測試由本人撰寫
+
+**兩個測試各管一件事：**
+
+| 測試 | 檢查什麼 | 比喻 |
+|---|---|---|
+| `test_chat_maps_response_fields` | 回應的 5 個欄位有沒有正確裝進 `ChatResult` | 收到的餐點有沒有正確裝盒 |
+| `test_chat_sends_model_and_reasoning_effort` | 送出的請求有沒有帶對 `model` 與 `reasoning_effort` | 訂單有沒有寫對 |
+
+**為什麼需要第二個測試：** 假回應是固定的，就算 `chat()` 漏傳 `reasoning_effort`，第一個測試照樣通過；只有檢查「送出的請求」才抓得到。
+
+**卡關與解法：**
+- 測試 1 本人在提示二（填空版）後完成，全部正確
+- 測試 2 卡在 `completions.last_request[ ]` 的括號內要填什麼——原因是骨架中的 `**kwargs` 沒有事先解釋（Claude 的疏漏）。補充說明後理解：
+  - `chat()` 以「名稱=值」方式呼叫 `create(model=..., messages=..., reasoning_effort=...)`
+  - `**kwargs` 把這些參數收成一本字典：`{"model": "gpt-6-luna", "messages": [...], "reasoning_effort": "none"}`
+  - 所以用 `last_request["model"]`、`last_request["reasoning_effort"]` 查詢
+- **教訓：** 給骨架時，骨架裡的新語法也要先講清楚，不能只說「照打就好」
+
+**註解原則（本人確認）：** 只寫「為什麼」，不寫「做什麼」（函式名稱已經說明的不重複）。補在 `make_fake_client()`（為什麼回傳兩樣東西）與測試 2（為什麼需要這個測試）。
+
+**驗證結果：**
+
+```
+PS C:\Users\<user>\llm-gateway> uv run pytest
+collected 4 items
+tests\test_health.py ..                    [ 50%]
+tests\test_openai_client.py ..             [100%]
+4 passed in 2.34s
+```
+
+（依 E60 的截圖原則，例行驗證以文字記錄；使用者名稱已遮蔽）
+
+**面試可用的說法：** 「呼叫外部付費 API 的程式，我用假物件做單元測試：一個測試確認回應欄位對應正確，另一個確認送出的參數正確。這樣 CI 每次執行都不需要金鑰、不花錢，也不會因為對方服務不穩而誤判失敗。」
+
+---
+
 ## 待決（尚未定案）
 
 | 項目 | 目前的建議 | 何時定 |
@@ -1145,4 +1354,6 @@ tests\test_health.py ..                                  [100%]
 | ~~專用設定檔關閉內建 AI 功能~~ | ✅ 已完成（E38） | 步驟 1 |
 | `protect-main` 加上「CI 通過才能合併」（D21） | CI 建立後補上；屆時決定是否改為 PR 流程 | 10/12 那週（CI 建立時） |
 | CodeQL 與 Copilot Autofix（E48） | 有 Python 程式碼後評估 | M1 結案前 |
+| 結案簡報與錄影的時長（9/30 得知上限約 6 分鐘） | 主影片照 6 分鐘設計；向指導老師詢問能否延長，或另附詳細版影片；決策書 v2.7 同步改寫 PART 11 | 與老師討論後 |
+| ~~時程的兩個前提：減少例行截圖、M4 Terraform 改用骨架~~ | ✅ 已定案：兩項都採用（E60，10/1） | 10/1 |
 | FastAPI 自動文件頁 `/docs`、`/openapi.json` | 預設開啟，會公開列出所有 API；正式環境評估關閉 | M4 上雲前 |
