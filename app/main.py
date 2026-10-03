@@ -16,6 +16,10 @@ from app.providers.openai_client import chat
 MODEL = "gpt-6-luna"
 REASONING_EFFORT = "none"
 
+# OpenAI 連線設定：重試和逾時都調小，避免重複花錢、卡住連線（D10）
+OPENAI_MAX_RETRIES = 1
+OPENAI_TIMEOUT_SECONDS = 30
+
 app = FastAPI()
 
 
@@ -28,7 +32,7 @@ class ChatRequest(BaseModel):
 
 # 領用窗口：OpenAI 連線（測試時會換成假的）
 def get_client() -> OpenAI:
-    return OpenAI()
+    return OpenAI(max_retries=OPENAI_MAX_RETRIES, timeout=OPENAI_TIMEOUT_SECONDS)
 
 
 # 領用窗口：HMAC 金鑰，從環境變數讀取，不寫在程式裡
