@@ -1634,6 +1634,158 @@ E     + OpenAIError
 
 ---
 
+## E70. 第 7 步的 commit；8-1 連線設定與設定檔範本（2026-10-03 17:11～23:31）
+
+**第 7 步 commit：**
+- `feat: add chat endpoint with audit and error handling`、`docs: record M1 step 7 evidence`
+- 推送結果：`5888682..f629796  main -> main`
+
+**8-1 A：OpenAI SDK 的重試與逾時（D10）**
+
+| 設定 | SDK 預設 | 本案 | 為什麼 |
+|---|---|---|---|
+| `max_retries` | 2 | **1** | 每次重試都可能再花一次錢；M3 會自己寫「限流就降級」，SDK 的自動重試會與它疊加 |
+| `timeout` | 10 分鐘 | **30 秒** | 平價模型數秒內回應；等 10 分鐘會讓使用者連線被卡住 |
+
+```python
+OPENAI_MAX_RETRIES = 1
+OPENAI_TIMEOUT_SECONDS = 30
+
+def get_client() -> OpenAI:
+    return OpenAI(max_retries=OPENAI_MAX_RETRIES, timeout=OPENAI_TIMEOUT_SECONDS)
+```
+
+**8-1 B：`.env.example`**（進 Git，只有欄位名稱、沒有值）：`OPENAI_API_KEY`、`AUDIT_HMAC_KEY`
+
+**放金鑰之前先驗證鎖：**
+
+```
+> uv run pytest
+17 passed
+> git check-ignore -v .env.example
+.gitignore:15:!.env.example     .env.example
+> git check-ignore -v .env
+.gitignore:13:.env      .env
+```
+
+- `.env.example` 命中放行規則（會進 Git）；`.env` 命中忽略規則（不會進 Git）
+- 順序是刻意的：先確認 `.env` 進不了 Git，才把金鑰放進去（同 E44 的做法）
+
+---
+
+## E71. 8-2：M1 專用金鑰與 `.env`（2026-10-03 23:31～23:54）
+
+**原則（E28）：** `.env` 不在 VS Code 開、金鑰不出現在指令列與截圖、確認內容只看欄位名稱、長度、前綴。
+
+**差點放錯位置（先問再做，避免了錯誤）：** 執行前本人先貼出目錄清單，所在位置是 `scripts\litellm-lab`（M0.5 的實驗資料夾，內有當時的 `.env`）。該檔案日期仍為 9/26，確認尚未被改動；退回專案根目錄後才執行。
+- 專案內有兩個 `.env`：`scripts/litellm-lab/.env`（M0.5 實驗用）與根目錄 `.env`（M1 Gateway 用），互不相干
+- 教訓：寫入密鑰檔之前先確認目前所在目錄
+
+**HMAC 金鑰（不顯示在畫面上，直接寫入檔案）：**
+
+```
+> "AUDIT_HMAC_KEY=$(python -c 'import secrets; print(secrets.token_hex(32))')" | Add-Content .env -Encoding ascii
+> gc .env | % { $_.Split('=')[0] + ' ' + $_.Length }
+AUDIT_HMAC_KEY 79
+```
+
+- 以 Python 內建的 `secrets` 產生 32 位元組（64 個十六進位字元）；`secrets` 是為密碼學用途設計的亂數來源
+- 檢查指令只印欄位名稱與該行長度（15 + 64 = 79），不印內容
+- 明確指定 `-Encoding ascii`：Windows PowerShell 5.1 的重新導向預設寫成 UTF-16，會讓其他程式讀不到
+
+**OpenAI 金鑰 `m1-gateway`（規格同 E21）：**
+
+| 項目 | 設定 |
+|---|---|
+| Project | `llm-gateway-capstone` |
+| 擁有者 | Service account |
+| 有效期限 | 30 天（2026-10-03 建立，2026-11-02 到期） |
+| 權限 | Restricted：只有 Chat completions = Request；其餘（含 Responses、List models）皆 None |
+
+- 到期日 11/2 早於繳交日 11/7：M4 上雲時會另開金鑰放 SSM（D14），或屆時改用工作負載身分聯盟；M1 這把只用於本機
+- 列表同時可見 M0.5 的 `m0-m05-lab` 金鑰狀態為 **Revoked**，佐證 E28 的撤銷
+- 兩把金鑰的 Created by 不同：每個服務帳號是獨立的機器人成員，不綁個人帳號
+
+**寫入後的檢查：**
+
+```
+> gc .env | % { $_.Split('=')[0] + ' ' + $_.Length }
+AUDIT_HMAC_KEY 79
+OPENAI_API_KEY 182
+> (gc .env)[1].Substring(0,26)
+OPENAI_API_KEY=sk-svcacct-
+> git status --short
+ M app/main.py
+?? .env.example
+```
+
+- 前綴 `sk-svcacct-` 證明是服務帳號金鑰；長度 182 − 15 = 167，與 M0 的金鑰長度相同（E22）
+- `git status` 看不到 `.env`：金鑰放進去之後，Git 仍然看不到它 ✅
+- 金鑰以記事本貼入後清除剪貼簿
+
+**截圖：**
+- `m1-openai-key-create-settings.png`（帳號頭像已遮蔽）
+- `m1-openai-key-permissions.png`
+- `m1-openai-key-list-restricted.png`（兩列的 Tracking ID、金鑰末 4 碼、建立者 user ID 已遮蔽，保留前綴）
+
+---
+
+## E72. 8-3：第一次經由 Gateway 真實呼叫 OpenAI——M1 驗收（2026-10-04 00:00）
+
+**啟動方式：** `uv run --env-file .env uvicorn app.main:app --host 127.0.0.1 --port 8000`
+- 金鑰由 `--env-file` 從檔案載入，不出現在指令列與 PowerShell 歷史紀錄
+- 只綁 `127.0.0.1`，不對區域網路開放
+
+**請求（另一個 PowerShell 視窗）：**
+
+```
+> $b = '{"message":"Please reply with only the word hello, and nothing else, because this is a connectivity test"}'
+> irm http://127.0.0.1:8000/v1/chat -Method Post -ContentType 'application/json' -Body $b
+
+request_id                           reply model
+----------                           ----- -----
+4bcc9256-ece1-4192-96a1-0ac9574595c9 hello gpt-6-luna
+```
+
+**稽核紀錄（`data/audit.jsonl`）：**
+
+```json
+{"request_id": "4bcc9256-ece1-4192-96a1-0ac9574595c9", "timestamp": "2026-10-03T16:00:42.553397+00:00", "prompt_hash": "c9345336006504814950591f0637b5092d41b7d7475e25f3373054ae91e8206d", "summary": "Please reply with only the word hello, and nothing", "model": "gpt-6-luna", "input_tokens": 24, "output_tokens": 4, "reasoning_tokens": 0, "status": "ok"}
+```
+
+**反向檢查：完整原文不在稽核檔**
+
+```
+> sls "connectivity test" data\audit.jsonl
+（無輸出）
+```
+
+**對照決策書 8.2 的 M1 驗證條件：**
+
+| 驗證條件 | 結果 | 依據 |
+|---|---|---|
+| 本機送一次 `POST /v1/chat` 拿到回應 | ✅ | `reply: hello`、`model: gpt-6-luna` |
+| 稽核紀錄看得到 hash 與摘要 | ✅ | `prompt_hash` 64 字元；`summary` 為原句前 50 字 |
+| 找不到完整 prompt | ✅ | 原句第 50 字之後的 `connectivity test` 搜尋無結果；模型回答 `hello` 也只出現在摘要引用的原句片段中，不是以回答欄位存入 |
+| `usage` 的思考 token 有被記錄 | ✅ | `reasoning_tokens: 0`（`reasoning_effort: none` 生效） |
+
+**判讀：**
+- 回應的 `request_id` 與稽核紀錄的 `request_id` 相同：使用者拿到的單號可以對回稽核紀錄
+- `timestamp` 為 UTC（16:00:42），換算台北時間為 10/4 00:00:42
+- 測試句刻意超過 50 字，才能驗證「摘要截斷後，完整原文確實不落地」；若用短句，摘要會等於原文，這項檢查就失去意義
+- **花費：** 輸入 24 × $0.10／百萬 ＋ 輸出 4 × $0.50／百萬 ＝ **$0.0000044**（4.4 micro-USD）
+
+**已知限制（誠實記錄）：**
+- 這次是在本機直接執行（尚未裝進容器，步驟 9）
+- `mask()` 仍是空殼，送往 OpenAI 的是未遮罩內容；M1 以「測試句不含個資」作為人為約束（E34），M2 補上
+- 摘要 50 字內的內容會落地，這是設計上的取捨（D6），遮罩補上前不可輸入個資
+
+**截圖：** `m1-first-real-call-audit.png`（六處提示字元中的使用者資料夾名稱已遮蔽）
+
+**面試可用的說法：** 「驗收時我不只看『有回應』，還做了反向檢查：用一句超過 50 字的話呼叫，再到稽核檔搜尋後半句，確認搜不到。證明『沒有存原文』要靠找不到的證據，而不是靠程式碼看起來沒寫。」
+
+---
+
 ## 待決（尚未定案）
 
 | 項目 | 目前的建議 | 何時定 |
