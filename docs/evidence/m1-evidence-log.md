@@ -1345,11 +1345,151 @@ tests\test_openai_client.py ..             [100%]
 
 ---
 
+## E62. 第 5 步的 commit 與推送（2026-10-01 23:20～23:26）
+
+**推送前檢查：** `git status` 列出 7 項，全部屬於本步驟；無 `.env`、無多餘檔案。加入暫存區後再確認 `app/providers/` 只含 `__init__.py` 與 `openai_client.py`。
+
+**兩次 commit（程式與文件分開）：**
+- `feat: add OpenAI thin wrapper and tests`：`pyproject.toml`、`uv.lock`、`app/providers/`、`tests/test_openai_client.py`
+- `docs: record M1 step 5 evidence`：證據紀錄（E58～E61）與兩張截圖
+
+**推送結果：** `583e9db..066b924  main -> main`（`066b924` 為 docs commit）
+
+**為什麼分開：** 翻歷史紀錄時能一眼區分程式與文件的變更；若程式需要退版，不會連文件一起退掉。
+
+---
+
+## E63. 稽核 6-1：HMAC 雜湊 `hash_prompt`（2026-10-03 09:08～09:52）
+
+**為什麼用 HMAC 而不是一般雜湊（D4）：** prompt 常是短句，一般 SHA-256 可以被字典攻擊猜回原文（把常見問句逐一算雜湊比對）。HMAC 多了一把金鑰，沒有金鑰就算不出相同的結果。
+
+**生活比喻：** 雜湊像全世界都買得到的同款果汁機，壞人可以把水果一個個丟進去比對；HMAC 是打果汁時加一匙只有自己知道的祕密醬料。
+
+**本人撰寫（`app/audit.py`）：**
+
+```python
+def hash_prompt(text: str, key: bytes) -> str:
+    """Return the HMAC-SHA256 of the prompt, so the audit log never stores the text."""
+    bytes_text = text.encode("utf-8")
+    hmac_text = hmac.new(key, bytes_text, hashlib.sha256)
+    return hmac_text.hexdigest()
+```
+
+**設計重點：**
+- 只用 Python 內建的 `hmac`、`hashlib`，不增加第三方套件（少一個供應鏈風險點）
+- **金鑰由外部傳入**，函式不自己讀環境變數：測試時直接傳假金鑰 `b"test-key"`，與 `chat()` 的 `client` 同一個做法
+- 函式本體第一次就寫對；拆成三行（轉位元組 → 計算 → 轉十六進位），比擠成一行好讀
+
+**測試（`tests/test_audit.py`）：**
+
+| 測試 | 檢查 |
+|---|---|
+| `test_hash_is_64_hex_chars` | 結果長度 64 |
+| `test_same_input_gives_same_hash` | 同文字、同金鑰 → 結果相等 |
+| `test_different_key_gives_different_hash` | 同文字、不同金鑰 → 結果不相等（HMAC 的核心性質） |
+
+**卡關與解法：** 第一版測試只寫了 `client = hash_prompt()`（沒傳參數、沒有 `assert`）。原因是不確定「一個測試要包含哪些東西」。補充「準備 → 執行 → 檢查」三步驟的固定套路後，以填空版完成，全部正確。
+
+**驗證：** `uv run pytest` → `7 passed in 0.61s`
+
+**帶到後續：** 本機的 HMAC 金鑰用環境變數（步驟 8），雲端改從 SSM SecureString 注入（D14，M4）。這把金鑰換了舊紀錄就對不上（10.3 第 12 點）。
+
+---
+
+## E64. 稽核 6-2：摘要 `make_summary`，先遮罩再截斷（2026-10-03 09:34～09:52）
+
+**依據：** D6（遮罩後內容的前 50 字）、E34（順序固定為先遮罩、再截斷）。
+
+**本人撰寫：**
+
+```python
+SUMMARY_LENGTH = 50
+
+
+def mask(text: str) -> str:
+    """Placeholder for M1. M2 will mask personal data here."""
+    return text
+
+
+def make_summary(text: str) -> str:
+    """Mask first, then cut. Cutting first could split personal data and hide it from the mask."""
+    f_mask = mask(text)
+    cut_summary = f_mask[:SUMMARY_LENGTH]
+    return cut_summary
+```
+
+**設計重點：**
+- `mask()` 在 M1 是空殼，但呼叫順序從現在就寫對；M2 只需補 `mask()` 的內容
+- 長度寫成常數 `SUMMARY_LENGTH`，不在程式中直接寫 `50`
+
+**測試（本人不靠提示完成）：**
+
+| 測試 | 檢查 |
+|---|---|
+| `test_summary_keeps_short_text` | `"Say hi"` 原樣保留 |
+| `test_summary_cuts_long_text_to_50_chars` | 80 個字元截成 50 |
+
+**驗證：** `uv run pytest` → `9 passed in 0.79s`
+
+**已知缺口（同 E34）：** M1 的 `mask()` 不做任何事，摘要的安全性只靠「測試資料不含個資」；「個資跨在第 50 字」的邊界測試留到 M2。
+
+---
+
+## E65. 稽核 6-3：JSON Lines 存放函式 `append_audit`（2026-10-03 09:52～10:57）
+
+**定案：** M1 的稽核紀錄寫入 JSON Lines 檔（一行一筆 JSON），包成一個函式；M2 啟動 DynamoDB Local 時只換這個函式的實作，呼叫端不動。執行時產生的資料放 `data/`，已加入 `.gitignore`。
+
+**為什麼選 JSON Lines：** 稽核紀錄只新增、不修改，與「接在檔案最後面寫一行」的操作吻合。不選 SQLite（關聯式，M2 全部作廢）；不選 M1 就上 DynamoDB Local（第一次成功對話前要先搞定 docker-compose、boto3、建表）。
+
+**生活比喻：** 餐廳的出單夾：新單一律夾在最後面，前面的不動。
+
+**本人撰寫（最終版）：**
+
+```python
+def append_audit(record: dict, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        text = json.dumps(record)
+        f.write(text + "\n")
+```
+
+**兩個資安／正確性重點：**
+- **`"a"`（附加）不能寫成 `"w"`（覆寫）：** `"w"` 每次都會清空檔案，等於稽核紀錄被銷毀。`test_append_audit_keeps_earlier_records` 專門防這件事
+- **明確指定 `encoding="utf-8"`：** Windows 的預設編碼不是 UTF-8，不指定的話之後的中文摘要會變亂碼（同 E22、E45 的編碼教訓）
+
+**挫折與排查：第一次執行 2 個測試失敗**
+
+```
+>       f.write(text + "\n")
+E       ValueError: I/O operation on closed file.
+app\audit.py:34: ValueError
+2 failed, 9 passed in 0.75s
+```
+
+- **原因：** `f.write(...)` 少縮排一層，跑到 `with` 區塊外面。`with` 區塊一結束，檔案就自動關閉；之後再寫入就是「對已關閉的檔案操作」
+- **解法（本人自行排查）：** 依錯誤訊息指出的行號（`audit.py:34`）找到那一行，把它縮排進 `with` 區塊內
+- **結果：** `11 passed in 0.65s`
+- **意義：** 這是測試第一次抓到真正的 bug。沒有測試的話，這個錯誤要到步驟 8 真的呼叫 API 時才會發現，而且會和金鑰、網路等問題混在一起，難以判斷
+
+**測試：**
+
+| 測試 | 檢查 | 做法 |
+|---|---|---|
+| `test_append_audit_writes_one_json_line` | 寫一筆 → 檔案 1 行，讀回來等於原紀錄 | 填空版 |
+| `test_append_audit_keeps_earlier_records` | 寫兩筆 → 檔案 2 行，順序正確 | 本人撰寫；第一版漏了「執行」步驟、誤用另一個測試的變數，經指出後修正 |
+
+- 使用 pytest 內建的 `tmp_path`（用完即丟的暫存資料夾），測試不會在專案內留下檔案
+- 日誌中的使用者名稱（路徑與暫存資料夾名稱）未收錄
+
+**面試可用的說法：** 「稽核紀錄的寫入我特別測了『附加而不是覆寫』：連寫兩筆，確認兩筆都在、順序正確。開檔模式寫錯一個字母，稽核紀錄就會被整個清掉，這種錯誤要靠測試擋，不能靠小心。」
+
+---
+
 ## 待決（尚未定案）
 
 | 項目 | 目前的建議 | 何時定 |
 |---|---|---|
-| M1 稽核紀錄的存放位置 | JSON Lines 檔，外面包一層存放函式；M2 啟動 DynamoDB Local 時只換存放函式的實作。不選 SQLite（關聯式，M2 全部作廢）；不選 M1 就上 DynamoDB Local（第一次成功對話前，要先搞定 docker-compose、boto3、建表） | 步驟 6 開工前 |
+| ~~M1 稽核紀錄的存放位置~~（✅ 10/3 定案，採用下列建議） | JSON Lines 檔，外面包一層存放函式；M2 啟動 DynamoDB Local 時只換存放函式的實作。不選 SQLite（關聯式，M2 全部作廢）；不選 M1 就上 DynamoDB Local（第一次成功對話前，要先搞定 docker-compose、boto3、建表） | 步驟 6 開工前 |
 | ~~VS Code 擴充套件~~ | ✅ 已定案：專用設定檔 `llm-gateway`，6 個官方套件（E36、E37） | 步驟 1 |
 | ~~專用設定檔關閉內建 AI 功能~~ | ✅ 已完成（E38） | 步驟 1 |
 | `protect-main` 加上「CI 通過才能合併」（D21） | CI 建立後補上；屆時決定是否改為 PR 流程 | 10/12 那週（CI 建立時） |
