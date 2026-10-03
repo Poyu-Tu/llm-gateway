@@ -1485,6 +1485,155 @@ app\audit.py:34: ValueError
 
 ---
 
+## E66. 第 6 步的 commit 與推送（2026-10-03 11:16）
+
+- `feat: add audit helpers and tests`：`.gitignore`（新增 `data/`）、`app/audit.py`、`tests/test_audit.py`
+- `docs: record M1 step 6 evidence`：證據紀錄 E63～E65
+- 推送結果：`066b924..5888682  main -> main`
+
+---
+
+## E67. 串接 7-1：`POST /v1/chat` 入口（2026-10-03 11:16～13:49）
+
+**流程（生活比喻：餐廳出餐）：**
+
+```
+POST /v1/chat  {"message": "..."}
+  ① 開單號（request_id，uuid4）
+  ② 個資遮罩（mask）
+  ③ 呼叫模型（chat）          ← 送出的是遮罩後的內容（D5）
+  ④ 寫稽核紀錄（append_audit） ← 只有指紋、摘要、用量
+  ⑤ 回傳 request_id、reply、model
+```
+
+**設計決定：**
+
+| 項目 | 做法 | 為什麼 |
+|---|---|---|
+| 請求格式 | `ChatRequest` 只有 `message` 一欄 | 沒有 `model` 欄位，使用者無法指定模型（D9） |
+| 輸入長度 | `min_length=1, max_length=4000` | 空訊息無意義；超長輸入等於超貴的帳單。不合格由 FastAPI 自動回 422 |
+| 模型 | 常數 `MODEL = "gpt-6-luna"`、`REASONING_EFFORT = "none"` | M1 尚無路由（M3 才做） |
+| 相依注入 | `get_client`、`get_hmac_key`、`get_audit_path` 三個函式，以 `Depends` 注入 | 測試時用 `dependency_overrides` 換成假的，與 `chat()` 傳入假 `client` 同一思路 |
+| HMAC 金鑰來源 | 環境變數 `AUDIT_HMAC_KEY` | 不寫在程式裡；雲端改由 SSM 注入（D14） |
+| 指紋的輸入 | **原文**（非遮罩後內容） | 指紋用於事後比對「是否問過這句話」，比對時拿的是原句；原文本身不落地 |
+| 時間 | UTC、ISO 8601 | 服務將部署在東京，統一時區避免查紀錄時算錯 |
+
+**資安規則（D5）：** 稽核紀錄的任何欄位都不直接放 `request.message` 或 `result.text`；原文只出現在 `hash_prompt(...)`、`make_summary(...)`、`mask(...)` 的參數中。
+
+**工作方式調整：** 本人反映一次給整段規格太多，改為「一次一小段、邊講邊做」：框架語法（`Depends`、Pydantic 模型）由 Claude 提供並解釋，函式本體分 ①②③、④⑤ 兩次由本人撰寫。
+
+**本人寫錯並修正：** 回傳值誤寫成 `"request_id": client`（把 OpenAI 連線物件放進回應），改為 `request_id`。
+
+---
+
+## E68. 串接 7-2：整條流程的測試（2026-10-03 13:49～14:30）
+
+**準備：**
+- 假 OpenAI（`FakeCompletions`、`make_fake_client`）由 `tests/test_openai_client.py` 搬到共用的 `tests/fakes.py`；搬完先確認 11 個測試仍通過
+- `tests/test_chat.py` 的 `make_test_client(tmp_path)`：以 `app.dependency_overrides` 把三個相依換成假連線、假金鑰 `b"test-key"`、暫存稽核檔
+
+**測試：**
+
+| 測試 | 檢查 | 備註 |
+|---|---|---|
+| `test_chat_returns_reply` | 200、`reply`、`model` | 填空版 |
+| `test_chat_audit_has_hash_and_summary_but_not_the_prompt` | 指紋 64 字元、摘要為前 50 字、**完整原文不在稽核檔**、**模型回答不在稽核檔** | **M1 驗收條件的自動化**；用超過 50 字的句子，確保完整原文不會因為「摘要剛好等於原文」而出現 |
+| `test_chat_rejects_empty_message` | 空字串回 422 | 本人自行撰寫 |
+
+**驗證：** `14 passed`
+
+**釐清的觀念：**
+- `_`：函式回傳多個值時，用來接「不需要的那個」；只是慣例名稱，不是特殊語法
+- 註解原則的實際應用：`test_chat_returns_reply` 不加 docstring（名稱已說明）；驗收條件那個測試加（背後有資安規則）
+
+**本人提出的做法：** 所有函式與類別上方加一行中文 `#` 註解（英文 docstring 保留），方便自己複習與面試前回顧。已全數加上，加完後 `14 passed`。
+
+---
+
+## E69. 串接 7-3：特殊狀況處理（2026-10-03 14:30～17:03）
+
+### A. 模型回應不完整
+
+| 狀況 | 處理 | 位置 |
+|---|---|---|
+| `message.content` 為 `None`（拒答等） | 改用空字串：`content or ""` | `openai_client.chat()` |
+| `completion_tokens_details` 不存在 | 思考 token 記 0 | 同上 |
+
+- 假 OpenAI 增加三個可調參數：`content`、`has_details`、`error`（都有預設值，既有測試不用改）
+- 本人偏好把條件式拆成 `if / else` 四行，不用單行寫法；之後提供的程式碼以拆開寫法為主
+
+**挫折 1：測試先失敗（預期中）**
+
+```
+E   AttributeError: 'NoneType' object has no attribute 'reasoning_tokens'
+app\providers\openai_client.py:31
+```
+
+- 原因：只做了 `content or ""`，還沒加「沒有明細就算 0」
+- 意義：先看到測試失敗、改程式後通過，證明這個測試真的有在檢查
+- 順帶修正：新測試把 `reasoning_effort` 寫成 `None`（空值），應為字串 `"none"`
+
+### B. OpenAI 呼叫失敗
+
+**做法：**
+
+```python
+    try:
+        result = chat(client, MODEL, [{"role": "user", "content": masked}], REASONING_EFFORT)
+    except OpenAIError as exc:
+        record["status"] = "error"
+        record["error_type"] = type(exc).__name__
+        append_audit(record, audit_path)
+        raise HTTPException(status_code=502, detail="Upstream model error")
+```
+
+| 決定 | 為什麼 |
+|---|---|
+| 失敗也寫稽核紀錄（`status: "error"`） | 使用者確實送了請求，稽核不能查不到（同 E23：失敗請求也要記） |
+| 回 502 Bad Gateway | 語意正是「閘道向上游取資料，上游出錯」 |
+| 稽核只記錯誤**類別名稱**，不記錯誤訊息 | 錯誤訊息可能夾帶帳號資訊或請求內容 |
+| 回給使用者固定一句 `Upstream model error` | 不洩漏內部細節 |
+| 紀錄分兩段組：先放共同欄位，成功／失敗再各自補欄位 | 兩條路共用單號、時間、指紋、摘要 |
+
+**挫折 2：稽核紀錄安靜地少了四個欄位（重要）**
+
+```
+>       assert len(record["prompt_hash"]) == 64
+E       KeyError: 'prompt_hash'
+FAILED tests/test_chat.py::test_chat_audit_has_hash_and_summary_but_not_the_prompt
+```
+
+- **原因：** 成功路徑寫成 `record = {...}`（建立新字典，取代原本的），原有的 `request_id`、`timestamp`、`prompt_hash`、`summary` 全部遺失。應為 `record["欄位"] = 值`（在原字典上新增）
+- **為什麼危險：** 使用者照樣拿得到回答，畫面上沒有任何異狀；但每筆成功請求的稽核紀錄都沒有單號、指紋、摘要，稽核形同虛設
+- **誰抓到的：** E68 的 M1 驗收測試。沒有它，這個錯誤會一路帶到上線
+- **Claude 的疏漏：** 只寫「你來寫 5 行」，沒有強調不能用 `record = {...}`
+
+**挫折 3：讀不懂 `AssertionError`**
+
+```
+E   AssertionError: assert 'OpenAIError' == 'Say hi'
+E     - Say hi
+E     + OpenAIError
+```
+
+- 本人連試三個值（`"Upstream model error"`、`"boom"`、`"Say hi"`）都失敗
+- 學到的讀法：`-` 是測試預期的值，`+` 是程式實際給的值；答案就在 `+` 那一行
+- 觀念釐清：`OpenAIError("boom")` 中，`OpenAIError` 是類別（病名），`"boom"` 是訊息（備註）；稽核只記前者
+
+**測試：** `test_chat_returns_502_and_audits_when_model_fails`——回 502、`status` 為 `error`、`error_type` 為 `OpenAIError`、`boom` 不在稽核檔也不在回應中
+
+**驗證：** `17 passed in 1.52s`
+
+**面試可用的說法：**
+- 「我有一個測試直接對應驗收條件：稽核紀錄有雜湊與摘要、找不到原文。後來我重構錯誤處理時不小心把紀錄整個換掉，少了四個欄位，使用者端完全看不出來，是這個測試擋下來的。」
+- 「上游出錯時我回 502，稽核只記錯誤類別、不記錯誤訊息，回應也只給固定字串。錯誤訊息本身就是資訊洩漏的管道。」
+
+**留到之後：**
+- OpenAI SDK 的重試次數與逾時（預設重試 2 次、逾時 10 分鐘）在步驟 8 建立真實連線時調小（D10）
+- 依錯誤類型區分處理（限流降級、預算用完不降級）屬 M3（D10、D32）
+
+---
+
 ## 待決（尚未定案）
 
 | 項目 | 目前的建議 | 何時定 |
