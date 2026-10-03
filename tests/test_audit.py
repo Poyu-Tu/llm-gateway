@@ -5,12 +5,14 @@ import json
 from app.audit import append_audit, hash_prompt, make_summary
 
 
+# 指紋長度固定是 64 個字元
 def test_hash_is_64_hex_chars():
     result = hash_prompt("Say hi", b"test-key")
 
     assert len(result) == 64
 
 
+# 同樣的文字和金鑰，指紋要一樣
 def test_same_input_gives_same_hash():
     first = hash_prompt("Say hi", b"test-key")
     second = hash_prompt("Say hi", b"test-key")
@@ -18,6 +20,7 @@ def test_same_input_gives_same_hash():
     assert first == second
 
 
+# 換一把金鑰，指紋就不同（HMAC 的重點）
 def test_different_key_gives_different_hash():
     first = hash_prompt("Say hi", b"test-key")
     second = hash_prompt("Say hi", b"other-key")
@@ -25,16 +28,19 @@ def test_different_key_gives_different_hash():
     assert first != second
 
 
+# 短文字要原樣保留
 def test_summary_keeps_short_text():
     result = make_summary("Say hi")
     assert result == "Say hi"
 
 
+# 長文字要截成 50 個字
 def test_summary_cuts_long_text_to_50_chars():
     result = make_summary("a" * 80)
     assert len(result) == 50
 
 
+# 寫一筆，檔案裡要剛好一行，而且讀得回來
 def test_append_audit_writes_one_json_line(tmp_path):
     path = tmp_path / "audit.jsonl"
     record = {"request_id": "r1", "summary": "Say hi"}
@@ -46,6 +52,7 @@ def test_append_audit_writes_one_json_line(tmp_path):
     assert json.loads(lines[0]) == record
 
 
+# 連寫兩筆，兩筆都要在、順序正確（防止誤用覆寫模式）
 def test_append_audit_keeps_earlier_records(tmp_path):
     path = tmp_path / "audit.jsonl"
     record1 = {"request_id": "r1", "summary": "Say hi"}

@@ -1,36 +1,10 @@
 """Tests for the OpenAI thin wrapper, using a fake client."""
 
-from types import SimpleNamespace
-
 from app.providers.openai_client import ChatResult, chat
+from tests.fakes import make_fake_client
 
 
-class FakeCompletions:
-    """Stands in for client.chat.completions and records the request."""
-
-    def __init__(self):
-        self.last_request = None
-
-    def create(self, **kwargs):
-        self.last_request = kwargs
-        return SimpleNamespace(
-            model="gpt-6-luna",
-            choices=[SimpleNamespace(message=SimpleNamespace(content="Hi there"))],
-            usage=SimpleNamespace(
-                prompt_tokens=13,
-                completion_tokens=11,
-                completion_tokens_details=SimpleNamespace(reasoning_tokens=0),
-            ),
-        )
-
-
-def make_fake_client():
-    """Return the fake client and its completions, so tests can check the request."""
-    completions = FakeCompletions()
-    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    return client, completions
-
-
+# 回應的 5 個欄位要正確裝進 ChatResult
 def test_chat_maps_response_fields():
     client, _ = make_fake_client()
 
@@ -45,6 +19,7 @@ def test_chat_maps_response_fields():
     )
 
 
+# 送出的請求要帶對 model 和 reasoning_effort
 def test_chat_sends_model_and_reasoning_effort():
     """The first test cannot catch a missing parameter, so check the request too."""
     client, completions = make_fake_client()
@@ -53,3 +28,21 @@ def test_chat_sends_model_and_reasoning_effort():
 
     assert completions.last_request["model"] == "gpt-6-luna"
     assert completions.last_request["reasoning_effort"] == "none"
+
+
+# 模型沒有回答內容（None）時，text 要是空字串，程式不能出錯
+def test_chat_returns_empty_text_when_content_is_none():
+    client, _ = make_fake_client(content=None)
+
+    result = chat(client, "gpt-6-luna", [{"role": "user", "content": "Say hi"}], "none")
+
+    assert result.text == ""
+
+
+# 回應裡沒有思考用量的明細時，思考 token 算 0
+def test_chat_counts_zero_reasoning_tokens_without_details():
+    client, _ = make_fake_client(has_details=False)
+
+    result = chat(client, "gpt-6-luna", [{"role": "user", "content": "Say hi"}], "none")
+
+    assert result.reasoning_tokens == 0
