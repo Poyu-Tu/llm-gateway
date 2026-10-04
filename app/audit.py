@@ -10,6 +10,8 @@ from pathlib import Path
 SUMMARY_LENGTH = 50
 # 信箱的形狀：名字 @ 網域 . 結尾
 EMAIL_PATTERN = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+# 台灣手機的形狀：0 或 +886 開頭，接 9 和 8 個數字；左右不能再貼著數字
+PHONE_PATTERN = r"(?<!\d)(\+886[- ]?|0)9\d{2}[- ]?\d{3}[- ]?\d{3}(?!\d)"
 
 
 # 算出 prompt 的 HMAC 指紋；沒有金鑰就無法用字典攻擊猜回原文（D4）
@@ -23,7 +25,8 @@ def hash_prompt(text: str, key: bytes) -> str:
 # 個資遮罩：內容會送出 AWS 到供應商那邊，個資要在離開前先換掉
 def mask(text: str) -> str:
     """Replace personal data with a category label before the text leaves the gateway."""
-    result = re.sub(EMAIL_PATTERN, "[EMAIL]", text)
+    email_result = re.sub(EMAIL_PATTERN, "[EMAIL]", text)
+    result = re.sub(PHONE_PATTERN, "[PHONE]", email_result)
     return result
 
 
