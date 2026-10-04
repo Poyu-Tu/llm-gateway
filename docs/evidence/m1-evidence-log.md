@@ -1932,6 +1932,37 @@ request_id                           reply model
 
 ---
 
+## E75. 第 9 步的 commit、與供應商對帳、M1 結案（2026-10-04 17:07）
+
+**第 9 步 commit：**
+- `feat: add Dockerfile with pinned base images and non-root user`、`docs: record M1 step 9 evidence`
+- 推送結果：`5e4978a..6d51996  main -> main`
+
+**與 OpenAI Usage 對帳（Project `llm-gateway-capstone`，最近 7 天）：**
+
+| 項目 | OpenAI Usage 顯示 | 本案的稽核紀錄 | 一致 |
+|---|---|---|---|
+| 請求數 | 2（10/3、10/4 各一） | 2 筆（E72、E74） | ✅ |
+| 輸入 token | 48 | 24 + 24 | ✅ |
+| 金額 | $0.00（低於顯示精度） | 計算值 $0.0000088 | — |
+
+- 計算：每次輸入 24 × $0.10／百萬 ＋ 輸出 4 × $0.50／百萬 ＝ $0.0000044，兩次共 $0.0000088
+- 這是決策書 12.5「與供應商帳單對帳」（預定 M6）的第一次手動比對：供應商記到的呼叫數與輸入 token，和 Gateway 自己記的完全相同
+- 日期以 UTC 計：第一次呼叫是台北時間 10/4 00:00，在 Usage 上歸在 10/3
+
+**M1 結案資訊（本人確認）：**
+- 投入時間：約 18 小時（9/28～10/4）
+- 實際花費：OpenAI $0.0000088；AWS $0
+- 對照時程（E60）：W1 目標為 10/4 完成 M1，如期達成
+
+**結案文件：**
+- `docs/milestones/m1-report.md`
+- `docs/decision-book/decision-book-v2.7.md`（變更對照見結案報告附錄）
+
+**截圖：** `m1-openai-usage.png`
+
+---
+
 ## 待決（尚未定案）
 
 | 項目 | 目前的建議 | 何時定 |
@@ -1940,7 +1971,12 @@ request_id                           reply model
 | ~~VS Code 擴充套件~~ | ✅ 已定案：專用設定檔 `llm-gateway`，6 個官方套件（E36、E37） | 步驟 1 |
 | ~~專用設定檔關閉內建 AI 功能~~ | ✅ 已完成（E38） | 步驟 1 |
 | `protect-main` 加上「CI 通過才能合併」（D21） | CI 建立後補上；屆時決定是否改為 PR 流程 | 10/12 那週（CI 建立時） |
-| CodeQL 與 Copilot Autofix（E48） | 有 Python 程式碼後評估 | M1 結案前 |
-| 結案簡報與錄影的時長（9/30 得知上限約 6 分鐘） | 主影片照 6 分鐘設計；向指導老師詢問能否延長，或另附詳細版影片；決策書 v2.7 同步改寫 PART 11 | 與老師討論後 |
+| CodeQL 與 Copilot Autofix（E48） | 與 pytest、tfsec、Trivy 一起在 CI 建立時評估（M1 結案時改期，已寫入決策書 v2.7 的 12.5） | 10/12 那週（CI 建立時） |
+| 結案簡報與錄影的時長（9/30 得知上限約 6 分鐘） | 主影片照 6 分鐘設計（配置已寫入決策書 v2.7 的 11.1）；向指導老師詢問能否延長，或另附詳細版影片 | 與老師討論後 |
 | ~~時程的兩個前提：減少例行截圖、M4 Terraform 改用骨架~~ | ✅ 已定案：兩項都採用（E60，10/1） | 10/1 |
 | FastAPI 自動文件頁 `/docs`、`/openapi.json` | 預設開啟，會公開列出所有 API；正式環境評估關閉 | M4 上雲前 |
+| Gateway 待機記憶體量測（M0／M0.5 報告的待辦，M1 未執行） | `docker stats` 量一次，對照 LiteLLM 的 584 MiB（E16） | M2 開工前 |
+| `python:3.12-slim` digest 複查（E74 的冷卻期例外） | 滿 3 天後確認 digest 仍可拉取 | M2 開工前 |
+| `m1-gateway` 金鑰 11/2 到期（E71） | M4 另開金鑰放 SSM，或改用工作負載身分聯盟 | M4 前 |
+
+> M1 結案後仍未定案的項目，已同步列入決策書 v2.7 的 12.5 與 M1 結案報告 Part C；M2 的證據紀錄從 E76 開始，另開 `m2-evidence-log.md`。
