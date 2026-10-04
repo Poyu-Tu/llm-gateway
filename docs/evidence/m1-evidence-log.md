@@ -1786,6 +1786,152 @@ request_id                           reply model
 
 ---
 
+## E73. 第 8 步的 commit；動工前整理 Docker 環境（2026-10-04 00:09、15:43～15:50）
+
+**第 8 步 commit：**
+- `d2fb1a0 feat: set OpenAI client limits and add env example`、`5e4978a docs: record M1 step 8 evidence`
+- 推送前 `git status` 確認清單中沒有 `.env` 與 `data/`（此時 `data/audit.jsonl` 已實際存在）
+- 推送結果：`f629796..5e4978a  main -> main`
+
+**整理 Docker 環境（本人提出）：** 步驟 9 開工前，先清掉先前課程練習留下的容器、映像、資料卷與建置快取；只保留 M0.5 的兩個映像（LiteLLM v1.102.0、`postgres:16`），留到繳交後再刪，以備補拍截圖。
+
+| 項目 | 清理前 | 清理後 |
+|---|---|---|
+| 映像 | 20 個、9.36 GB | 2 個、2.29 GB |
+| 容器 | 4 個 | 0 |
+| 資料卷 | 10 個、1.29 GB | 0 |
+| 建置快取 | 1.56 GB | 0 |
+
+- 做法：先盤點（`docker system df`、`ps -a`、`images`、`volume ls`）→ 分類 → 本人確認 → 才刪除；資料卷刪除後無法復原
+- 附帶發現：練習用的容器設定為隨 Docker 自動啟動，且連接埠綁定 `0.0.0.0`，等於每次開啟 Docker 就對區域網路開放。與 E13 第 4 項同類；步驟 9 的容器因此明確綁定 `127.0.0.1`
+- 與本專題無關的映像名稱不收錄
+
+---
+
+## E74. 步驟 9：Dockerfile 與容器驗證（2026-10-04 15:39～16:42）
+
+### 基底映像與 digest（D19）
+
+```
+> docker pull python:3.12-slim
+Digest: sha256:dddfd7e07f9d15aeeca61529320492139d21cac7f0070c00609243e51e4e0016
+> docker pull ghcr.io/astral-sh/uv:0.12.19
+Digest: sha256:04d046b13e60d6bcec73cbc5e1cad25d680dea90c8573340950a0ac2d1aef424
+> docker inspect -f "{{.Created}}" python:3.12-slim
+2026-10-01T21:49:55.902225648Z
+```
+
+| 映像 | 用途 | 製作時間 | 冷卻期（滿 3 天，D27） |
+|---|---|---|---|
+| `python:3.12-slim` | 兩個階段的基底 | 2026-10-01 21:49 UTC | ❌ 建置當下為 2 天 10 小時，差約 14 小時 |
+| `ghcr.io/astral-sh/uv:0.12.19` | 只借用 `uv` 執行檔；與本機版本相同（E33） | 9 天前 | ✅ |
+
+**冷卻期例外（誠實記錄）：** Python 映像於 10/5 05:50（台北時間）才滿 3 天。評估後當天照做：
+- 映像只在本機測試，不推送到任何倉庫；digest 已鎖定，日後使用的是同一份內容
+- Docker 官方映像由官方流程定期重建以納入安全更新，風險型態不同於任何人都能上傳的 PyPI 套件
+- M4 推上 ECR 時早已超過 3 天；**M1 結案時再確認此 digest 未被撤回**
+- 本人未明確答覆選項即開始建置，視為採用「當天照做、記錄例外」；有異議再調整
+
+### `.dockerignore`：白名單
+
+```
+*
+!app
+!pyproject.toml
+!uv.lock
+**/__pycache__/
+```
+
+- 預設全部排除，只放行映像需要的三樣；`.env`、`data/`、`.git`、`docs/`、`tests/` 自動被擋，之後新增的檔案預設也是擋
+- **實證：** 建置輸出 `transferring context: 307B`，送進 Docker 引擎的內容只有 307 位元組
+
+### Dockerfile：多階段建置
+
+| 階段 | 內容 | 最後的映像裡有沒有 |
+|---|---|---|
+| `builder` | 借用 `uv`，`uv sync --frozen --no-dev --no-install-project` 照 `uv.lock` 安裝 | 沒有（只取走 `.venv`） |
+| 執行階段 | 建立一般使用者 `appuser`（UID 10001）、複製 `.venv` 與 `app/`、建立 `data/`、`USER appuser`、以 uvicorn 啟動 | 有 |
+
+**四個資安重點：**
+
+| # | 做法 | 防什麼 | 依據 |
+|---|---|---|---|
+| 1 | 基底映像以 digest 鎖定 | 同一個標籤的內容日後被替換 | D19 |
+| 2 | 照含雜湊的 `uv.lock` 安裝、不裝開發工具 | 套件被偷換；正式環境不該有測試工具 | D18 |
+| 3 | 以一般使用者執行 | 程式被入侵時拿不到 root | — |
+| 4 | 金鑰不進映像，執行時以 `--env-file` 提供 | 映像外流等於金鑰外流 | D14 |
+
+- `uv` 以 `COPY --from` 自官方映像取得，不用「下載腳本後直接執行」的安裝方式（同 E33 的理由）
+- 容器內監聽 `0.0.0.0` 是慣例；是否對外開放由執行時的 `-p` 決定（同 E14）
+
+**程式由 Claude 提供含註解的骨架並逐行講解**（E60 定案的做法延伸到 Dockerfile）；本人負責理解、建立檔案、執行與除錯。
+
+### 挫折：`invalid value 'COPY'`
+
+```
+ > [builder 5/5] RUN uv sync --frozen --no-dev --no-install-project:
+error: invalid value 'COPY' for '--link-mode <LINK_MODE>'
+  [possible values: clone, copy, hardlink, symlink]
+```
+
+- 原因：環境變數寫成 `UV_LINK_MODE=COPY`。`COPY`（大寫）是 Dockerfile 的指令；交給 uv 的設定值必須是小寫 `copy`
+- 解法：改為小寫後建置成功（`17/17 FINISHED`，8.6 秒）
+- 錯誤訊息已列出合法值；前面的步驟（digest 解析、取得 uv、建立使用者）都已通過，問題範圍一開始就很小
+
+### 執行與驗證
+
+```
+> docker run -d --rm --name gw -p 127.0.0.1:8000:8000 --env-file .env llm-gateway:m1
+> docker ps
+... Up 3 seconds   127.0.0.1:8000->8000/tcp   gw
+```
+
+**功能：**
+
+```
+> irm http://127.0.0.1:8000/health
+status: ok
+
+> irm http://127.0.0.1:8000/v1/chat -Method Post -ContentType 'application/json' -Body $b
+request_id                           reply model
+6b5a3594-eee6-4d76-99f7-cb6acd28fb32 hello gpt-6-luna
+
+> docker exec gw cat data/audit.jsonl
+{"request_id": "6b5a3594-eee6-4d76-99f7-cb6acd28fb32", "timestamp": "2026-10-04T08:35:16.293045+00:00", "prompt_hash": "c9345336006504814950591f0637b5092d41b7d7475e25f3373054ae91e8206d", "summary": "Please reply with only the word hello, and nothing", "model": "gpt-6-luna", "input_tokens": 24, "output_tokens": 4, "reasoning_tokens": 0, "status": "ok"}
+```
+
+**資安：**
+
+| 指令 | 結果 | 證明 |
+|---|---|---|
+| `docker ps` | `127.0.0.1:8000->8000/tcp` | 只對本機開放 |
+| `docker exec gw whoami` | `appuser` | 不是以 root 執行 |
+| `docker exec gw ls -a /app` | `.venv`、`app`、`data` | 映像內沒有 `.env` |
+| `docker exec gw python -c "import pytest"` | `ModuleNotFoundError` | 開發工具未安裝（`--no-dev` 生效） |
+| `docker exec gw which uv` | 無輸出 | 安裝工具未帶進執行階段 |
+| `docker images llm-gateway` | 220 MB（內容 50.9 MB） | 對照 LiteLLM 映像 1.65 GB（E11） |
+
+**附帶的驗證：指紋可重現。** 這次的 `prompt_hash` 與前一天本機直接執行時（E72）**完全相同**（`c9345336…206d`）：同一句話、同一把 HMAC 金鑰，在不同環境算出同一個指紋。這正是指紋能用於「事後比對是否問過這句話」的前提。
+
+**過程中的小錯誤：** 設定 `$b` 時漏打等號（`$b '{...}'`），PowerShell 回報語法錯誤；本人自行補上後重做。
+
+**刻意不執行的指令：** `docker exec gw env`、`docker inspect gw` 會把執行時注入的金鑰印出來。金鑰不在映像裡，但執行中的容器必然持有；驗證時不把它顯示在畫面上（同 E17 的原則）。
+
+**已知限制：**
+- 稽核檔寫在容器內，容器停止（`--rm`）後即消失；M2 改寫入 DynamoDB Local 後解決
+- 尚未做映像弱點掃描（Trivy 於 CI 建立時加入，10/12 那週）
+- 未設定容器健康檢查；M4 由 ECS 與 ALB 的健康檢查負責
+
+**花費：** 輸入 24、輸出 4 token，$0.0000044（同 E72）
+
+**截圖：** `m1-docker-run-ps.png`、`m1-docker-chat-audit.png`、`m1-docker-security-checks.png`（共 14 處提示字元中的使用者資料夾名稱已遮蔽）
+
+**面試可用的說法：**
+- 「我的 `.dockerignore` 是白名單：先全部排除，再放行三樣東西。建置時送進引擎的內容只有 307 位元組，`.env` 根本到不了 Docker。」
+- 「映像做完我不只測功能，還逐項驗證：`whoami` 不是 root、映像裡沒有 `.env`、`import pytest` 會失敗、`which uv` 找不到。每個設計決定都有一個指令可以證明。」
+
+---
+
 ## 待決（尚未定案）
 
 | 項目 | 目前的建議 | 何時定 |
