@@ -2,7 +2,7 @@
 
 import json
 
-from app.audit import append_audit, hash_prompt, make_summary
+from app.audit import append_audit, hash_prompt, make_summary, mask
 
 
 # 指紋長度固定是 64 個字元
@@ -65,3 +65,18 @@ def test_append_audit_keeps_earlier_records(tmp_path):
     assert len(lines) == 2
     assert json.loads(lines[0]) == record1
     assert json.loads(lines[1]) == record2
+
+
+# 信箱要換成類別標籤，原文不能留在送出去的內容裡
+def test_mask_replaces_email():
+    email = "Contact me at amy@example.com please"
+
+    result = mask(email)
+
+    assert result == "Contact me at [EMAIL] please"
+
+
+# 沒有個資的句子不能被動到（防止遮過頭）
+def test_mask_keeps_text_without_personal_data():
+    result = mask("Say hi")
+    assert result == "Say hi"
