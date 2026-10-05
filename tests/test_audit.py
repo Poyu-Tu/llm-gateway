@@ -2,7 +2,7 @@
 
 import json
 
-from app.audit import append_audit, hash_prompt, make_summary, mask
+from app.audit import append_audit, hash_prompt, make_summary, mask, luhn_valid
 
 
 # 指紋長度固定是 64 個字元
@@ -152,3 +152,48 @@ def test_mask_keeps_product_code():
     result = mask(stock_num)
 
     assert result == "Part AB123456780 in stock"
+
+
+# 合法卡號（公開的測試卡號）要通過驗算
+def test_luhn_accepts_valid_card_number():
+    card = "4111111111111111"
+    
+    result = luhn_valid(card)
+
+    assert result is True
+
+
+# 最後一碼改掉，驗算就要不通過
+def test_luhn_rejects_wrong_check_digit():
+    card = "4111111111111112"
+
+    result = luhn_valid(card)
+
+    assert result is False
+
+
+# 信用卡號要換成類別標籤
+def test_mask_replaces_card_number():
+    card = "Pay with 4111111111111111 today"
+
+    result = mask(card)
+
+    assert result == "Pay with [CARD] today"
+
+
+# 卡片上是四碼一組，使用者常照著打空格
+def test_mask_replaces_card_number_with_spaces():
+    card = "Pay with 4111 1111 1111 1111 today"
+
+    result = mask(card)
+
+    assert result == "Pay with [CARD] today"
+
+
+# 長得像卡號但驗算不過，就是一般編號，不能誤遮
+def test_mask_keeps_number_failing_luhn():
+    num = "Order 4111111111111112 shipped"
+
+    result = mask(num)
+
+    assert result == "Order 4111111111111112 shipped" 
