@@ -660,7 +660,97 @@ E         ?            ++++
 
 ---
 
-## 目前進度（2026-10-05 22:41）
+**推送（22:44）：** `test: guard mask-before-cut order in summary`、`docs: record M2 step 1-5 evidence`，推送結果 `92d7bc5..170d6c3  main -> main`。commit 前以 `git status` 確認只有 `tests/test_audit.py` 被改動，破壞實驗已完全還原。
+
+---
+
+## E83. 步驟 1-6：確認送往模型與寫入稽核的內容都已遮罩（2026-10-05 22:44～23:14）
+
+**來源：** E77 留下的待確認項目。`mask()` 四類都完成了，但只確定它在 `make_summary()` 裡被呼叫；送往 OpenAI 的內容有沒有遮，要看 `app/main.py` 才知道。
+
+**生活比喻：** 店裡的訂單存根把電話塗黑了，但送進廚房的那張單子有沒有塗，要走去廚房看。
+
+**檢查結果：接線在 M1 就寫好了，`main.py` 不需要修改。**
+
+```python
+masked = mask(request.message)
+...
+result = chat(client, MODEL, [{"role": "user", "content": masked}], REASONING_EFFORT)
+```
+
+M1 時 `mask()` 是空殼所以沒有效果；M2 補上內容後，這條線自動生效（E64「呼叫順序從現在就寫對」的設計在這裡兌現）。
+
+| 去處 | 使用的值 | 是否遮罩 |
+|---|---|---|
+| 送給 OpenAI | `masked` | 是 |
+| 稽核的摘要 | `make_summary(request.message)`，內部先遮罩 | 是 |
+| 稽核的指紋 | `hash_prompt(request.message, …)`，對原文計算 | 否（D4 的定案：存的是 HMAC 結果，看不到原文；對原文算才能事後比對） |
+
+**問題：這條線沒有測試保護。** 有人把 `masked` 改回 `request.message`，原本的 33 個測試仍然全部通過。
+
+**測試（測試道具由 Claude 提供並逐行說明，`tests/test_chat.py`）：**
+
+```python
+# M2 驗收條件：送給模型的內容已遮罩，找不到原本的個資
+def test_chat_sends_masked_message_to_model(tmp_path):
+    client, completions, _ = make_test_client(tmp_path)
+
+    client.post("/v1/chat", json={"message": "My ID is A123456780 thanks"})
+
+    sent = completions.last_request["messages"][0]["content"]
+    assert sent == "My ID is [TW_ID] thanks"
+
+
+# M2 驗收條件：稽核紀錄裡也找不到個資，摘要是遮罩後的
+def test_chat_audit_does_not_contain_personal_data(tmp_path):
+    client, _, audit_path = make_test_client(tmp_path)
+
+    client.post("/v1/chat", json={"message": "My ID is A123456780 thanks"})
+
+    text = audit_path.read_text(encoding="utf-8")
+    record = json.loads(text)
+    assert "A123456780" not in text
+    assert record["summary"] == "My ID is [TW_ID] thanks"
+```
+
+- 假的 OpenAI（`tests/fakes.py`）會把收到的請求記在 `last_request`；測試從裡面取出實際送出的那句話
+- 兩個測試分別檢查兩個去處：送給模型的內容、寫進稽核檔的紀錄
+
+**說明不清楚的一次（Claude 的問題，照實記錄）：** 第一次只在說明文字中給了 `sent = completions.last_request[...]` 這一行，沒有講它要放在測試裡的哪個位置。本人反映後改為給完整的測試並逐行對應「準備、執行、檢查」。之後給程式片段時，一律連同它所在的位置一起給。
+
+**破壞實驗（兩個測試一寫就通過）：**
+
+| 動作 | 結果 |
+|---|---|
+| 把 `chat(...)` 的 `masked` 改成 `request.message` | `1 failed, 34 passed` |
+| 改回 `masked` | `35 passed in 0.89s` |
+
+破壞時的失敗訊息：
+
+```
+>       assert sent == "My ID is [TW_ID] thanks"
+E       AssertionError: assert 'My ID is A123456780 thanks' == 'My ID is [TW_ID] thanks'
+E         - My ID is [TW_ID] thanks
+E         + My ID is A123456780 thanks
+```
+
+**判讀：** 假的 OpenAI 收到了完整的身分證字號。在真實環境，這就是個資被送出 AWS、在供應商端最多保留 30 天（E20）。只失敗一個是對的：第二個測試檢查的是稽核檔，摘要走的是 `make_summary()`，不受這次破壞影響。
+
+**步驟 1 完成。** 個資遮罩的四類、順序、邊界、兩個去處都有測試。測試數由 M1 結案時的 17 個增加到 35 個。
+
+**限制（誠實記錄）：**
+- 兩個端到端測試只用了身分證字號；其他三類在 `test_audit.py` 以單元測試涵蓋，沒有各自的端到端測試
+- 只驗證假的 OpenAI 收到的內容；真實呼叫留到步驟 11 的驗收（S04）
+- 模型的**回覆**沒有經過遮罩。模型若在回答中寫出個資（例如使用者要求它編造），會原樣回給使用者；這不在 M2 的範圍
+- 稽核的指紋對原文計算；持有 HMAC 金鑰的人可以用猜測的原文比對指紋（D4 已記載的取捨）
+
+**面試可用的說法：**
+- 「遮罩我驗證了兩個去處：送給模型的內容，和寫進稽核的紀錄。測試用的是一個會把收到的請求記下來的假模型，所以我檢查的是實際送出去的那句話，不是我以為會送出去的。」
+- 「M1 的時候遮罩函式還是空的，但我先把『先遮罩、再送出』的呼叫順序寫好。M2 把函式補上之後，主程式一行都不用改。」
+
+---
+
+## 目前進度（2026-10-05 23:14）
 
 - 開工前待辦 1 ✅（E76）；待辦 2（digest 複查）已可執行，尚未做
 - 步驟 1-1（Email）✅（E77，已推送）
@@ -668,8 +758,10 @@ E         ?            ++++
 - 10/5 老師回饋已記錄（E79）
 - 步驟 1-3（身分證字號）✅（E80，已推送）
 - 步驟 1-4（信用卡號與 Luhn）✅（E81，已推送）
-- 步驟 1-5（跨第 50 字的邊界測試）✅（E82，待 commit）；目前 `33 passed`
-- 步驟 1 剩一件：確認送往 OpenAI 的內容經過 `mask()`（需要看 `app/main.py`）
+- 步驟 1-5（跨第 50 字的邊界測試）✅（E82，已推送）
+- 步驟 1-6（兩個去處都已遮罩）✅（E83，待 commit）；目前 `35 passed`
+- **步驟 1 全部完成**
+- 下一步：步驟 2（個資類別帶進稽核紀錄），開工前先定案「類別怎麼從 `mask()` 帶出來」
 - 預計 10/10 結案（原訂 10/11）
 
 ---
@@ -679,7 +771,6 @@ E         ?            ++++
 | 項目 | 目前的建議 | 何時定 |
 |---|---|---|
 | `python:3.12-slim` digest 複查（E74 的冷卻期例外） | 10/5 05:50（台北時間）滿 3 天後，確認 digest 仍可拉取；需先啟動 Docker Desktop，做完再關 | 10/5 開工時 |
-| 送往 OpenAI 的內容是否經過 `mask()`（E77） | 看 `app/main.py`；補一個 `test_chat` 測試 | 步驟 1 的四類做完後 |
 | 超額回應的狀態碼、錯誤類型、是否附 `Retry-After`（決策書 12.5） | 步驟 7 開工前列選項比較 | 步驟 7 |
 | 個資類別怎麼從 `mask()` 帶到稽核紀錄 | 步驟 2 開工前列選項比較；`mask(text) -> str` 的介面先維持不變 | 步驟 2 |
 | M2 的最小成本函式放哪裡、單價寫在哪 | 步驟 4 開工前決定；需與 D30（單價放 repo 設定檔）一致 | 步驟 4 |
