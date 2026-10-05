@@ -69,3 +69,25 @@ def test_chat_returns_502_and_audits_when_model_fails(tmp_path):
     assert record["error_type"] == "OpenAIError"
     assert "boom" not in text
     assert "boom" not in response.text
+
+
+# M2 驗收條件：送給模型的內容已遮罩，找不到原本的個資
+def test_chat_sends_masked_message_to_model(tmp_path):
+    client, completions, _ = make_test_client(tmp_path)
+
+    client.post("/v1/chat", json={"message": "My ID is A123456780 thanks"})
+
+    sent = completions.last_request["messages"][0]["content"]
+    assert sent == "My ID is [TW_ID] thanks"
+
+
+# M2 驗收條件：稽核紀錄裡也找不到個資，摘要是遮罩後的
+def test_chat_audit_does_not_contain_personal_data(tmp_path):
+    client, _, audit_path = make_test_client(tmp_path)
+
+    client.post("/v1/chat", json={"message": "My ID is A123456780 thanks"})
+
+    text = audit_path.read_text(encoding="utf-8")
+    record = json.loads(text)
+    assert "A123456780" not in text
+    assert record["summary"] == "My ID is [TW_ID] thanks"
