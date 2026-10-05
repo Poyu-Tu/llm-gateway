@@ -197,3 +197,12 @@ def test_mask_keeps_number_failing_luhn():
     result = mask(num)
 
     assert result == "Order 4111111111111112 shipped" 
+
+
+# 手機跨在第 50 字前後時，摘要不能留下被切一半的號碼（先遮罩再截斷）
+def test_summary_does_not_leak_split_phone():
+    text = "a" * 45 + " 0912345678 end"
+
+    result = make_summary(text)
+
+    assert "0912" not in result
