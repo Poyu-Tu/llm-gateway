@@ -443,14 +443,176 @@ def mask(text: str) -> str:
 
 ---
 
-## 目前進度（2026-10-05 20:04）
+**推送（20:58）：** `feat: mask Taiwan ID numbers in prompts`、`docs: record teacher feedback and M2 step 1-3 evidence`，推送結果 `80d27d7..2d83a89  main -> main`。
+
+---
+
+## E81. 步驟 1-4：信用卡號遮罩與 Luhn 檢查（2026-10-05 20:57～22:29）
+
+**時程評估（20:57，誠實記錄）：** 本人問今天能不能把 M2 做完。評估剩餘約 18～20 小時（步驟 1 收尾 2、步驟 2～4 共 3、步驟 5 為 3、步驟 6～9 共 7～8、步驟 10～12 共 3～4），當天做不完。改訂：當晚完成步驟 1，10/10 結案（原訂 10/11）。理由：後半段是全新的工具，趕著做會變成照抄，面試講不出來。
+
+**為什麼信用卡要驗算、身分證不用（接 E80）：** 13～19 位純數字的東西太多（訂單編號、物流單號）。隨機一串數字通過 Luhn 的機率是十分之一，驗過再遮可減少約九成誤遮。
+
+**生活比喻：** 超商條碼的最後一碼是算出來的；手動輸入打錯一碼，收銀機會拒絕。
+
+### 第一段：`luhn_valid()`
+
+**測試（本人撰寫）：**
+
+| 測試 | 檢查 |
+|---|---|
+| `test_luhn_accepts_valid_card_number` | `luhn_valid("4111111111111111") is True`（金流業公開的測試卡號） |
+| `test_luhn_rejects_wrong_check_digit` | `luhn_valid("4111111111111112") is False` |
+
+**新的失敗樣子：收集階段出錯。** 函式還不存在時，結果不是 `failed`：
+
+```
+collected 10 items / 1 error
+tests\test_audit.py:5: in <module>
+E   ImportError: cannot import name 'luhn_valid' from 'app.audit'
+!!!!! Interrupted: 1 error during collection !!!!!
+```
+
+測試檔在 `import` 那行就停了，pytest 還在清點測試，一個都沒跑。`failed` 是跑了但結果不對；`error` 是跑不起來。
+
+**算法（以 `5611` 示範）：** 從右往左，第 2、4、6… 位乘 2，乘完超過 9 就減 9，全部加總，除以 10 餘 0 即合法。1 + 2 + 6 + 1 = 10。
+
+**新語法：** `enumerate(reversed(digits))`（倒著走並附編號，從 0 開始）、`int(ch)`、`%` 取餘數。
+
+### 挫折：四次才通過，每次的訊息都指向不同的問題
+
+| 次 | 訊息 | 原因 | 誰找到的 |
+|---|---|---|---|
+| 1、2 | `assert 4 is True` | 回傳的是 `total`（數字），不是布林值 | 本人 |
+| 3 | `assert None is True` | 沒有 `return` 到東西；函式走到底沒遇到 `return` 就回傳 `None` | 本人 |
+| 4 | `assert False is True`，`1 failed, 28 passed` | 迴圈內的兩個邏輯錯誤（見下） | 經指出方向後本人修正 |
+| 5 | `29 passed` | — | — |
+
+第 4 次的程式：
+
+```python
+    for index, ch in enumerate(reversed(digits)):
+        num = int(ch)
+        if index % 2 != 0:
+            total = total + (num * 2)
+            if total > 9:
+                total = total - 9
+```
+
+- **錯誤 1：** 加總寫在 `if` 裡面，不用乘 2 的那幾位完全沒被加進去
+- **錯誤 2：** 「超過 9 就減 9」檢查的是累計的 `total`，應該檢查這一位的值
+- **排查方法：** 拿 `5611` 逐圈手算，得到 3 而不是 10
+- **第二個測試是碰巧通過的：** 這個版本對任何輸入都回 `False`，所以「錯的卡號要回 `False`」過了，但不是算對的。只測一個方向會誤以為函式寫好了（呼應 E77 的兩個方向）
+
+**生活比喻：** 結帳時每樣商品都要刷進總金額，只是有些要先貼折扣貼紙改價。錯的寫法是「只有貼了貼紙的才刷」，而且折扣打在總金額上。
+
+**本人撰寫（最終版）：**
+
+```python
+def luhn_valid(digits: str) -> bool:
+    """Return True when the digits pass the Luhn checksum."""
+    total = 0
+    for index, ch in enumerate(reversed(digits)):
+        num = int(ch)
+        if index % 2 != 0:
+            num = num * 2
+            if num > 9:
+                num = num - 9
+        total = total + num
+
+    if total % 10 == 0:
+        return True
+    else:
+        return False
+```
+
+### 第二段：接進 `mask()`
+
+**測試（本人撰寫）：**
+
+| 測試 | 輸入 | 預期 |
+|---|---|---|
+| `test_mask_replaces_card_number` | `Pay with 4111111111111111 today` | `Pay with [CARD] today` |
+| `test_mask_replaces_card_number_with_spaces` | `Pay with 4111 1111 1111 1111 today` | 同上 |
+| `test_mask_keeps_number_failing_luhn` | `Order 4111111111111112 shipped` | 不變 |
+
+寫功能前：`2 failed, 30 passed`，符合預期。
+
+**形狀描述（由 Claude 提供並逐段說明）：**
+
+```python
+CARD_PATTERN = r"(?<!\d)\d([- ]?\d){12,18}(?!\d)"
+```
+
+第 1 個數字，加上「可有可無的分隔符號 + 1 個數字」這一組重複 12～18 次，共 13～19 個數字；左右不能再貼著數字。
+
+**新觀念：`re.sub` 的第二格放函式。** 前三類是「抓到就換」；信用卡要「抓到後先驗算，過了才換」。`re.sub` 每抓到一段就交給這個函式，函式回傳什麼，那一段就變成什麼；回傳原文等於不換。
+
+**生活比喻：** 前三類像自動門；信用卡像有警衛的門，先看證件再放行。
+
+**說明不清楚的一次（Claude 的問題，照實記錄）：** 第一次講解一口氣放了三個新觀念（把函式交給 `re.sub`、`match.group(0)`、新的形狀描述），而且只講概念。本人卡了約半小時後表示看不懂。改成「拿一句話走六個步驟」的表格，並給填空版後才接上。之後一次只引入一個新觀念，並且先給走一遍的例子。
+
+**本人撰寫（填空版，四個空格）：**
+
+```python
+def replace_card_if_valid(match: re.Match) -> str:
+    """Return the card label when the digits pass Luhn, otherwise the original text."""
+    found = match.group(0)
+    digits = re.sub(r"[- ]", "", found)
+    if luhn_valid(digits):
+        return "[CARD]"
+    else:
+        return found
+
+
+def mask(text: str) -> str:
+    """Replace personal data with a category label before the text leaves the gateway."""
+    email_result = re.sub(EMAIL_PATTERN, "[EMAIL]", text)
+    card_result = re.sub(CARD_PATTERN, replace_card_if_valid, email_result)
+    phone_result = re.sub(PHONE_PATTERN, "[PHONE]", card_result)
+    result = re.sub(TW_ID_PATTERN, "[TW_ID]", phone_result)
+    return result
+```
+
+**順序：信箱 → 信用卡 → 手機 → 身分證。** 信用卡是最長的數字，先處理，後面的規則不會碰到它的片段。
+
+### 挫折：形狀描述本身被寫進了句子
+
+第一次執行 `2 failed, 30 passed`，失敗的是兩個「不該被遮」的測試：
+
+```
+E         - Order 20260912345678 shipped
+E         + Order (?<!\d)\d([- ]?\d){12,18}(?!\d) shipped
+```
+
+- **怎麼判讀：** `+`（實際）那行出現的是 `CARD_PATTERN` 的內容。代表驗算沒過的那條路，回傳的不是原本抓到的文字
+- **原因（本人確認）：** `else` 分支寫成 `return CARD_PATTERN`。「沒過就放回原樣」要放回的是抓到的那段文字（`found`），不是用來找它的形狀描述
+- **結果：** 本人自行修正為回傳 `found`，`32 passed in 0.81s`
+- **意外的幫手：** 被抓到的不只新測試，還有 E78 的 `test_mask_keeps_long_number`。`20260912345678` 有 14 個數字，符合卡號形狀，會被送去驗算（總和 57，不通過）。一個為手機寫的測試，擋下了信用卡功能的錯誤
+
+**限制（誠實記錄）：**
+- 通過 Luhn 的一般編號仍會被誤遮，機率約十分之一
+- 卡號後面隔一個空格緊接其他數字時（例如 `4111111111111111 12`），會被一起抓成 18 位去驗算，驗算不過就整段不遮，卡號因此漏掉；未處理
+- 沒有檢查發卡機構的開頭碼與各家卡的實際長度
+- 全形數字不會被抓到
+- 正式環境換成託管的內容防護服務（決策書 8.2 M2）
+
+**面試可用的說法：**
+- 「信用卡我先比對形狀、再用 Luhn 驗算，過了才遮。隨機數字通過 Luhn 的機率是十分之一，所以訂單編號被誤遮的情況少九成。」
+- 「寫 Luhn 的時候我有一版對任何輸入都回 False，結果『錯的卡號要被拒絕』那個測試是綠的。因為我同時測了合法的卡號，才知道函式其實沒寫對。」
+
+---
+
+## 目前進度（2026-10-05 22:29）
 
 - 開工前待辦 1 ✅（E76）；待辦 2（digest 複查）已可執行，尚未做
 - 步驟 1-1（Email）✅（E77，已推送）
 - 步驟 1-2（手機）✅（E78，已推送）；目前 `24 passed`
 - 10/5 老師回饋已記錄（E79）
-- 步驟 1-3（身分證字號）✅（E80，待 commit）；目前 `27 passed`
-- 下一步：步驟 1-4（信用卡號，含 Luhn 檢查）
+- 步驟 1-3（身分證字號）✅（E80，已推送）
+- 步驟 1-4（信用卡號與 Luhn）✅（E81，待 commit）；目前 `32 passed`
+- 步驟 1 剩兩件：「個資跨在第 50 字」的邊界測試；確認送往 OpenAI 的內容經過 `mask()`
+- 預計 10/10 結案（原訂 10/11）
 
 ---
 
