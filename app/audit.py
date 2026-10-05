@@ -12,6 +12,8 @@ SUMMARY_LENGTH = 50
 EMAIL_PATTERN = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 # 台灣手機的形狀：0 或 +886 開頭，接 9 和 8 個數字；左右不能再貼著數字
 PHONE_PATTERN = r"(?<!\d)(\+886[- ]?|0)9\d{2}[- ]?\d{3}[- ]?\d{3}(?!\d)"
+# 身分證字號的形狀：1 個字母、1 或 2、8 個數字；左右不能再貼著英數字
+TW_ID_PATTERN = r"(?<![A-Za-z0-9])[A-Za-z][12]\d{8}(?![A-Za-z0-9])"
 
 
 # 算出 prompt 的 HMAC 指紋；沒有金鑰就無法用字典攻擊猜回原文（D4）
@@ -26,7 +28,8 @@ def hash_prompt(text: str, key: bytes) -> str:
 def mask(text: str) -> str:
     """Replace personal data with a category label before the text leaves the gateway."""
     email_result = re.sub(EMAIL_PATTERN, "[EMAIL]", text)
-    result = re.sub(PHONE_PATTERN, "[PHONE]", email_result)
+    phone_result = re.sub(PHONE_PATTERN, "[PHONE]", email_result)
+    result = re.sub(TW_ID_PATTERN, "[TW_ID]", phone_result)
     return result
 
 

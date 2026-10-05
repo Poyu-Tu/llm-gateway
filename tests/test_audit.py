@@ -125,3 +125,30 @@ def test_mask_treats_phone_like_email_as_email():
     result = mask(like)
 
     assert result == "Mail [EMAIL] now"
+
+
+# 身分證字號要換成類別標籤
+def test_mask_replaces_tw_id():
+    id_card = "My ID is A123456780 thanks"
+
+    result = mask(id_card)
+
+    assert result == "My ID is [TW_ID] thanks"
+
+
+# 小寫開頭也要抓得到，使用者不一定會按大寫
+def test_mask_replaces_lowercase_tw_id():
+    id_card = "My ID is a123456780 thanks"
+
+    result = mask(id_card)
+
+    assert result == "My ID is [TW_ID] thanks"
+
+
+# 前面多一個字母就是料號，不是身分證，不能誤遮
+def test_mask_keeps_product_code():
+    stock_num = "Part AB123456780 in stock"
+
+    result = mask(stock_num)
+
+    assert result == "Part AB123456780 in stock"
