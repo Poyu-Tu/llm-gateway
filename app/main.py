@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, Field
 
-from app.audit import append_audit, hash_prompt, make_summary, mask
+from app.audit import append_audit, hash_prompt, make_summary, mask, detect_pii_types
 from app.providers.openai_client import chat
 
 # M1 固定用便宜模型、不思考；M3 才會依內容選模型
@@ -75,6 +75,7 @@ def chat_endpoint(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "prompt_hash": hash_prompt(request.message, hmac_key),
         "summary": make_summary(request.message),
+        "pii_types": detect_pii_types(request.message)
     }
 
     # 試著呼叫模型；OpenAI 出錯就記一筆失敗，回 502

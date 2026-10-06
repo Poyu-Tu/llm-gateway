@@ -2,7 +2,7 @@
 
 import json
 
-from app.audit import append_audit, hash_prompt, make_summary, mask, luhn_valid
+from app.audit import append_audit, hash_prompt, make_summary, mask, luhn_valid, detect_pii_types
 
 
 # 指紋長度固定是 64 個字元
@@ -206,3 +206,66 @@ def test_summary_does_not_leak_split_phone():
     result = make_summary(text)
 
     assert "0912" not in result
+
+
+# 稽核要記「偵測到哪一類個資」，只記類別、不記內容（S04）
+def test_detect_pii_types_finds_tw_id():
+    text = "My ID is A123456780 thanks"
+
+    result = detect_pii_types(text)
+
+    assert result == ["TW_ID"]
+
+
+# 沒有個資的句子要回空清單，不能亂報類別（防誤報）
+def test_detect_pii_types_returns_empty_list_without_personal_data():
+    text = "Say hi"
+
+    result = detect_pii_types(text)
+
+    assert result == []
+
+
+# 類別的順序固定，不跟著個資在句子裡出現的先後變動；同時確認四個名稱都沒打錯
+def test_detect_pii_types_lists_all_types_in_fixed_order():
+    text = "ID A123456780 call 0912345678 pay 4111111111111111 mail amy@example.com"
+
+    result = detect_pii_types(text)
+
+    assert result == ["EMAIL", "CARD", "PHONE", "TW_ID"]
+
+
+# 記的是「哪幾類」不是次數，同一類出現多次只記一次
+def test_detect_pii_types_reports_each_type_once():
+    text = "Mail amy@example.com and bob@example.com"
+
+    result = detect_pii_types(text)
+
+    assert result == ["EMAIL"]
+
+
+# 長得像手機的信箱只被當成信箱遮掉，稽核不能多記一類沒遮過的手機
+def test_detect_pii_types_treats_phone_like_email_as_email_only():
+    text = "Mail 0912345678@example.com now"
+
+    result = detect_pii_types(text)
+
+    assert result == ["EMAIL"]
+
+
+# 沒通過 Luhn 的數字沒被遮，就不能記成信用卡
+def test_detect_pii_types_ignores_number_failing_luhn():
+    text = "Order 4111111111111112 shipped"
+
+    result = detect_pii_types(text)
+
+    assert result == []
+
+
+# 使用者自己打出標籤字樣不算偵測到個資
+def test_detect_pii_types_ignores_label_typed_by_user():
+    text = "Please write [EMAIL] here"
+
+    result = detect_pii_types(text)
+
+    assert result == []

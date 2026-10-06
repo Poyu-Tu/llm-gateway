@@ -55,14 +55,37 @@ def replace_card_if_valid(match: re.Match) -> str:
         return found
 
 
+# 遮罩和類別由同一次處理算出來，兩邊才不會對不上（遮了沒記、記了沒遮）
+def mask_and_detect(text: str) -> tuple[str, list[str]]:
+    """Return the masked text together with the categories that were masked."""
+    found_types = []
+    email_result = re.sub(EMAIL_PATTERN, "[EMAIL]", text)
+    if text != email_result:
+        found_types.append("EMAIL")
+    card_result = re.sub(CARD_PATTERN, replace_card_if_valid, email_result)
+    if email_result != card_result:
+        found_types.append("CARD")
+    phone_result = re.sub(PHONE_PATTERN, "[PHONE]", card_result)
+    if card_result != phone_result:
+        found_types.append("PHONE")
+    result = re.sub(TW_ID_PATTERN, "[TW_ID]", phone_result)
+    if phone_result != result:
+        found_types.append("TW_ID")
+    return result, found_types
+
+
 # 個資遮罩：內容會送出 AWS 到供應商那邊，個資要在離開前先換掉
 def mask(text: str) -> str:
     """Replace personal data with a category label before the text leaves the gateway."""
-    email_result = re.sub(EMAIL_PATTERN, "[EMAIL]", text)
-    card_result = re.sub(CARD_PATTERN, replace_card_if_valid, email_result)
-    phone_result = re.sub(PHONE_PATTERN, "[PHONE]", card_result)
-    result = re.sub(TW_ID_PATTERN, "[TW_ID]", phone_result)
-    return result
+    sentence_result, _ = mask_and_detect(text)
+    return sentence_result
+
+
+# 稽核只記「有哪幾類個資」，不記內容；類別來自實際遮罩的結果，不另外比對
+def detect_pii_types(text: str) -> list[str]:
+    """Return the categories of personal data found in the text, without the data itself."""
+    _, list_result = mask_and_detect(text)
+    return list_result
 
 
 # 產生摘要：一定先遮罩、再截斷，順序不能反（E34）

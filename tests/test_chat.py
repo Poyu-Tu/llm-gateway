@@ -91,3 +91,40 @@ def test_chat_audit_does_not_contain_personal_data(tmp_path):
     record = json.loads(text)
     assert "A123456780" not in text
     assert record["summary"] == "My ID is [TW_ID] thanks"
+
+
+# M2 驗收條件（S04）：稽核記「偵測到哪幾類個資」，而且紀錄裡找不到個資本身
+def test_chat_audit_records_pii_types(tmp_path):
+    client, _, audit_path = make_test_client(tmp_path)
+
+    client.post("/v1/chat", json={"message": "My ID is A123456780 call 0912345678"})
+
+    text = audit_path.read_text(encoding="utf-8")
+    record = json.loads(text)
+    assert record["pii_types"] == ["PHONE", "TW_ID"]
+    assert "A123456780" not in record
+    assert "0912345678" not in record
+
+
+# 沒有個資時欄位仍然存在、值是空清單：「檢查過沒找到」和「沒檢查」要分得出來
+def test_chat_audit_records_empty_pii_types_without_personal_data(tmp_path):
+    client, _, audit_path = make_test_client(tmp_path)
+
+    client.post("/v1/chat", json={"message": "Say hi"})
+
+    text = audit_path.read_text(encoding="utf-8")
+    record = json.loads(text)
+    assert record["pii_types"] == []
+
+
+# 呼叫模型失敗時，個資一樣進來過，稽核仍要記類別，而且不能留下個資本身
+def test_chat_error_audit_still_records_pii_types(tmp_path):
+    client, _, audit_path = make_test_client(tmp_path, error=OpenAIError("boom"))
+
+    client.post("/v1/chat", json={"message": "My ID is A123456780 thanks"})
+
+    text = audit_path.read_text(encoding="utf-8")
+    record = json.loads(text)
+    assert record["status"] == "error"
+    assert record["pii_types"] == ["TW_ID"]
+    assert "A123456780" not in record
