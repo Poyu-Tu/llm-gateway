@@ -102,8 +102,8 @@ def test_chat_audit_records_pii_types(tmp_path):
     text = audit_path.read_text(encoding="utf-8")
     record = json.loads(text)
     assert record["pii_types"] == ["PHONE", "TW_ID"]
-    assert "A123456780" not in record
-    assert "0912345678" not in record
+    assert "A123456780" not in text
+    assert "0912345678" not in text
 
 
 # 沒有個資時欄位仍然存在、值是空清單：「檢查過沒找到」和「沒檢查」要分得出來
@@ -127,4 +127,4 @@ def test_chat_error_audit_still_records_pii_types(tmp_path):
     record = json.loads(text)
     assert record["status"] == "error"
     assert record["pii_types"] == ["TW_ID"]
-    assert "A123456780" not in record
+    assert "A123456780" not in text
