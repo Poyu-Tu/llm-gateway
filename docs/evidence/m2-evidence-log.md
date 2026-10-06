@@ -377,6 +377,7 @@ E         + Mail [PHONE]@example.com now
 | 14 | PART 11、8.3 每關收尾清單 | 新增：旁白逐字稿與動畫記在獨立檔案（`docs/slides/narration-v*.md`），素材全部到齊後才放進簡報；每關收尾時同步更新簡報對應頁與旁白稿（E84） |
 | 15 | D22（repo 結構）、11.5 | 新增 `docs/slides/`：放簡報與旁白稿；影片檔不進 repo（E84） |
 | 16 | 全文用詞：1.3、7.9、8.1、PART 9 與其他出現處 | 「RAG」與「向量資料庫」不並列當同義詞。不做的項目一律寫「知識檢索（RAG）」；「向量資料庫」只在講元件或成本時單獨出現。1.3 的「不做知識檢索(RAG)/向量資料庫」改為「不做知識檢索（RAG）」（E84） |
+| 17 | 3.2 的 `audit` 表、8.2 的 M2 | 補上個資類別的欄位名稱與寫法：`pii_types`，值為不含中括號的類別名稱清單，順序固定為 `EMAIL`、`CARD`、`PHONE`、`TW_ID`，沒有個資時為空清單；成功與失敗的紀錄都有此欄（E85） |
 
 ---
 
@@ -845,19 +846,258 @@ M2 結案時要換的是主影片 04 的面板 2，素材來自步驟 11 的 S03
 
 ---
 
-## 目前進度（2026-10-06 01:59）
+## E85. 步驟 2：個資類別帶進稽核紀錄（2026-10-06 02:13～10-07 00:45）
+
+**依據：** 決策書 8.2 M2「稽核表記錄『偵測到哪一類個資』，不記內容」、3.2 的 `audit` 表、4.2 資料層；對應驗收 S04。
+
+**問題：** `mask()` 只回傳遮好的句子，不會告訴呼叫的人它遮了哪幾類。
+
+**生活比喻：** 外帶店的師傅把餐裝盒後從窗口遞出餐盒。現在要多一張貼紙寫「內含：花生、海鮮」，問題是貼紙由誰寫、從哪裡遞出來。
+
+### 定案 1：類別怎麼帶出來（10/6 12:00 本人決定採用 C）
+
+| 選項 | 做法 | 比對邏輯幾份 | 既有 35 個測試 | 評估 |
+|---|---|---|---|---|
+| A | 改 `mask()`，一次回傳句子與類別 | 1 | 二十多個要改 | 結果一定一致，但會動到 E77～E83 剛驗收的東西 |
+| B | `mask()` 不動，另寫一個函式重新比對 | 2 | 不用改 | 兩邊會對不上（見下） |
+| **C（採用）** | 內部函式 `mask_and_detect()` 一次算出兩樣；`mask()` 只取句子，`detect_pii_types()` 只取類別 | 1 | 不用改 | 介面不變，舊測試變成重構的保護網；代價是多一層函式 |
+
+**為什麼不選 B：** 既有的測試資料就能讓它出錯。`Mail 0912345678@example.com now` 經 `mask()` 會整段變成 `[EMAIL]`，手機規則沒機會碰到；B 的函式若拿原文逐類比對，會回報 `["EMAIL", "PHONE"]`，稽核就多記了一類沒遮過的手機。要修好就得照同樣順序重做一遍替換並加上 Luhn，等於把 `mask()` 抄一份。
+
+**為什麼選 C 不選 A：** 兩者都只有一份邏輯，差別在改動面。重構過程實際示範了 A 的代價：`mask()` 一度回傳整包，20 個測試同時失敗（見挫折 1）。
+
+**不採用的做法：** 用「遮好的句子裡有沒有 `[EMAIL]` 字樣」反推類別。使用者自己打出這幾個字就會誤判。
+
+### 定案 2：類別的呈現
+
+| 項目 | 定案 | 為什麼 |
+|---|---|---|
+| 欄位名稱 | `pii_types` | 短，看得出是「類別」不是內容 |
+| 值的寫法 | `"TW_ID"`，不含中括號 | 中括號是給模型看的標籤樣式，稽核存的是資料 |
+| 沒有個資 | 空清單 `[]`，欄位一定存在 | 「檢查過、沒找到」和「沒這個欄位」要分得出來 |
+| 順序 | 固定為遮罩順序：`EMAIL`、`CARD`、`PHONE`、`TW_ID` | 照處理順序自然產生，不用另外排序 |
+| 重複 | 同一類出現多次只記一次 | 記的是「哪幾類」，不是次數 |
+| 失敗的請求 | `status: error` 那筆也要有 | 遮罩發生在呼叫模型之前，上游失敗時個資一樣進來過 |
+
+### 定案 3：`main.py` 呼叫哪個函式
+
+| 做法 | 評估 |
+|---|---|
+| **甲（採用）** `mask()` 那行不動，另外呼叫 `detect_pii_types(request.message)` | `main.py` 只用兩個窗口，內部函式不外露；代價是同一句話多處理一次 |
+| 乙 改成直接呼叫 `mask_and_detect()`，一次接兩樣 | 只處理一次；但 `detect_pii_types()` 變成只有測試在用，`main.py` 直接碰內部函式 |
+
+傳進去的是**原文**，不是 `masked`：遮好的句子裡已經沒有個資，拿它去偵測永遠得到空清單。
+
+### 做法：分八小段，先寫測試、看它失敗，再寫功能
+
+| 段 | 內容 | 結果 |
+|---|---|---|
+| 1 | 兩個單元測試（找到身分證字號、沒有個資回空清單） | `ImportError`，`1 error during collection` |
+| 2 | 把 `mask()` 的內容搬進 `mask_and_detect()`，類別暫時寫死為 `[]` | `20 failed, 17 passed` → 修正後 `1 failed, 36 passed` |
+| 3 | 每一步比較前後，有變就把類別加進清單 | `37 passed` |
+| 4 | 補五個單元測試 | `42 passed`（一寫就通過） |
+| 5 | 兩個破壞實驗 | `1 failed, 41 passed`、`7 failed, 35 passed`；還原後 `42 passed` |
+| 6 | 兩個端到端測試 | `TypeError`（測試寫錯）→ 修正後 `KeyError: 'pii_types'`，`2 failed, 42 passed` |
+| 7 | `main.py` 加匯入與 `pii_types` 欄位 | `44 passed` |
+| 8 | 失敗請求的端到端測試與破壞實驗 | `45 passed`；破壞時 `1 failed, 44 passed` |
+
+**先搬家、再加功能（第 2、3 段）：** 一次改一件事。搬完 35 個舊測試一個都沒改就全部通過，證明重構沒弄壞東西，才處理「怎麼算類別」。
+
+### 怎麼知道某一步有沒有遮到東西：比較前後
+
+句子變了，就代表這一類被遮了。以 `Mail amy@example.com or 0912345678` 走一遍：
+
+| 步驟 | 處理前 → 處理後 | 有變嗎 | 清單 |
+|---|---|---|---|
+| 信箱 | `text` → `email_result` | 有 | `["EMAIL"]` |
+| 信用卡 | `email_result` → `card_result` | 沒有 | `["EMAIL"]` |
+| 手機 | `card_result` → `phone_result` | 有 | `["EMAIL", "PHONE"]` |
+| 身分證 | `phone_result` → `result` | 沒有 | `["EMAIL", "PHONE"]` |
+
+**生活比喻：** 快遞每過一個檢查站秤一次重；進站和出站重量不同，就知道這一站動過包裹。
+
+這個做法同時滿足三項定案：順序固定（照四個步驟的先後加入）、同類只記一次（每一類只比較一次）、沒通過 Luhn 的數字不會被記（`replace_card_if_valid` 放回原文，前後相同）。使用者自己打的 `[EMAIL]` 字樣在處理前後都一樣，也不會被記。
+
+**新語法：** 一個函式回傳兩樣東西（`return result, found_types`，稱為 tuple）；接的時候左邊寫兩個名字，不要的那個位置寫底線；`list.append()` 接在清單最後；清單用 `==` 比較時內容與順序都要相同。
+
+**生活比喻（tuple）：** 點套餐，店員一次遞給你漢堡和發票，你兩手各接一樣；不要發票就不拿。
+
+### 本人撰寫（`app/audit.py`）
+
+```python
+# 遮罩和類別由同一次處理算出來，兩邊才不會對不上（遮了沒記、記了沒遮）
+def mask_and_detect(text: str) -> tuple[str, list[str]]:
+    """Return the masked text together with the categories that were masked."""
+    found_types = []
+    email_result = re.sub(EMAIL_PATTERN, "[EMAIL]", text)
+    if text != email_result:
+        found_types.append("EMAIL")
+    card_result = re.sub(CARD_PATTERN, replace_card_if_valid, email_result)
+    if email_result != card_result:
+        found_types.append("CARD")
+    phone_result = re.sub(PHONE_PATTERN, "[PHONE]", card_result)
+    if card_result != phone_result:
+        found_types.append("PHONE")
+    result = re.sub(TW_ID_PATTERN, "[TW_ID]", phone_result)
+    if phone_result != result:
+        found_types.append("TW_ID")
+    return result, found_types
+
+
+# 個資遮罩：內容會送出 AWS 到供應商那邊，個資要在離開前先換掉
+def mask(text: str) -> str:
+    """Replace personal data with a category label before the text leaves the gateway."""
+    sentence_result, _ = mask_and_detect(text)
+    return sentence_result
+
+
+# 稽核只記「有哪幾類個資」，不記內容；類別來自實際遮罩的結果，不另外比對
+def detect_pii_types(text: str) -> list[str]:
+    """Return the categories of personal data found in the text, without the data itself."""
+    _, list_result = mask_and_detect(text)
+    return list_result
+```
+
+`app/main.py` 只改兩處：匯入名單加上 `detect_pii_types`；`record` 的前半段（成功或失敗都要記的欄位）加一行 `"pii_types": detect_pii_types(request.message)`。
+
+### 測試（本人撰寫，共 10 個；測試數 35 → 45）
+
+單元測試（`tests/test_audit.py`）：
+
+| 測試 | 輸入 | 預期 | 在守什麼 |
+|---|---|---|---|
+| `…_finds_tw_id` | `My ID is A123456780 thanks` | `["TW_ID"]` | 該記的有記 |
+| `…_returns_empty_list_without_personal_data` | `Say hi` | `[]` | 不該記的沒記 |
+| `…_lists_all_types_in_fixed_order` | `ID A123456780 call 0912345678 pay 4111111111111111 mail amy@example.com` | `["EMAIL", "CARD", "PHONE", "TW_ID"]` | 輸入刻意倒著放，確認順序固定；同時確認四個名稱沒打錯 |
+| `…_reports_each_type_once` | `Mail amy@example.com and bob@example.com` | `["EMAIL"]` | 同類只記一次 |
+| `…_treats_phone_like_email_as_email_only` | `Mail 0912345678@example.com now` | `["EMAIL"]` | 否決選項 B 的那句話 |
+| `…_ignores_number_failing_luhn` | `Order 4111111111111112 shipped` | `[]` | 沒遮的不能記 |
+| `…_ignores_label_typed_by_user` | `Please write [EMAIL] here` | `[]` | 使用者自己打標籤不算 |
+
+（測試名稱開頭皆為 `test_detect_pii_types`。）
+
+端到端測試（`tests/test_chat.py`）：
+
+| 測試 | 送出的 `message` | 檢查 |
+|---|---|---|
+| `test_chat_audit_records_pii_types` | `My ID is A123456780 call 0912345678` | `pii_types` 為 `["PHONE", "TW_ID"]`；稽核檔全文找不到身分證字號與手機 |
+| `test_chat_audit_records_empty_pii_types_without_personal_data` | `Say hi` | `pii_types` 為 `[]` |
+| `test_chat_error_audit_still_records_pii_types` | `My ID is A123456780 thanks`（假的 OpenAI 設為出錯） | `status` 為 `error`；`pii_types` 為 `["TW_ID"]`；稽核檔全文找不到身分證字號 |
+
+### 破壞實驗（四次）
+
+| # | 改了什麼 | 結果 | 判讀 |
+|---|---|---|---|
+| 1 | `"PHONE"` 打成 `"PHON"` | `1 failed, 41 passed`：`At index 2 diff: 'PHON' != 'PHONE'` | 名稱打錯一個字母就會被抓到。稽核用 `"PHONE"` 查詢時，打錯的紀錄會全部查不到，而且沒有錯誤訊息 |
+| 2 | 信用卡那一步的 `!=` 寫成 `==` | `7 failed, 35 passed` | 沒有卡號的六句**多**記一個 `CARD`（`assert ['CARD'] == []`），有卡號的那句反而**少**記 |
+| 3 | 把 `pii_types` 從 `record` 前半段搬到「成功區」 | `1 failed, 44 passed`：`KeyError: 'pii_types'` | 成功的請求照常，只有失敗的請求少一欄 |
+| 4 | 摘要改成不遮罩（`request.message[:50]`） | `3 failed, 42 passed` | 見下方「更正」 |
+
+**第 2、3 個實驗的共同點：** 改錯之後程式不會當掉，使用者端完全看不出來。第 3 個尤其如此：正常請求全部沒事，只有上游出錯的那些紀錄少一欄，要等到 OpenAI 出狀況之後有人去查稽核才會發現。與 E69「重構後稽核少了四個欄位、使用者端看不出來」同類。
+
+**生活比喻（第 3 個）：** 餐廳把「過敏原」欄印在出餐單上，而不是點餐單上。順利出餐的都有記錄，只有廚房做失敗的那幾單沒有。
+
+### 挫折 1：搬家後 20 個測試同時失敗
+
+```
+E       AssertionError: assert ('Contact me at [EMAIL] please', []) == 'Contact me at [EMAIL] please'
+E       AssertionError: assert 2 == 50
+20 failed, 17 passed
+```
+
+- **怎麼判讀：** 實際值外面有一層圓括號，裡面是「句子、空清單」。20 個失敗都是同一個形狀，所以是同一個原因。`assert 2 == 50` 也是：`len()` 量到的是「這一包有 2 樣」
+- **原因：** `sentence_result = mask_and_detect(text)` 等號左邊只有一個名字，Python 把整包交給它。`mask_and_detect()` 本身是對的
+- **解法（本人修正）：** 左邊改成接兩樣，`sentence_result, _ = …` 與 `_, list_result = …`
+- **順帶修正：** `detect_pii_types` 的參數型別原本標成 `list[str]`，實際傳入的是一句話，改為 `str`。型別標註寫錯 Python 不會報錯，沒有測試會抓到，但讀的人會被誤導
+- **學到的：** 回傳兩樣的函式，呼叫端要用兩個名字去接
+
+### 挫折 2：端到端測試在送出請求前就失敗
+
+```
+>       client.post("/v1/chat", json={"My ID is A123456780 call 0912345678"})
+E       TypeError: Object of type set is not JSON serializable
+2 failed, 42 passed
+```
+
+- **怎麼讀很長的訊息：** 只看兩個地方。最下面 `E` 那行是真正的錯誤；往上找第一個落在自己檔案裡的 `>` 那行是出事的起點。中間 `.venv` 與 Python 安裝路徑的那一串是套件內部，可以跳過
+- **原因：** 大括號有冒號是字典（`{"message": "Say hi"}`），沒有冒號是集合（`{"Say hi"}`）。JSON 沒有集合，轉換時就報錯，請求根本沒送出
+- **為什麼要修到看見 `KeyError`：** `TypeError` 是測試自己寫錯造成的紅，不能當成「功能還沒做」的證據。修正後看到 `KeyError: 'pii_types'`，才是要的失敗：請求送到了、稽核寫了，只差這個欄位
+- **新的失敗樣子：** `KeyError` 是跟字典要一個它沒有的欄位；程式停在「拿欄位」那一步，還沒走到比較。pytest 仍算成 `failed`
+
+### 更正：三個檢查推送時沒有在把關（10/7 00:38 發現，00:45 修正）
+
+第一次推送（`ad28caa`）的三個端到端測試裡，有三行寫成：
+
+```python
+assert "A123456780" not in record
+```
+
+- **原因：** `record` 是字典。對字典用 `in` 只看**欄位名稱**，不看內容；沒有任何欄位叫做 `A123456780`，所以這一行永遠通過
+- **生活比喻：** 檢查表單有沒有洩漏電話，結果只看了「姓名、地址」這些欄位標題，沒看填了什麼
+- **怎麼發現的：** Claude 撰寫本筆紀錄時對照已推送的程式才看到。測試當時是 `45 passed`，結果畫面看不出問題
+- **影響：** 功能沒有壞，稽核檔裡確實沒有個資。壞的是保護：之後有人改壞時，這三行不會有反應；其中「失敗請求」那條路沒有其他測試在看
+
+**修正與驗證（破壞實驗 4）：** 三處改為 `not in text`。把摘要暫時改成不遮罩後：
+
+| 測試的寫法 | 結果 |
+|---|---|
+| 修正前（`not in record`） | `1 failed, 44 passed`，只有 E83 的舊測試抓到（Claude 在公開 repo 的副本上重現） |
+| 修正後（`not in text`） | `3 failed, 42 passed`，新測試也抓到，包含失敗請求那一筆（本人在開發機執行） |
+
+修正後、破壞時的失敗訊息：
+
+```
+E         'A123456780' is contained here:
+E           "My ID is A123456780 thanks", "pii_types": ["TW_ID"], "status": "error", "error_type": "OpenAIError"}
+E         ?           ++++++++++
+```
+
+**判讀：** 這筆紀錄的 `pii_types` 正確寫著 `["TW_ID"]`，旁邊的摘要卻留著完整的身分證字號。類別記對了不代表內容沒洩漏，兩件事要分開檢查。
+
+**學到的：**
+- 通過的測試不代表它在檢查你以為的東西。這三個測試是先看過失敗才通過的，但失敗的是 `pii_types` 那一行；同一個測試裡的其他斷言從頭到尾沒有失敗過
+- 破壞實驗要對著**每一個斷言**想一次「它在什麼情況下會紅」，不是每個測試做一次就夠
+- `in` 用在字串是找內容，用在字典是找欄位名稱
+
+### 限制（誠實記錄）
+
+- **`pii_types` 記的是「規則偵測到的」，不是「句子裡實際有的」。** E78～E81 列的漏網格式（全形數字、市話、外來人口統一證號等）會讓它顯示 `[]`，但句子裡其實有個資。空清單不能解讀成「這句話沒有個資」
+- 同一句話在 `main.py` 被處理三次（`mask()`、`make_summary()`、`detect_pii_types()`）。用的是同一份邏輯所以結果一致，4000 字以內的成本可忽略，但確實是重複工作（定案 3 的代價）
+- 單元測試第 4、5、7 個（同類記一次、像手機的信箱、使用者自己打標籤）沒有做破壞實驗：它們擋的是「整個做法被改寫成另一種」的情況，無法用改一行的方式弄壞
+- 端到端測試只用了身分證字號與手機；信箱與信用卡的類別只有單元測試
+- 類別欄位本身是中繼資料：看得出某筆請求含哪類個資，看不到內容。這是需求（8.2 M2），但持有稽核讀取權限的人仍可得知「誰在何時送過身分證字號」
+- 步驟 9 換成 DynamoDB 時，`pii_types` 的型別要選能存空值的（預計用 List；Set 是否接受空集合，屆時查證官方文件）
+- 只驗證寫入檔案的稽核紀錄；真實呼叫留到步驟 11 的驗收（S04）
+
+### 面試可用的說法
+
+- 「稽核要記這句話含哪幾類個資。我沒有另外寫一個偵測函式，因為遮罩有先後順序，像長得像手機的信箱只會被當成信箱遮掉，另外比對一次就會多記一類沒遮過的手機。所以遮罩和類別是同一次處理算出來的，對外仍是兩個各取所需的函式，原本三十幾個測試一行都不用改。」
+- 「類別我放在成功和失敗都會寫的那一段，並且用一個測試守著。我試過把它搬到只有成功才會走到的地方，正常請求全部沒事，只有呼叫模型失敗的那些紀錄少一欄。這種錯使用者看不出來，只有測試擋得住。」
+- 「我推上去的測試裡有三行其實沒有在檢查：我拿個資字串去對字典做 `in`，那只會比對欄位名稱，永遠通過。是寫紀錄時回頭讀程式才發現的。修正後我把摘要故意改成不遮罩，確認三個測試都會變紅才算數。從那之後，我做破壞實驗是對著每一個斷言想，不是每個測試做一次。」
+
+---
+
+**推送：**
+- 程式（10/7 00:38）：`feat: record pii categories in the audit log`，`b33144c..ad28caa  main -> main`。commit 前以 `git status` 確認只有 `app/audit.py`、`app/main.py`、`tests/test_audit.py`、`tests/test_chat.py`
+- 更正（10/7 00:45）：`test: check the audit file text for leaked personal data`，`ad28caa..53a4491  main -> main`，1 個檔、3 行。commit 前以 `git status` 確認只有 `tests/test_chat.py`，破壞實驗已完全還原
+
+---
+
+## 目前進度（2026-10-07 00:45）
 
 - 開工前待辦 1 ✅（E76）；待辦 2（digest 複查）已可執行，尚未做
 - 步驟 1-1（Email）✅（E77，已推送）
-- 步驟 1-2（手機）✅（E78，已推送）；目前 `24 passed`
+- 步驟 1-2（手機）✅（E78，已推送）
 - 10/5 老師回饋已記錄（E79）
 - 步驟 1-3（身分證字號）✅（E80，已推送）
 - 步驟 1-4（信用卡號與 Luhn）✅（E81，已推送）
 - 步驟 1-5（跨第 50 字的邊界測試）✅（E82，已推送）
-- 步驟 1-6（兩個去處都已遮罩）✅（E83，已推送）；目前 `35 passed`
+- 步驟 1-6（兩個去處都已遮罩）✅（E83，已推送）
 - **步驟 1 全部完成**
-- 期末簡報 v1 已記錄（E84），已推送（`8508164`）
-- 下一步：步驟 2（個資類別帶進稽核紀錄），開工前先定案「類別怎麼從 `mask()` 帶出來」
+- 期末簡報 v1 已記錄（E84），已推送（簡報 `8508164`；紀錄 `docs: record final presentation v1 evidence`，`8508164..b33144c`，10/6 02:08）
+- 交接說明更新為 `docs/handoff/m2-step2-handoff.md`（取代停在步驟 1-1 的 `m2-handoff.md`）
+- **步驟 2（個資類別進稽核）✅（E85，程式已推送 `53a4491`）；目前 `45 passed`**
+- 下一步：步驟 3（`period` 函式：台北時間切月 + 跨月邊界測試）；下一筆是 E86
 - 預計 10/10 結案（原訂 10/11）
 
 ---
@@ -866,9 +1106,9 @@ M2 結案時要換的是主影片 04 的面板 2，素材來自步驟 11 的 S03
 
 | 項目 | 目前的建議 | 何時定 |
 |---|---|---|
-| `python:3.12-slim` digest 複查（E74 的冷卻期例外） | 10/5 05:50（台北時間）滿 3 天後，確認 digest 仍可拉取；需先啟動 Docker Desktop，做完再關 | 10/5 開工時 |
+| `python:3.12-slim` digest 複查（E74 的冷卻期例外） | 10/5 05:50（台北時間）起已滿 3 天，尚未執行；步驟 5 開 Docker 時一併確認 digest 仍可拉取 | 步驟 5 |
 | 超額回應的狀態碼、錯誤類型、是否附 `Retry-After`（決策書 12.5） | 步驟 7 開工前列選項比較 | 步驟 7 |
-| 個資類別怎麼從 `mask()` 帶到稽核紀錄 | 步驟 2 開工前列選項比較；`mask(text) -> str` 的介面先維持不變 | 步驟 2 |
+| `pii_types` 在 DynamoDB 的型別（E85） | 預計用 List（要能存空值）；查證官方文件後定案 | 步驟 9 |
 | M2 的最小成本函式放哪裡、單價寫在哪 | 步驟 4 開工前決定；需與 D30（單價放 repo 設定檔）一致 | 步驟 4 |
 | 本人尚未回覆：決策書 11.1 的 6 分鐘配置、D33～D40 是否符合理解 | 10/4 開場已問一次，不再重複詢問 | 本人回覆時 |
 | `protect-main` 加「CI 通過才能合併」、CodeQL | 沿用 M1 | 10/12 那週 |
