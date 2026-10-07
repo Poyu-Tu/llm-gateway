@@ -87,7 +87,7 @@ def test_seconds_until_next_period_counts_last_minute():
     assert result == 60
 
 
-# # 剛換月的那一刻：要等一整個月（十月 31 天），不能回 0；沒換算成台北時間會在這裡算錯
+# 剛換月的那一刻：要等一整個月（十月 31 天），不能回 0；沒換算成台北時間會在這裡算錯
 def test_seconds_until_next_period_covers_whole_month_at_start():
     moment = datetime(2026, 9, 30, 16, 0, tzinfo=timezone.utc)
 
