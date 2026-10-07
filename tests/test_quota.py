@@ -78,7 +78,7 @@ def test_is_over_quota_treats_zero_limit_as_strict():
     assert is_over_quota(0, 0) is True
 
 
-# 月底最後一分鐘：剩 60 秒。輸入是 UTC，沒換算成台北會算成 8 小時又 1 分鐘
+# 月底最後一分鐘：剩 60 秒。
 def test_seconds_until_next_period_counts_last_minute():
     moment = datetime(2026, 10, 31, 15, 59, tzinfo=timezone.utc)
 
@@ -87,7 +87,7 @@ def test_seconds_until_next_period_counts_last_minute():
     assert result == 60
 
 
-# 剛換月的那一刻：要等一整個月（十月 31 天），不能回 0
+# # 剛換月的那一刻：要等一整個月（十月 31 天），不能回 0；沒換算成台北時間會在這裡算錯
 def test_seconds_until_next_period_covers_whole_month_at_start():
     moment = datetime(2026, 9, 30, 16, 0, tzinfo=timezone.utc)
 
