@@ -11,6 +11,11 @@ REGION = "ap-northeast-1"
 LOCAL_ACCESS_KEY = "local"
 LOCAL_SECRET_KEY = "local"
 
+# 表名只寫在這一處，別處一律用常數：常數名稱打錯會直接報錯，字串打錯只會變成「找不到資料表」
+API_KEYS_TABLE = "api_keys"
+QUOTAS_TABLE = "quotas"
+AUDIT_TABLE = "audit"
+
 
 # 要連哪裡一定要明講：沒設定就報錯，不讓 boto3 照預設去連真的 AWS
 def make_dynamodb_client() -> BaseClient:

@@ -10,3 +10,10 @@ services:
     ports:
       # 只綁本機；主機用 8001，因為 8000 是 Gateway 的
       - "127.0.0.1:8001:8000"
+
+# 測試專用（考場）：每個測試都會清空重建資料表，所以和上面開發用的分開
+  dynamodb-test:
+    image: amazon/dynamodb-local:3.3.1@sha256:ff89bd48ff32cd8d9be5fee8873b65b8854dc408f1afe881be6eb00247bc0dab
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+    ports:
+      - "127.0.0.1:8002:8000"

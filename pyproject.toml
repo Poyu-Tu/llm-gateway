@@ -25,3 +25,7 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+markers = [
+    "integration: needs DynamoDB Local running (docker compose up -d)",
+]
