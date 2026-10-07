@@ -1,0 +1,12 @@
+# 本機開發用的 DynamoDB Local（練習場）：不連 AWS、不需要 AWS 帳號
+# 資料只放記憶體，容器停止就清空；每次啟動後要重新建表、塞種子資料
+services:
+  dynamodb:
+    # 版本與指紋都鎖定：同一份檔案一個月後拉到的仍是同一個映像
+    image: amazon/dynamodb-local:3.3.1@sha256:ff89bd48ff32cd8d9be5fee8873b65b8854dc408f1afe881be6eb00247bc0dab
+    # -sharedDb：所有連線共用一個資料庫，不依存取金鑰與區域各開一個
+    # -inMemory：資料不寫進磁碟
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+    ports:
+      # 只綁本機；主機用 8001，因為 8000 是 Gateway 的
+      - "127.0.0.1:8001:8000"
