@@ -12,3 +12,17 @@ def period_of(moment: datetime) -> str:
     taipei_moment = moment.astimezone(TAIPEI_TZ)
     result = taipei_moment.strftime("%Y-%m")
     return result
+
+
+# 額度剛好用完就擋；額度 0 代表一次都不能用，不是沒有上限
+def is_over_quota(limit_micro_usd: int, used_micro_usd: int) -> bool:
+    """Return True when the user has used up the monthly quota."""
+    if used_micro_usd >= limit_micro_usd:
+        return True
+    return False
+
+
+# Retry-After 的值：告訴被擋下的客戶端，額度什麼時候恢復
+def seconds_until_next_period(moment: datetime) -> int:
+    """Return whole seconds from the moment until the next quota period starts."""
+    raise NotImplementedError("seconds_until_next_period is not written yet")
