@@ -380,6 +380,7 @@ E         + Mail [PHONE]@example.com now
 | 17 | 3.2 的 `audit` 表、8.2 的 M2 | 補上個資類別的欄位名稱與寫法：`pii_types`，值為不含中括號的類別名稱清單，順序固定為 `EMAIL`、`CARD`、`PHONE`、`TW_ID`，沒有個資時為空清單；成功與失敗的紀錄都有此欄（E85） |
 | 18 | 3.2 的「時區注意」、D2、D22（repo 結構） | 補上實作：`app/quota.py` 的 `period_of(moment)`，以固定偏移 `TAIPEI_TZ`（UTC+8）換算後回傳 `YYYY-MM`；只收帶時區的時間，沒帶時區丟 `ValueError`；不使用時區資料庫與 `tzdata`。repo 結構加上 `app/quota.py`（E86） |
 | 19 | D30、8.2 的 M2 與 M3、D22（repo 結構） | 補上 M2 的實作：`app/pricing.py` 的 `cost_micro_usd(model, input_tokens, output_tokens)`；單價以整數存（每一百萬個 token 多少 micro-USD），輸入與輸出加總後進位一次；沒有單價的模型丟 `ValueError`。M2 單價為程式內的字典常數，M3 搬到設定檔並加入 `gpt-6-sol`。repo 結構加上 `app/pricing.py`（E87） |
+| 20 | 12.5「超額回應的狀態碼與重試語意」、10.3 第 9 點、2.2 流程圖 [3]、3.2 的 `audit` 表、8.2 的 M2 | 補上超額回應的定案：429、`{"detail": "Monthly quota exceeded"}`、附 `Retry-After`（到台北時間下個月 1 號 00:00 的秒數，進位成整數）；已用 ≥ 額度就擋；被擋的請求寫稽核（`status` 新增 `quota_exceeded`），API Key 驗證失敗的不寫；額度讀不到回 503 `Quota service unavailable`、Key 錯誤回 401 `Authentication failed`。12.5 該列劃掉。實作為 `app/quota.py` 的 `is_over_quota()`、`seconds_until_next_period()`（E88） |
 
 ---
 
@@ -1396,7 +1397,230 @@ FAILED tests/test_pricing.py::test_cost_charges_at_least_one_for_tiny_usage - Ke
 
 ---
 
-## 目前進度（2026-10-07 14:55）
+## E88. 步驟 7 的純邏輯：超額回應定案、`is_over_quota()`、`seconds_until_next_period()`（2026-10-07 15:05 定案；15:05～18:26 實作）
+
+**依據：** 決策書 2.2 流程圖 [3]（超額回 429、讀不到回 503）、8.2 M2（超額回 429、fail-closed、「額度 0」邊界、API Key 錯誤只回「驗證失敗」）、10.3 第 9 點與 12.5「超額回應的狀態碼與重試語意」（M2 定案）、7.10（同步扣減允許小幅超用）、D37（失敗的請求也要寫稽核）；E17、E21（LiteLLM 與 OpenAI 的超額都回 429）。
+
+**範圍：** 步驟 7 裡不需要資料庫的部分。兩個函式都還沒有接進 `main.py`；讀額度、回 429／503、寫稽核的接線在步驟 5（DynamoDB Local）之後做。
+
+**生活比喻：** 停車場滿位時，入口的看板要做兩件事：擋下車子（`is_over_quota`），並且寫出「下一個空位預計幾分鐘後」（`seconds_until_next_period`）。
+
+### 定案（五項，10/7 15:05 本人決定）
+
+已推送的 `main.py` 目前唯一的錯誤回應是 502，格式是 `{"detail": "Upstream model error"}`。
+
+| # | 決定 | 定案 | 不選的選項與理由 |
+|---|---|---|---|
+| 1 | 超額的狀態碼 | **429** | 402（非標準用法，使用者也無法用「付費」解決）、403（與權限問題混淆）。429 與決策書流程圖、`s02-quota-429.png`、LiteLLM 與 OpenAI 的做法一致（E17、E21）。429 會讓客戶端 SDK 自動重試，但額度檢查排在呼叫模型之前，重試碰不到 OpenAI，不會多花錢 |
+| 2 | 回應內容 | 固定字串 `{"detail": "Monthly quota exceeded"}`，與 502 同格式 | 結構化（另帶錯誤類型代碼）：會讓 502 與 429 的格式不一致。本 Gateway 的 429 只有一種原因（不做限速；供應商限流依 D10 回 503），狀態碼就夠分辨 |
+| 3 | `Retry-After` | **附上**，值是距離台北時間下個月 1 號 00:00 的秒數（整數，不足一秒進位） | 不附：客戶端不知道額度何時恢復 |
+| 4 | 被擋下的請求 | 寫稽核，`status` 為 `quota_exceeded`，沒有模型與 token 欄位，前半段（含 `pii_types`）照記 | 不寫：事後查不到誰在額度用完後還一直送請求。與 D37 同一個想法。**API Key 驗證失敗的請求不寫**：沒有身分可記，也避免被假 Key 灌爆稽核表 |
+| 5 | 何時算超額 | 已用 **≥** 額度就擋 | `>`：額度 0 的人還能呼叫一次（E17 的邊界） |
+
+**照決策書、不另外定案的兩項：** 額度資料讀不到回 **503** `{"detail": "Quota service unavailable"}`（fail-closed，S03）；API Key 錯誤回 **401** `{"detail": "Authentication failed"}`，不透露是不存在還是已停用。
+
+### 第一部分：`is_over_quota()`
+
+**本人撰寫（`app/quota.py`）：**
+
+```python
+# 額度剛好用完就擋；額度 0 代表一次都不能用，不是沒有上限
+def is_over_quota(limit_micro_usd: int, used_micro_usd: int) -> bool:
+    """Return True when the user has used up the monthly quota."""
+    if used_micro_usd >= limit_micro_usd:
+        return True
+    return False
+```
+
+**測試（本人撰寫，`tests/test_quota.py`，4 個；測試數 55 → 59）：**
+
+| 測試（開頭皆為 `test_is_over_quota`） | 檢查 | 在守什麼 |
+|---|---|---|
+| `…_allows_usage_below_limit` | `is_over_quota(1000, 999) is False` | 還沒用完就放行；兩個值差 1，參數拿反時答案不同 |
+| `…_blocks_usage_equal_to_limit` | `is_over_quota(1000, 1000) is True` | 剛好用完要擋 |
+| `…_blocks_usage_above_limit` | `is_over_quota(1000, 1001) is True` | 超過要擋 |
+| `…_treats_zero_limit_as_strict` | `is_over_quota(0, 0) is True` | 額度 0 是嚴格上限（E17） |
+
+**先寫測試：** `ImportError: cannot import name 'is_over_quota' from 'app.quota'`，`1 error during collection`。寫完 `59 passed`，一次全綠，所以做破壞實驗：
+
+| # | 改了什麼 | 結果 | 紅的是哪幾個 |
+|---|---|---|---|
+| A | `>=` 改成 `>` | `2 failed, 57 passed` | 等於額度、額度 0（`assert False is True`） |
+| B | 兩個變數對調 | `2 failed, 57 passed` | 低於額度（`assert True is False`）、超過額度（`assert False is True`） |
+
+兩個實驗合起來，四個斷言都看過失敗；還原後 `59 passed`。
+
+**判讀：** 實驗 A 的「額度 0」那一個，就是 E17 測過的邊界：寫成 `>` 時，額度 0 的人已用 0，`0 > 0` 不成立，會被放行一次。
+
+### 第二部分：未完成的函式先推「空殼加跳過」
+
+`is_over_quota` 完成時，`seconds_until_next_period` 的 5 個測試已經寫好，函式還沒寫。這時要推送，有三種做法：
+
+| 做法 | 評估 |
+|---|---|
+| 測試照推、函式不存在 | `main` 變紅（`ImportError`，整個測試檔跑不起來） |
+| 先把 5 個測試刪掉，之後再加回來 | `main` 是綠的，但測試離開了版本紀錄，要靠人記得補回 |
+| **（採用，本人提出）函式寫成空殼 `raise NotImplementedError(…)`，5 個測試掛 `@pytest.mark.skip(reason="function not written yet")`，一起推** | `main` 是綠的，測試跟著 Git 走；結果列會顯示 `5 skipped`，看得出有東西還沒做 |
+
+推送內容：`8184c53`（`feat: add is_over_quota and a stub for seconds_until_next_period`，10/7 16:57），`59 passed, 5 skipped`。
+
+**這個做法的風險與對策：** 跳過的測試不會提醒自己還在跳過；忘了撕標記，函式寫錯也是全綠。所以接著做的第一件事是撕掉 5 個標記、先看到紅（17:58）：
+
+```
+FAILED tests/test_quota.py::test_seconds_until_next_period_counts_last_minute - NotImplementedError: seconds_until_next_period is not written yet
+FAILED tests/test_quota.py::test_seconds_until_next_period_covers_whole_month_at_start - NotImplementedError: seconds_until_next_period is not written yet
+FAILED tests/test_quota.py::test_seconds_until_next_period_crosses_year - NotImplementedError: seconds_until_next_period is not written yet
+FAILED tests/test_quota.py::test_seconds_until_next_period_rounds_up_partial_second - NotImplementedError: seconds_until_next_period is not written yet
+FAILED tests/test_quota.py::test_seconds_until_next_period_rejects_time_without_timezone - NotImplementedError: seconds_until_next_period is not written yet
+5 failed, 59 passed
+```
+
+第五個等的是 `ValueError`，拿到 `NotImplementedError` 一樣算失敗。
+
+**生活比喻：** 煙霧偵測器貼著「施工中暫停」的貼紙。裝潢完第一件事是撕貼紙、按測試鈕確認會叫，再做別的。
+
+### 第三部分：`seconds_until_next_period()`
+
+**做法（五步），以 UTC 10/31 15:59 走一遍：**
+
+| 步 | 做什麼 | 這個例子的值 |
+|---|---|---|
+| ① | 沒帶時區就拒絕 | 有帶 UTC，通過 |
+| ② | 換成台北時間 | 台北 10/31 23:59 |
+| ③ | 算出下個月是哪年哪月 | 不是 12 月 → 2026 年、11 月 |
+| ④ | 做出下個月 1 號 00:00 | 台北 2026-11-01 00:00 |
+| ⑤ | 相減、換成秒、進位成整數 | `60.0` → `60` |
+
+**為什麼日固定是 1：** 額度在每個月 1 號重置，與今天是幾號無關。`period_of()` 回的是 `YYYY-MM`，沒有日，所以下一個 period 一定從下個月 1 號 00:00 開始。**生活比喻：** 手機流量每月 1 號重置；10/15 用完，恢復的時間是 11/1，不是 11/15。
+
+**為什麼進位、不捨去：** 差 0.5 秒時回 `0`，等於告訴客戶端「現在就能重試」，但額度還沒恢復。
+
+**為什麼這裡可以出現小數：** `total_seconds()` 回的是小數，但只用一次就進位成整數，一個月最多兩百多萬秒，不會像金額那樣累加放大誤差（對照 E87 的全程整數）。
+
+**新語法：** `import math` 與 `math.ceil()`（無條件進位到整數）；兩個時間相減得到 `timedelta`，`.total_seconds()` 換成秒。
+
+**本人撰寫（`app/quota.py`）：**
+
+```python
+# Retry-After 的值：告訴被擋下的客戶端，額度什麼時候恢復
+def seconds_until_next_period(moment: datetime) -> int:
+    """Return whole seconds from the moment until the next quota period starts."""
+    if moment.tzinfo is None:
+        raise ValueError("Moment must include a timezone")
+    taipei_moment = moment.astimezone(TAIPEI_TZ)
+    if taipei_moment.month == 12:
+        next_year = taipei_moment.year + 1
+        next_month = 1
+    else:
+        next_year = taipei_moment.year
+        next_month = taipei_moment.month + 1
+    next_start = datetime(next_year, next_month, 1, tzinfo=TAIPEI_TZ)
+    diff = next_start - taipei_moment
+    result = math.ceil(diff.total_seconds())
+    return result
+```
+
+**測試（本人撰寫，`tests/test_quota.py`，5 個；測試數 59 → 64）：**
+
+| 測試（開頭皆為 `test_seconds_until_next_period`） | 輸入（UTC） | 台北時間 | 預期 | 在守什麼 |
+|---|---|---|---|---|
+| `…_counts_last_minute` | 2026-10-31 15:59 | 10/31 23:59 | `60` | 基本的算法；日不能寫錯 |
+| `…_covers_whole_month_at_start` | 2026-09-30 16:00 | 10/1 00:00 | `2_678_400`（十月 31 天） | 剛換月要等一整個月，不能回 0；**唯一擋得住「沒換算台北時間」的測試** |
+| `…_crosses_year` | 2026-12-31 15:00 | 12/31 23:00 | `3600` | 十二月的下個月是明年一月 |
+| `…_rounds_up_partial_second` | 2026-10-31 15:59:59.5 | 10/31 23:59:59.5 | `1` | 不足一秒要進位 |
+| `…_rejects_time_without_timezone` | 2026-10-15 03:00（沒帶時區） | — | 丟 `ValueError` | 不猜時區 |
+
+### 挫折：第一版四處錯誤，測試一次只會指出走得到的那一個
+
+第一版（18:14）：
+
+```python
+    if taipei_moment.month == 12:
+        next_year = taipei_moment.year + 1
+        next_month = taipei_moment.month + 1
+    else:
+        next_month = taipei_moment.month + 1
+    next_start = datetime(next_year, next_month, taipei_moment.day, tzinfo=TAIPEI_TZ)
+    diff = next_start - taipei_moment
+    result = math.ceil(diff.total_seconds)
+```
+
+結果 `4 failed, 60 passed`（沒帶時區那個已通過，①② 是對的）：
+
+```
+>       next_start = datetime(next_year, next_month, taipei_moment.day, tzinfo=TAIPEI_TZ)
+                              ^^^^^^^^^
+E       UnboundLocalError: cannot access local variable 'next_year' where it is not associated with a value
+
+E       ValueError: month must be in 1..12
+```
+
+| # | 錯誤 | 訊息 | 原因 |
+|---|---|---|---|
+| 1 | `else` 沒有給 `next_year` | `UnboundLocalError`（三個非十二月的測試） | `if / else` 兩條路要把同樣的變數都填齊；走 `else` 的請求到下一行時 `next_year` 沒有值 |
+| 2 | 十二月寫成月加 1 | `ValueError: month must be in 1..12`（跨年那個） | 12 + 1 = 13 月 |
+| 3 | 日寫成 `taipei_moment.day` | 未實測 | 算出的是「下個月的同一天」，不是「下個月 1 號」；10/31 會去做不存在的 11/31 |
+| 4 | `total_seconds` 少了 `()` | 未實測 | 拿到的是函式本身，不是它算出的秒數 |
+
+- **怎麼讀 `UnboundLocalError`：** 新的錯誤類型。`^^^^^^^^^` 指著 `next_year`，意思是要用這個名字，但它在這條路上還沒被放過值
+- **生活比喻：** 表格有兩條填寫路線。走 A 路線的人填了「年」和「月」，走 B 路線的人只填了「月」；櫃檯要看「年」那格時，B 路線的人交不出來
+- **四個失敗都停在同一行：** 程式遇到第一個錯就停，後面的第 3、4 個錯誤被擋在後面看不到。修好前兩個之後才會輪到它們
+- **結果（18:20）：** 四處一起修正，`64 passed`
+- **學到的：** 失敗訊息只講「最先撞到的那一個」；全部測試都停在同一行時，那一行之後的程式還沒有被任何測試走到
+
+### 每個斷言都看過它失敗（五個破壞實驗，18:26）
+
+| # | 改了什麼 | 結果 | 失敗訊息 |
+|---|---|---|---|
+| 1 | 拿掉換算（`taipei_moment = moment`） | `1 failed, 63 passed`：剛換月 | `assert 0 == 2678400` |
+| 2 | `math.ceil` 換成 `int` | `1 failed, 63 passed`：半秒 | `assert 0 == 1` |
+| 3 | 十二月的分支改成與 `else` 相同 | `1 failed, 63 passed`：跨年 | `ValueError: month must be in 1..12` |
+| 4 | 日的 `1` 改成 `2` | `4 failed, 60 passed`：前四個 | `assert 86460 == 60`、`assert 2764800 == 2678400`、`assert 90000 == 3600`、`assert 86401 == 1` |
+| 5 | 檢查時區的兩行註解掉 | `1 failed, 63 passed`：沒帶時區 | `Failed: DID NOT RAISE ValueError` |
+
+**判讀：**
+
+- **實驗 1 只紅一個。** 拿掉換算後，受影響的只有 ③ 的月份判斷；⑤ 的相減不受影響，因為 `next_start` 帶台北時區、`moment` 帶 UTC，兩個都有時區，Python 會算出真正的時間差。所以只有「UTC 的月份與台北的月份不同」時才會算錯，也就是台北每月 1 號的 00:00～07:59。四個測試裡只有「剛換月」落在這段：程式以為還在 9 月，去找 10/1 00:00，而那正是現在，於是回 `0`
+- 這與 E86 是同一個問題換一種樣子：月初那 8 小時最容易錯。在這裡錯的結果是 `Retry-After: 0`，告訴剛被擋下的人「現在就可以重試」
+- 實驗 2 的 `0` 是同一種錯：差半秒時叫客戶端立刻回來
+- 實驗 4 每個都剛好多 86,400（一天的秒數）：日寫錯，所有人都被多叫等一天
+- 實驗 5：`astimezone` 遇到沒帶時區的時間不會報錯，而是當成這台機器的當地時間（E86 第 4 項的同一件事）
+
+**還原確認：** 每個實驗做完立刻改回；最後 `64 passed`，`git status` 只有 `app/quota.py`、`tests/test_quota.py` 兩個已修改的檔。
+
+### 更正：一行測試註解與實測不符
+
+`test_seconds_until_next_period_counts_last_minute` 上方的註解（`8184c53` 已推送）寫著「沒換算成台北會算成 8 小時又 1 分鐘」。實驗 1 顯示這個測試在沒換算時**仍然通過**（結果還是 60），原因見上方判讀。註解於本次一併改正；守住時區換算的是「剛換月」那一個測試。
+
+- **學到的：** 「這個測試在守什麼」寫在註解裡只是推測，要做過破壞實驗才知道。帶時區的時間相減不受「用哪個時區表示」影響，這是 E86 互動模式看過的 `taipei_moment == moment` 為 `True` 的另一面
+
+### 限制（誠實記錄）
+
+- **兩個函式都還沒有被 `main.py` 呼叫。** 五項定案中的 429、`Retry-After` 標頭、`quota_exceeded` 稽核、503、401 都還沒有實作，目前只有判斷與計算的函式和單元測試
+- **`Retry-After` 的值可能長達 31 天（約 268 萬秒）。** 各家客戶端 SDK 遇到這麼大的值會怎麼處理（照等、設上限、或忽略後照自己的節奏重試）沒有查證，不確定它能阻止自動重試
+- `≥` 仍會小幅超用：已用 999、額度 1000 的人會被放行，那一次可能花超過 1。不做預扣，這是 7.10 已接受的取捨
+- `is_over_quota()` 沒有檢查負數或非整數的輸入
+- 守住時區換算的測試只有一個，而且輸入剛好落在台北 10/1 00:00 整；月初 8 小時內的其他時間點（例如 00:30、07:59）沒有各自的測試
+- 第一版的錯誤 3、4 是貼出來時就被指出的，沒有實際看過它們的失敗訊息（`day is out of range for month`、`TypeError`）
+- 二月（28 或 29 天）、小月（30 天）沒有各自的測試；天數由 `datetime` 相減得出，沒有自己寫天數表
+- 固定偏移只適用台北時間（E86 定案 1 的代價）
+- 稽核的 `status` 多一種值（`quota_exceeded`）後，步驟 9 換成 DynamoDB 時要一併納入
+
+### 面試可用的說法
+
+- 「超額我回 429 並附 `Retry-After`，值是到台北時間下個月 1 號的秒數。我考慮過 402 和 403：402 暗示付費就能解決，403 會跟權限問題混在一起。429 的缺點是 SDK 會自動重試，但我的額度檢查排在呼叫模型之前，重試只會打到我的 Gateway，不會多花一毛錢。」
+- 「判斷超額我用大於等於。用大於的話，額度 0 的人還能呼叫一次，這是我拆 LiteLLM 時特別測過的邊界。我把它寫成測試，也實際改成大於、看到它變紅。」
+- 「被額度擋下的請求我照樣寫稽核，不然查不到誰在額度用完之後還一直打。但 API Key 驗證失敗的不寫，因為沒有身分可以記，而且任何人都能拿假 Key 把稽核表灌爆。」
+- 「我做破壞實驗時把時區換算拿掉，五個測試只紅一個。原因是兩個帶時區的時間相減，Python 算的是真正的時間差，所以只有月份判斷會錯，而且只錯在每月 1 號的前 8 小時。那個測試如果沒寫，這個錯會讓剛被擋下的人收到『0 秒後重試』。我也因此改掉一行寫錯的測試註解。」
+- 「函式還沒寫完但要先推送時，我不刪測試，而是函式留空殼、測試掛跳過標記一起推，主線保持綠燈，測試也不會離開版本紀錄。回來接著做的第一步是撕掉標記、先看到紅，因為跳過的測試不會提醒你它還在跳過。」
+
+---
+
+**推送：** `is_over_quota` 與空殼：`8184c53`（10/7 16:57，已推送）。`seconds_until_next_period` 的實作（`feat: implement seconds_until_next_period for Retry-After`）與本筆紀錄於 10/7 晚上一起推送；commit 前以 `git status` 確認只有 `app/quota.py`、`tests/test_quota.py`。
+
+---
+
+## 目前進度（2026-10-07 18:40）
 
 - 開工前待辦 1 ✅（E76）；待辦 2（digest 複查）已可執行，尚未做
 - 步驟 1-1（Email）✅（E77，已推送）
@@ -1408,11 +1632,12 @@ FAILED tests/test_pricing.py::test_cost_charges_at_least_one_for_tiny_usage - Ke
 - 步驟 1-6（兩個去處都已遮罩）✅（E83，已推送）
 - **步驟 1 全部完成**
 - 期末簡報 v1 已記錄（E84），已推送（簡報 `8508164`；紀錄 `docs: record final presentation v1 evidence`，`8508164..b33144c`，10/6 02:08）
-- 交接說明為 `docs/handoff/m2-step3-handoff.md`（取代 `m2-step2-handoff.md`）
+- 交接說明為 `docs/handoff/m2-step5-handoff.md`（接在 `m2-step3-handoff.md` 之後；後者的第 3、4、5、9、10 節仍有效）
 - **步驟 2（個資類別進稽核）✅（E85，程式已推送 `53a4491`）；目前 `45 passed`**
 - **步驟 3（`period_of()`：台北時間切月）✅（E86）；已推送 `249921d`**
-- **步驟 4（`cost_micro_usd()`：最小成本函式）✅（E87）；目前 `55 passed`**
-- 下一步：步驟 5（DynamoDB Local：docker-compose、boto3、建表）；步驟 6、7 中不需要資料庫的純邏輯（API Key 雜湊、額度判斷）可先做；下一筆是 E88
+- **步驟 4（`cost_micro_usd()`：最小成本函式）✅（E87，已推送 `3491977`）**
+- **步驟 7 的純邏輯（超額回應五項定案、`is_over_quota()`、`seconds_until_next_period()`）✅（E88）；目前 `64 passed`。** 接線（429、`Retry-After`、503、稽核）尚未做
+- 下一步：步驟 5（DynamoDB Local：docker-compose、boto3、建表）；步驟 6 的純邏輯（API Key 算成 SHA-256）可先做；下一筆是 E89
 - 預計 10/10 結案（原訂 10/11）
 
 ---
@@ -1422,7 +1647,8 @@ FAILED tests/test_pricing.py::test_cost_charges_at_least_one_for_tiny_usage - Ke
 | 項目 | 目前的建議 | 何時定 |
 |---|---|---|
 | `python:3.12-slim` digest 複查（E74 的冷卻期例外） | 10/5 05:50（台北時間）起已滿 3 天，尚未執行；步驟 5 開 Docker 時一併確認 digest 仍可拉取 | 步驟 5 |
-| 超額回應的狀態碼、錯誤類型、是否附 `Retry-After`（決策書 12.5） | 步驟 7 開工前列選項比較 | 步驟 7 |
+| ~~超額回應的狀態碼、錯誤類型、是否附 `Retry-After`（決策書 12.5）~~ | ✅ 10/7 定案：429、固定字串、附 `Retry-After`（E88） | — |
+| `Retry-After` 長達 31 天時，客戶端 SDK 的行為（E88） | 查 OpenAI SDK 等常見客戶端對很大的 `Retry-After` 怎麼處理；步驟 11 真實驗收時觀察一次 | 步驟 7 接線或步驟 11 |
 | `pii_types` 在 DynamoDB 的型別（E85） | 預計用 List（要能存空值）；查證官方文件後定案 | 步驟 9 |
 | 輸出 token 數是否已包含思考 token（E87） | 對照 OpenAI 官方文件與 `app/providers/openai_client.py`，確認 `cost_micro_usd()` 不會漏算或重複計算 | 步驟 8 |
 | 沒有單價時的錯誤類型（E87） | 目前是通用的 `ValueError`；評估是否改為專用的錯誤類型，並把單價搬到設定檔 | M3 |
