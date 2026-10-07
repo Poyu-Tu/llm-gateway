@@ -1,3 +1,4 @@
+import math
 from datetime import datetime, timezone, timedelta
 
 # 台北時間固定比 UTC 快 8 小時（台灣沒有日光節約時間）；用固定偏移就不必另外安裝時區資料
@@ -25,4 +26,16 @@ def is_over_quota(limit_micro_usd: int, used_micro_usd: int) -> bool:
 # Retry-After 的值：告訴被擋下的客戶端，額度什麼時候恢復
 def seconds_until_next_period(moment: datetime) -> int:
     """Return whole seconds from the moment until the next quota period starts."""
-    raise NotImplementedError("seconds_until_next_period is not written yet")
+    if moment.tzinfo is None:
+        raise ValueError("Moment must include a timezone")
+    taipei_moment = moment.astimezone(TAIPEI_TZ)
+    if taipei_moment.month == 12:
+        next_year = taipei_moment.year + 1
+        next_month = 1
+    else:
+        next_year = taipei_moment.year
+        next_month = taipei_moment.month + 1
+    next_start = datetime(next_year, next_month, 1, tzinfo=TAIPEI_TZ)
+    diff = next_start - taipei_moment
+    result = math.ceil(diff.total_seconds())
+    return result
