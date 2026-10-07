@@ -379,6 +379,7 @@ E         + Mail [PHONE]@example.com now
 | 16 | 全文用詞：1.3、7.9、8.1、PART 9 與其他出現處 | 「RAG」與「向量資料庫」不並列當同義詞。不做的項目一律寫「知識檢索（RAG）」；「向量資料庫」只在講元件或成本時單獨出現。1.3 的「不做知識檢索(RAG)/向量資料庫」改為「不做知識檢索（RAG）」（E84） |
 | 17 | 3.2 的 `audit` 表、8.2 的 M2 | 補上個資類別的欄位名稱與寫法：`pii_types`，值為不含中括號的類別名稱清單，順序固定為 `EMAIL`、`CARD`、`PHONE`、`TW_ID`，沒有個資時為空清單；成功與失敗的紀錄都有此欄（E85） |
 | 18 | 3.2 的「時區注意」、D2、D22（repo 結構） | 補上實作：`app/quota.py` 的 `period_of(moment)`，以固定偏移 `TAIPEI_TZ`（UTC+8）換算後回傳 `YYYY-MM`；只收帶時區的時間，沒帶時區丟 `ValueError`；不使用時區資料庫與 `tzdata`。repo 結構加上 `app/quota.py`（E86） |
+| 19 | D30、8.2 的 M2 與 M3、D22（repo 結構） | 補上 M2 的實作：`app/pricing.py` 的 `cost_micro_usd(model, input_tokens, output_tokens)`；單價以整數存（每一百萬個 token 多少 micro-USD），輸入與輸出加總後進位一次；沒有單價的模型丟 `ValueError`。M2 單價為程式內的字典常數，M3 搬到設定檔並加入 `gpt-6-sol`。repo 結構加上 `app/pricing.py`（E87） |
 
 ---
 
@@ -1246,7 +1247,156 @@ E       Failed: DID NOT RAISE ValueError
 
 ---
 
-## 目前進度（2026-10-07 11:42）
+**推送（10/7 11:56）：** `feat: add period_of to split quota months in Taipei time`（`07457ec`）、`docs: record M2 step 3 evidence`（`249921d`），推送結果 `3badc2e..249921d  main -> main`。commit 前以 `git status` 確認只有 `app/quota.py`、`tests/test_quota.py`、`docs/evidence/m2-evidence-log.md`；以 `git log -3 --format="%h %ae %s"` 確認作者信箱為 GitHub noreply 信箱（D21）。
+
+---
+
+## E87. 步驟 4：最小成本函式 `cost_micro_usd()`（2026-10-07 11:59 定案；13:32～14:55 實作）
+
+**依據：** 決策書 D1（額度以 micro-USD 整數儲存）、D30（單價放 repo；沒有單價的模型一律拒絕；無條件進位成 micro-USD 整數）、E22（13 / 11 個 token = $0.0000068）、本檔「M2 步驟規劃」的缺口（成本換算排在 M3，但 M2 扣額度就需要金額）。
+
+**範圍：** M2 只做 `gpt-6-luna` 的最小版。完整單價設定檔、路由、Gateway 遇到沒有單價時回什麼給使用者，仍屬 M3。
+
+**生活比喻：** 計程車跳表。里程乘單價算出車資，不足一塊的零頭一律進位。
+
+### 定案（五項，10/7 11:59 本人決定）
+
+| # | 決定 | 採用 | 不選的選項 | 為什麼 |
+|---|---|---|---|---|
+| 1 | 放哪個檔 | 新檔 `app/pricing.py`、`tests/test_pricing.py` | 放進 `app/quota.py` | 算價錢與管額度是兩件事；M3 的完整單價表與路由會接在這裡 |
+| 2 | 單價寫在哪 | `pricing.py` 內的字典常數 `PRICES` | 現在就做獨立設定檔（JSON 或 TOML） | D30 的重點是單價在 repo 裡、改價要經過版本紀錄、不從網路下載，字典常數做得到。設定檔留到 M3 與路由規則一起做。代價：M3 要搬一次 |
+| 3 | 單價用什麼數字存 | 整數：每一百萬個 token 多少 micro-USD（Luna 輸入 `100_000`、輸出 `500_000`） | 小數 `0.10`、`0.50` | 小數有誤差（E25：6.8 被存成 6.799999999999999）；全程整數就不會發生 |
+| 4 | 進位幾次 | 輸入與輸出的金額先加總，最後進位一次（1.3 + 5.5 = 6.8 → 7） | 輸入、輸出各自進位再相加（2 + 6 = 8） | 各自進位每次最多多收 1 micro-USD，也對不上 D30 的 7 |
+| 5 | 沒有單價的模型 | 丟 `ValueError` | 當成 0 元 | D30：「不知道多少錢」不能當成「不用錢」（E23 的失敗模式） |
+
+**函式：** `cost_micro_usd(model, input_tokens, output_tokens)`，回傳整數。思考 token 不另外傳入（見限制）。
+
+### 做法：分五小段，先寫測試、看它失敗，再寫功能
+
+| 段 | 內容 | 結果 |
+|---|---|---|
+| 1 | 第一個測試（兩百萬 / 一百萬 → 700,000） | `ModuleNotFoundError: No module named 'app.pricing'`，`1 error during collection` |
+| 2 | 單價字典與最小版函式（先乘完加完，最後整數除法） | `52 passed` |
+| 3 | 13 / 11 → 7 的測試 → 加上進位 | `1 failed, 52 passed`（`assert 6 == 7`）→ `53 passed` |
+| 4 | 沒有單價的模型的測試 → 加上拒絕 | `1 failed, 53 passed`（`KeyError: 'gpt-6-astra'`）→ `54 passed` |
+| 5 | 補極小用量的測試；三個破壞實驗 | `55 passed`；破壞結果見下 |
+
+### 幾個設計上的重點
+
+**測試資料的輸入與輸出數量故意不同。** 兩邊都用一百萬時，程式把兩個單價拿反，答案一樣是 600,000，測試照樣通過。這是 E86「跨年測試的月與日相同」學到的事，當天就用上。
+
+**先乘完加完，最後只除一次。** 先除的話，`13 × 100_000 ÷ 1_000_000` 會先出現 1.3 這種零頭，整數就守不住。
+
+**進位用餘數判斷，不用新語法。** `//` 取商的整數部分，`%` 取餘數；餘數不是 0 代表有零頭，就多收 1。
+
+| 例子 | `total` | `total // MILLION` | `total % MILLION` | 結果 |
+|---|---|---|---|---|
+| 13 / 11 | 6,800,000 | 6 | 800,000 | 6 + 1 = 7 |
+| 兩百萬 / 一百萬 | 700,000,000,000 | 700,000 | 0 | 700,000 |
+
+**生活比喻（進位）：** 遊覽車一台坐 40 人。81 個人，剩下的 1 個人還是要再派一台；剛好 80 人就不用多派。
+
+**沒有單價的模型：原本就會報錯，為什麼還要改。** 寫功能前，查字典那行已經會丟 `KeyError`。仍然加上明確的檢查，原因有二：① 原本是碰巧擋下的，哪天有人把查字典改成「查不到就給 0」，沒有單價的模型就變成免費，而測試會在那時變紅；② `KeyError: 'gpt-6-astra'` 只說字典沒有這個欄位，看日誌的人要的是「這個模型沒有設定單價」。
+
+**生活比喻：** 自動販賣機按了沒有貨的按鈕，機器卡住也算沒有出貨，但應該亮「此商品未販售」的燈。
+
+**新語法：** 字典裡再放字典（`PRICES["gpt-6-luna"]["input"]`，像飲料店價目表先找品項、再找杯型）；數字裡的底線（`1_000_000`，只是給人看的千分位）；`//` 整數除法；`not in`；`f"…{model}"`（把變數的值填進字串）。
+
+### 本人撰寫（`app/pricing.py`）
+
+```python
+# 一百萬：單價是以「每一百萬個 token」報價的
+MILLION = 1_000_000
+
+# 單價寫在 repo 裡，改價要經過版本紀錄；不從網路下載價格表
+# 單位：每一百萬個 token 多少 micro-USD（Luna 輸入 $0.10 → 100_000，輸出 $0.50 → 500_000）
+PRICES = {
+    "gpt-6-luna": {"input": 100_000, "output": 500_000},
+}
+
+
+# 金額全程用整數算，避免小數誤差；額度就是靠這個數字扣的
+def cost_micro_usd(model: str, input_tokens: int, output_tokens: int) -> int:
+    """Return the cost of one call in micro-USD, rounded up to a whole number."""
+    if model not in PRICES:
+        raise ValueError(f"No price configured for model: {model}")
+    price = PRICES[model]
+    total = input_tokens * price["input"] + output_tokens * price["output"]
+    result = total // MILLION
+    if total % MILLION != 0:
+        result = result + 1
+    return result
+```
+
+### 測試（本人撰寫，`tests/test_pricing.py`，4 個；測試數 51 → 55）
+
+| 測試 | 輸入 | 預期 | 在守什麼 |
+|---|---|---|---|
+| `test_cost_uses_input_and_output_prices` | Luna，2,000,000 / 1,000,000 | `700_000` | 兩個單價各用在對的地方；沒有零頭時不能多收 |
+| `test_cost_rounds_up_to_whole_micro_usd` | Luna，13 / 11 | `7` | D30 的例子：有零頭要進位 |
+| `test_cost_rejects_model_without_price` | `gpt-6-astra`，13 / 11 | 丟 `ValueError` | 沒有單價不能當成 0 元 |
+| `test_cost_charges_at_least_one_for_tiny_usage` | Luna，1 / 0 | `1` | 0.1 micro-USD 也要收 1 |
+
+### 每個斷言都看過它失敗
+
+| # | 程式的狀態 | 結果 | 失敗訊息 |
+|---|---|---|---|
+| 1 | 還沒進位（第 3 段寫功能前） | `1 failed, 52 passed` | `assert 6 == 7` |
+| 2 | 還沒加拒絕（第 4 段寫功能前） | `1 failed, 53 passed` | `KeyError: 'gpt-6-astra'` |
+| 3 | 破壞 A：兩個單價對調 | `2 failed, 53 passed` | `assert 1100000 == 700000`、`assert 8 == 7` |
+| 4 | 破壞 B：`!= 0` 改成 `>= 0`（不管有沒有零頭都多收 1） | `1 failed, 54 passed` | `assert 700001 == 700000` |
+| 5 | 破壞 C：`result + 1` 改成 `result + 0`（忘了進位） | `2 failed, 53 passed` | `assert 6 == 7`、`assert 0 == 1` |
+
+**判讀：**
+- 第 3 項：輸入與輸出的 token 數不同，拿反才看得出來。極小用量那個測試沒有變紅：只有 1 個 token 時，用哪個單價都不到 1 micro-USD，進位後都是 1；它守的是進位，不是單價
+- 第 4 項：第一個測試同時守著「沒有零頭不能多收」；它與 13 / 11 那個測試從兩邊夾住進位的條件
+- 第 5 項：`assert 0 == 1` 就是「極短的請求免費」的樣子。不進位時，alice 的 US$0.001 額度擋不住一直送極短請求的人
+
+**還原確認：** 每個實驗做完立刻改回；最後 `55 passed`，`git status` 只有 `app/pricing.py`、`tests/test_pricing.py` 兩個未追蹤的新檔。
+
+### 挫折 1：測試檔名打錯
+
+測試檔一開始存成 `tests/test_princing.py`。pytest 只看檔名是否以 `test_` 開頭，所以照常執行，沒有任何錯誤；是從輸出的 `ERROR collecting tests/test_princing.py` 那行看出來的。commit 前以 `ren tests\test_princing.py test_pricing.py` 改正。
+
+- **學到的：** 檔名打錯不會讓測試失敗；公開 repo 的檔名與 commit 訊息一樣，推上去之前要讀一遍
+
+### 挫折 2：破壞實驗 A 第一次做的不是原本要做的實驗
+
+第一次對調單價時，把 `output` 打成 `ouput`：
+
+```
+FAILED tests/test_pricing.py::test_cost_uses_input_and_output_prices - KeyError: 'ouput'
+FAILED tests/test_pricing.py::test_cost_rounds_up_to_whole_micro_usd - KeyError: 'ouput'
+FAILED tests/test_pricing.py::test_cost_charges_at_least_one_for_tiny_usage - KeyError: 'ouput'
+3 failed, 52 passed
+```
+
+- **怎麼判讀：** 三個測試都紅，但訊息是 `KeyError`，不是金額不符。紅的原因是「字典沒有這個欄位」，不是「單價拿反」，所以還沒有驗證到要驗的東西
+- **解法：** 重做一次，得到上表第 3 項的 `2 failed`
+- **附帶的觀察：** 欄位名稱打錯，Python 當場報錯、三個測試全紅，不會安靜地算出錯的金額。E85 的 `"PHON"` 是值打錯，程式照跑；這次是欄位名打錯，程式直接停
+- **學到的：** 破壞實驗變紅之後要讀失敗訊息，確認是為了預期的原因而紅。與 E85 挫折 2（`TypeError` 是測試自己寫錯造成的紅，不能當成功能還沒做的證據）同類
+
+### 限制（誠實記錄）
+
+- **`cost_micro_usd()` 還沒有被任何地方呼叫。** 步驟 8（同步扣減）才接進 `main.py`；目前只有單元測試
+- **思考 token 的算法尚未查證。** 函式只收輸入與輸出兩個數字，前提是「回應的輸出 token 數已包含思考 token」（思考 token 以輸出單價計費，D28）。這個前提沒有對照 OpenAI 官方文件與 `app/providers/openai_client.py`，步驟 8 接線時確認，否則可能漏算或重複計算。`gpt-6-luna` 設為 `reasoning_effort: none`，實測思考 token 為 0（E22），所以 M2 不受影響
+- 只有 `gpt-6-luna` 的單價；`gpt-6-sol` 在 M3 加入
+- 單價是手動抄進程式的，OpenAI 改價時不會自動更新，也沒有檢查機制；與供應商帳單對帳排在 M6（決策書 12.5）
+- 沒有單價時丟的是通用的 `ValueError`。M3 要讓 Gateway 針對這種情況回應時，可能需要專用的錯誤類型才能與其他 `ValueError` 區分
+- token 數是負數、或不是整數時的行為沒有定義，也沒有測試
+- 0 個 token（0 / 0）沒有測試
+- 單價寫成字典常數而不是設定檔，與 D30「放 repo 設定檔」的字面不完全相同；M3 搬到設定檔（定案 2 的代價）
+
+### 面試可用的說法
+
+- 「成本我全程用整數算：單價存成『每百萬 token 多少 micro-USD』，先乘完加完，最後才除一次。拆解 LiteLLM 時我看過它用浮點數把 6.8 存成 6.799999，所以我不讓小數出現在算式裡。」
+- 「零頭一律進位。我有一個測試是只送 1 個 token，成本 0.1 micro-USD，要收 1。不進位的話它是 0 元，額度很小的使用者就能用極短的請求無限次呼叫。」
+- 「沒有設定單價的模型，函式直接拒絕。其實不加檢查，查字典那行本來就會報錯；但那是碰巧擋下的，哪天有人把它改成查不到就給 0，沒單價的模型就變成免費。所以我寫成明確的檢查，並用測試鎖住。」
+- 「我做破壞實驗時有一次打錯字，三個測試全紅，但訊息是欄位不存在，不是金額算錯。那次的紅不能算數，我重做了一次。變紅之後我會讀訊息，確認它是為了我預期的原因而紅。」
+
+---
+
+## 目前進度（2026-10-07 14:55）
 
 - 開工前待辦 1 ✅（E76）；待辦 2（digest 複查）已可執行，尚未做
 - 步驟 1-1（Email）✅（E77，已推送）
@@ -1260,8 +1410,9 @@ E       Failed: DID NOT RAISE ValueError
 - 期末簡報 v1 已記錄（E84），已推送（簡報 `8508164`；紀錄 `docs: record final presentation v1 evidence`，`8508164..b33144c`，10/6 02:08）
 - 交接說明為 `docs/handoff/m2-step3-handoff.md`（取代 `m2-step2-handoff.md`）
 - **步驟 2（個資類別進稽核）✅（E85，程式已推送 `53a4491`）；目前 `45 passed`**
-- **步驟 3（`period_of()`：台北時間切月）✅（E86）；目前 `51 passed`**
-- 下一步：步驟 4（最小成本函式：token × 單價 → 無條件進位成 micro-USD）；開工前先定「放哪個檔、單價寫在哪」；下一筆是 E87
+- **步驟 3（`period_of()`：台北時間切月）✅（E86）；已推送 `249921d`**
+- **步驟 4（`cost_micro_usd()`：最小成本函式）✅（E87）；目前 `55 passed`**
+- 下一步：步驟 5（DynamoDB Local：docker-compose、boto3、建表）；步驟 6、7 中不需要資料庫的純邏輯（API Key 雜湊、額度判斷）可先做；下一筆是 E88
 - 預計 10/10 結案（原訂 10/11）
 
 ---
@@ -1273,7 +1424,8 @@ E       Failed: DID NOT RAISE ValueError
 | `python:3.12-slim` digest 複查（E74 的冷卻期例外） | 10/5 05:50（台北時間）起已滿 3 天，尚未執行；步驟 5 開 Docker 時一併確認 digest 仍可拉取 | 步驟 5 |
 | 超額回應的狀態碼、錯誤類型、是否附 `Retry-After`（決策書 12.5） | 步驟 7 開工前列選項比較 | 步驟 7 |
 | `pii_types` 在 DynamoDB 的型別（E85） | 預計用 List（要能存空值）；查證官方文件後定案 | 步驟 9 |
-| M2 的最小成本函式放哪裡、單價寫在哪 | 步驟 4 開工前決定；需與 D30（單價放 repo 設定檔）一致 | 步驟 4 |
+| 輸出 token 數是否已包含思考 token（E87） | 對照 OpenAI 官方文件與 `app/providers/openai_client.py`，確認 `cost_micro_usd()` 不會漏算或重複計算 | 步驟 8 |
+| 沒有單價時的錯誤類型（E87） | 目前是通用的 `ValueError`；評估是否改為專用的錯誤類型，並把單價搬到設定檔 | M3 |
 | 本人尚未回覆：決策書 11.1 的 6 分鐘配置、D33～D40 是否符合理解 | 10/4 開場已問一次，不再重複詢問 | 本人回覆時 |
 | `protect-main` 加「CI 通過才能合併」、CodeQL | 沿用 M1 | 10/12 那週 |
 | `/docs`、`/openapi.json` 是否關閉 | 沿用 M1 | M4 前 |
