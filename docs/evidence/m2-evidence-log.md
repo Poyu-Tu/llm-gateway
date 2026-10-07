@@ -378,6 +378,7 @@ E         + Mail [PHONE]@example.com now
 | 15 | D22（repo 結構）、11.5 | 新增 `docs/slides/`：放簡報與旁白稿；影片檔不進 repo（E84） |
 | 16 | 全文用詞：1.3、7.9、8.1、PART 9 與其他出現處 | 「RAG」與「向量資料庫」不並列當同義詞。不做的項目一律寫「知識檢索（RAG）」；「向量資料庫」只在講元件或成本時單獨出現。1.3 的「不做知識檢索(RAG)/向量資料庫」改為「不做知識檢索（RAG）」（E84） |
 | 17 | 3.2 的 `audit` 表、8.2 的 M2 | 補上個資類別的欄位名稱與寫法：`pii_types`，值為不含中括號的類別名稱清單，順序固定為 `EMAIL`、`CARD`、`PHONE`、`TW_ID`，沒有個資時為空清單；成功與失敗的紀錄都有此欄（E85） |
+| 18 | 3.2 的「時區注意」、D2、D22（repo 結構） | 補上實作：`app/quota.py` 的 `period_of(moment)`，以固定偏移 `TAIPEI_TZ`（UTC+8）換算後回傳 `YYYY-MM`；只收帶時區的時間，沒帶時區丟 `ValueError`；不使用時區資料庫與 `tzdata`。repo 結構加上 `app/quota.py`（E86） |
 
 ---
 
@@ -1083,7 +1084,169 @@ E         ?           ++++++++++
 
 ---
 
-## 目前進度（2026-10-07 00:45）
+## E86. 步驟 3：`period_of()` 以台北時間切月（2026-10-07 01:05 定案；10:05～11:42 實作）
+
+**依據：** 決策書 D2（`quotas` 的排序鍵 `period`，`YYYY-MM`，台北時間）、3.2「時區注意」（台北 10/1 00:30 = UTC 9/30 16:30，應歸入 10 月）、8.2 M2「`period` 以台北時間切月，寫成單一函式並加跨月邊界的 pytest」。
+
+**問題：** 系統內的時間都用 UTC 記。台北比 UTC 快 8 小時，每個月 1 號的 00:00～07:59（台北）在 UTC 還是上個月的最後一天；直接取 UTC 的月份，這 8 小時的用量會記到上個月的額度。
+
+**生活比喻：** 跨年夜台北已經倒數完，倫敦還在 12/31 下午。同一個瞬間，兩地的日曆不同頁；記帳前要先講好看誰的日曆。
+
+### 定案（四項，10/7 01:05 本人決定）
+
+| # | 決定 | 採用 | 不選的選項 | 為什麼 |
+|---|---|---|---|---|
+| 1 | 台北時間怎麼表示 | 固定偏移 `timezone(timedelta(hours=8))`，寫成具名常數 `TAIPEI_TZ` | 時區資料庫 `ZoneInfo("Asia/Taipei")` | 台灣沒有日光節約時間，兩者結果相同。時區資料庫在 Windows 要另外安裝 `tzdata`（多一個相依套件，要過 D35 的冷卻期），容器與 Lambda 有沒有時區資料也要各自確認；固定偏移全用 Python 內建，三個環境一定一致。代價：規則改變時要手動改程式 |
+| 2 | 函式收什麼 | 收一個時間點 `period_of(moment)` | 函式自己取「現在」 | 跨月邊界一個月只出現一次；函式自己取時間，測試就無法重現邊界。呼叫端傳 `datetime.now(timezone.utc)` |
+| 3 | 沒帶時區的時間 | 拒絕，丟 `ValueError` | 當成 UTC | 不知道是哪個時區就不該猜；與 D30「不知道多少錢不能當成不用錢」同一個想法 |
+| 4 | 放哪個檔 | 新檔 `app/quota.py`、`tests/test_quota.py` | 放進 `app/audit.py` | 它屬於額度，不屬於稽核；步驟 7、8 的額度檢查與扣減也會放這裡 |
+
+**升級門檻（定案 1）：** 系統要服務多個時區，或服務的地區有日光節約時間時，改用時區資料庫。
+
+### 做法：分六小段，先寫測試、看它失敗，再寫功能
+
+| 段 | 內容 | 結果 |
+|---|---|---|
+| 1 | 互動模式做出一個帶時區的時間點，看 `.year`、`.month` | — |
+| 2 | 第一個測試（月中） | `ModuleNotFoundError: No module named 'app.quota'`，`1 error during collection` |
+| 3 | 最小版函式：只把時間格式化成 `YYYY-MM` | `46 passed` |
+| 4 | 四個邊界測試 → 加上換算台北時間 | `3 failed, 47 passed` → `50 passed` |
+| 5 | 兩個破壞實驗 | `1 failed, 49 passed`、`4 failed, 46 passed`；還原後 `50 passed` |
+| 6 | 沒帶時區的測試 → 加上拒絕 | `1 failed, 50 passed`（`DID NOT RAISE ValueError`）→ `51 passed` |
+
+**新的失敗樣子（第 2 段）：** E81 是「檔案在、函式不在」（`ImportError: cannot import name`）；這次是「整個檔都不在」（`ModuleNotFoundError`）。兩者都停在收集階段，45 個舊測試一個都沒跑。
+
+### 新觀念（一次一個）
+
+| 觀念 | 白話 | 生活比喻 |
+|---|---|---|
+| `datetime(年, 月, 日, 時, 分, tzinfo=…)` | 一個時間點；`tzinfo` 那一格記時區 | 電影票：印著日期時間，還有一格「哪間影城」。少了那一格就不知道是哪一場 |
+| `strftime("%Y-%m")` | 照樣板把時間印成文字；`%Y` 是四位數的年，`%m` 是補 0 的兩位數月 | 喜帖上印好「＿＿年＿＿月」，把日期填進空格 |
+| `timedelta(hours=8)` | 一段時間的長度 | 票上的開演時間是時間點，「片長 2 小時」是長度 |
+| `moment.astimezone(TAIPEI_TZ)` | 同一個瞬間，換一地的日曆來讀 | 跨年倒數那一刻，倫敦看到 12/31 16:00，台北看到 1/1 00:00 |
+| `raise ValueError("…")` | 函式不交結果，直接報錯並停住 | 收銀機刷到讀不出來的條碼會拒收，不會自己猜一個價錢 |
+| `with pytest.raises(ValueError):` | 測試預期區塊內會發生這種錯誤；沒發生才算失敗 | 消防演習按測試鈕：鈴有響才合格 |
+
+**為什麼用 `%m`，不把 `.year` 和 `.month` 接起來：** `.month` 是數字，一月是 `1`，接起來變成 `2027-1`。`period` 是排序鍵，`2027-1` 與 `2027-10` 排在一起會亂；`%m` 會補 0。
+
+**互動模式的確認（第 4 段）：**
+
+```
+>>> moment = datetime(2026, 9, 30, 16, 30, tzinfo=timezone.utc)
+>>> taipei_moment = moment.astimezone(TAIPEI)
+>>> taipei_moment
+datetime.datetime(2026, 10, 1, 0, 30, tzinfo=datetime.timezone(datetime.timedelta(seconds=28800)))
+>>> taipei_moment.month
+10
+>>> taipei_moment == moment
+True
+```
+
+兩個值印出來的日期不同，但比較結果是 `True`：換算沒有改變時間點，只改變用哪一地的日曆讀它。
+
+### 本人撰寫（`app/quota.py`）
+
+```python
+from datetime import datetime, timezone, timedelta
+
+# 台北時間固定比 UTC 快 8 小時（台灣沒有日光節約時間）；用固定偏移就不必另外安裝時區資料
+TAIPEI_TZ = timezone(timedelta(hours=8))
+
+
+# 額度按台北時間的月初切；系統內的時間是 UTC，直接取月份會把每月 1 號凌晨算上個月
+def period_of(moment: datetime) -> str:
+    """Return the quota period (YYYY-MM, Taipei time) that the moment belongs to."""
+    if moment.tzinfo is None:
+        raise ValueError("Moment must include a timezone")
+    taipei_moment = moment.astimezone(TAIPEI_TZ)
+    result = taipei_moment.strftime("%Y-%m")
+    return result
+```
+
+### 測試（本人撰寫，`tests/test_quota.py`，6 個；測試數 45 → 51）
+
+| 測試 | 輸入（UTC） | 台北時間 | 預期 | 在守什麼 |
+|---|---|---|---|---|
+| `…_returns_year_and_month` | 2026-10-15 03:00 | 10/15 11:00 | `2026-10` | 回傳的格式 |
+| `…_keeps_last_minute_of_month` | 2026-09-30 15:59 | 9/30 23:59 | `2026-09` | 換算不能多推 |
+| `…_moves_first_minute_to_new_month` | 2026-09-30 16:00 | 10/1 00:00 | `2026-10` | 換算不能少推 |
+| `…_matches_decision_book_example` | 2026-09-30 16:30 | 10/1 00:30 | `2026-10` | 決策書 3.2 的例子 |
+| `…_moves_new_year_to_next_year` | 2026-12-31 16:00 | 2027/1/1 00:00 | `2027-01` | 年份跟著進位、月份補 0 |
+| `…_rejects_time_without_timezone` | 2026-10-15 03:00（沒帶時區） | — | 丟 `ValueError` | 不猜時區 |
+
+（測試名稱開頭皆為 `test_period_of`。）
+
+### 每個斷言都看過它失敗
+
+| # | 程式的狀態 | 結果 | 紅的是哪幾個 |
+|---|---|---|---|
+| 1 | 還沒換算，直接用 UTC 的年月（第 4 段寫功能前） | `3 failed, 47 passed` | 16:00、16:30、跨年 |
+| 2 | 破壞：`hours=8` 改成 `hours=9` | `1 failed, 49 passed` | 15:59 |
+| 3 | 破壞：樣板的 `%m` 改成 `%d` | `4 failed, 46 passed` | 月中、15:59、16:00、16:30 |
+| 4 | 還沒加拒絕（第 6 段寫功能前） | `1 failed, 50 passed` | 沒帶時區 |
+
+第 1 項的失敗訊息：
+
+```
+E       AssertionError: assert '2026-09' == '2026-10'
+E       AssertionError: assert '2026-12' == '2027-01'
+```
+
+**判讀：** 台北 10/1 00:00 的請求被記到 9 月的額度；跨年那筆的年與月都錯。
+
+第 2 項的失敗訊息：
+
+```
+E       AssertionError: assert '2026-10' == '2026-09'
+```
+
+**判讀：** 15:59 那個測試一寫就通過，多推一小時才看到它變紅。它守「不能多推」，另外三個邊界守「不能少推」，兩邊夾住才確定偏移剛好是 8 小時。
+
+第 3 項的失敗訊息：
+
+```
+FAILED …::test_period_of_returns_year_and_month - AssertionError: assert '2026-15' == '2026-10'
+FAILED …::test_period_of_keeps_last_minute_of_month - AssertionError: assert '2026-30' == '2026-09'
+FAILED …::test_period_of_moves_first_minute_to_new_month - AssertionError: assert '2026-01' == '2026-10'
+FAILED …::test_period_of_matches_decision_book_example - AssertionError: assert '2026-01' == '2026-10'
+```
+
+**判讀：** 「日」被印在「月」的位置，10/1 的用量會被記成 `2026-01`。**跨年那個測試沒有變紅：** 它的台北時間是 1 月 1 日，月與日都是 `01`，印錯欄位也得到 `2027-01`。
+
+第 4 項的失敗訊息：
+
+```
+E       Failed: DID NOT RAISE ValueError
+```
+
+**判讀：** Python 遇到沒帶時區的時間不會報錯，而是當成「這台機器的當地時間」。開發機設的是台北時間、雲端的機器通常是 UTC，同一行程式、同一個輸入，在月初那 8 小時會算出不同的月份，而且沒有任何錯誤訊息。
+
+**還原確認：** 兩個破壞實驗改回後 `50 passed`；`git status` 只有 `app/quota.py`、`tests/test_quota.py` 兩個未追蹤的新檔。
+
+**學到的：**
+- 測試資料的月與日相同時，分不出程式用的是月還是日。與 E81「對任何輸入都回 `False`，錯的卡號測試碰巧通過」同類；這次由另外四個測試的日期（15 日、30 日、10 月 1 日）夾住
+- 邊界要從兩邊測：只測「該換月的有換」，偏移寫成 9 小時也會通過
+
+### 限制（誠實記錄）
+
+- **`period_of()` 還沒有被任何地方呼叫。** 它在步驟 7（額度檢查）與步驟 8（扣減）才接進 `main.py`；目前只有單元測試
+- 固定偏移只適用台北時間；規則改變或要支援其他時區時必須改程式（定案 1 的代價）
+- 邊界只測了 9 月 → 10 月與跨年兩處；2 月底、閏年沒有各自的測試（換算由 `datetime` 處理，機制相同）
+- 傳入的時間都是 UTC；傳入其他時區的時間（例如本來就是台北時間）沒有測試
+- 「沒帶時區」只以 `tzinfo is None` 判斷
+- 跨年的測試資料月與日相同（見上）；沒有改資料，靠其他測試涵蓋
+- 第一個破壞方向（拿掉換算）沒有另外做一次，以第 4 段寫功能前的失敗紀錄代替
+
+### 面試可用的說法
+
+- 「額度按台北時間切月，但系統內的時間是 UTC，每個月 1 號的前 8 小時最容易記到上個月。我把換算寫成單一函式，函式收時間點、不自己取現在時間，所以測試可以直接給 9/30 15:59 和 16:00 這兩個相鄰的時間點。」
+- 「時區我用固定的 +8，沒有用時區資料庫。台灣沒有日光節約時間，兩者結果相同；固定偏移不需要多裝套件，本機、容器、Lambda 一定一致。如果系統要服務有日光節約的地區，就該換成時區資料庫，這我寫在升級門檻裡。」
+- 「沒帶時區的時間我直接拒絕。Python 預設會把它當成機器的當地時間，開發機是台北、雲端是 UTC，同一個輸入會算出不同的月份而且不報錯。」
+- 「我把偏移故意改成 9 小時，確認『月底最後一分鐘』那個測試會紅；又把月份的格式故意換成日，結果跨年那個測試沒紅，因為 1 月 1 日的月和日一樣。挑測試資料時我現在會避開這種巧合。」
+
+---
+
+## 目前進度（2026-10-07 11:42）
 
 - 開工前待辦 1 ✅（E76）；待辦 2（digest 複查）已可執行，尚未做
 - 步驟 1-1（Email）✅（E77，已推送）
@@ -1095,9 +1258,10 @@ E         ?           ++++++++++
 - 步驟 1-6（兩個去處都已遮罩）✅（E83，已推送）
 - **步驟 1 全部完成**
 - 期末簡報 v1 已記錄（E84），已推送（簡報 `8508164`；紀錄 `docs: record final presentation v1 evidence`，`8508164..b33144c`，10/6 02:08）
-- 交接說明更新為 `docs/handoff/m2-step2-handoff.md`（取代停在步驟 1-1 的 `m2-handoff.md`）
+- 交接說明為 `docs/handoff/m2-step3-handoff.md`（取代 `m2-step2-handoff.md`）
 - **步驟 2（個資類別進稽核）✅（E85，程式已推送 `53a4491`）；目前 `45 passed`**
-- 下一步：步驟 3（`period` 函式：台北時間切月 + 跨月邊界測試）；下一筆是 E86
+- **步驟 3（`period_of()`：台北時間切月）✅（E86）；目前 `51 passed`**
+- 下一步：步驟 4（最小成本函式：token × 單價 → 無條件進位成 micro-USD）；開工前先定「放哪個檔、單價寫在哪」；下一筆是 E87
 - 預計 10/10 結案（原訂 10/11）
 
 ---
