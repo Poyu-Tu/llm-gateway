@@ -9,7 +9,7 @@ from app.main import app, get_audit_path, get_client, get_hmac_key, get_user_id
 from tests.fakes import make_fake_client
 
 
-# 把三個領用窗口換成假的，回傳：測試用戶端、筆記本、稽核檔位置
+# 把四個領用窗口換成假的，回傳：測試用戶端、筆記本、稽核檔位置
 def make_test_client(tmp_path, error=None):
     """Swap the real dependencies for fakes and return what tests need."""
     fake_client, completions = make_fake_client(error=error)

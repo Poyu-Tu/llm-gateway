@@ -50,6 +50,7 @@ class BrokenDynamoDB:
         raise EndpointConnectionError(endpoint_url="http://127.0.0.1:8002")
 
 
+# 該放的要放：驗票口把所有人都擋掉時，只有這個測試會發現
 def test_chat_accepts_valid_key(tmp_path, dynamodb):
     client, _, _ = make_auth_test_client(tmp_path, dynamodb)
 
@@ -58,6 +59,7 @@ def test_chat_accepts_valid_key(tmp_path, dynamodb):
     assert response.status_code == 200
 
 
+# 沒帶 Key：回 401，並用 WWW-Authenticate 說明要用哪種方式驗證
 def test_chat_rejects_missing_key(tmp_path, dynamodb):
     client, _, _ = make_auth_test_client(tmp_path, dynamodb)
 
@@ -68,6 +70,7 @@ def test_chat_rejects_missing_key(tmp_path, dynamodb):
     assert response.headers["WWW-Authenticate"] == "Bearer"
 
 
+# Key 不存在：回應要和沒帶 Key 完全相同，外面分不出差別
 def test_chat_rejects_unknown_key(tmp_path, dynamodb):
     client, _, _ = make_auth_test_client(tmp_path, dynamodb)
 
@@ -77,6 +80,7 @@ def test_chat_rejects_unknown_key(tmp_path, dynamodb):
     assert response.json() == {"detail": "Authentication failed"}
 
 
+# Key 被停用：同樣的 401，不透露這把 Key 曾經存在
 def test_chat_rejects_disabled_key(tmp_path, dynamodb):
     client, _, _ = make_auth_test_client(tmp_path, dynamodb)
 
@@ -87,6 +91,7 @@ def test_chat_rejects_disabled_key(tmp_path, dynamodb):
     assert response.json() == {"detail": "Authentication failed"}
 
 
+# 被擋下的請求不碰模型（不花錢）、不寫稽核（不被假 Key 灌爆）；先確認真的是 401
 def test_chat_rejected_request_reaches_neither_model_nor_audit(tmp_path, dynamodb):
     client, completions, audit_path = make_auth_test_client(tmp_path, dynamodb)
 
@@ -97,8 +102,9 @@ def test_chat_rejected_request_reaches_neither_model_nor_audit(tmp_path, dynamod
     assert not audit_path.exists()
     
 
+# 資料庫連不上：帶的是正確的 Key 也不放行，但回 503 而不是 401
 def test_chat_returns_503_when_database_is_unreachable(tmp_path, dynamodb):
-    client, completions,audit_path = make_auth_test_client(tmp_path, dynamodb)
+    client, completions, audit_path = make_auth_test_client(tmp_path, dynamodb)
 
     app.dependency_overrides[get_dynamodb] = lambda: BrokenDynamoDB()
     response = client.post("/v1/chat", json={"message": "Say hi"}, headers={"Authorization": "Bearer " + TEST_KEY})
@@ -109,8 +115,9 @@ def test_chat_returns_503_when_database_is_unreachable(tmp_path, dynamodb):
     assert not audit_path.exists()
 
 
+# 資料庫有回應但辦不到（表不存在）：同樣回 503
 def test_chat_returns_503_when_key_table_is_missing(tmp_path, dynamodb):
-    client, completions,audit_path = make_auth_test_client(tmp_path, dynamodb)
+    client, _, _ = make_auth_test_client(tmp_path, dynamodb)
 
     dynamodb.delete_table(TableName=API_KEYS_TABLE)
     response = client.post("/v1/chat", json={"message": "Say hi"}, headers={"Authorization": "Bearer " + TEST_KEY})
