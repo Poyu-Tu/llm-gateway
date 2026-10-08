@@ -8,9 +8,11 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, Field
+from botocore.client import BaseClient
 
 from app.audit import append_audit, hash_prompt, make_summary, mask, detect_pii_types
 from app.providers.openai_client import chat
+from app.db import make_dynamodb_client
 
 # M1 固定用便宜模型、不思考；M3 才會依內容選模型
 MODEL = "gpt-6-luna"
@@ -43,6 +45,11 @@ def get_hmac_key() -> bytes:
 # 領用窗口：稽核紀錄檔的位置
 def get_audit_path() -> Path:
     return Path("data/audit.jsonl")
+
+
+# 領用窗口：資料庫連線（測試時會換成考場的）
+def get_dynamodb() -> BaseClient:
+    return make_dynamodb_client()
 
 
 # 健康檢查：只回狀態，不透露版本等資訊
