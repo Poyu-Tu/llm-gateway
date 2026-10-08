@@ -1,5 +1,9 @@
 import hashlib
 
+from botocore.client import BaseClient
+
+from app.db import API_KEYS_TABLE
+
 # Authorization 標頭的固定開頭；結尾的空格是前綴的一部分
 BEARER_PREFIX = "Bearer "
 
@@ -23,3 +27,17 @@ def extract_bearer_token(header: str | None) -> str | None:
     if token == "":
         return None
     return token
+
+
+# 查不到、被停用、狀態欄不存在，一律交回 None：呼叫的人分不出是哪一種，也就不會透露給外面
+def find_user_id(client: BaseClient, key_hash: str) -> str | None:
+    """Return the user id for an active API key hash, or None when the key must not be used."""
+    response = client.get_item(TableName=API_KEYS_TABLE, Key={"key_hash": {"S": key_hash}})
+    if "Item" not in response:
+        return None
+    item = response["Item"]
+    if "status" not in item:
+        return None
+    if item["status"]["S"] != "active":
+        return None
+    return item["user_id"]["S"]
