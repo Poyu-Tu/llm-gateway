@@ -381,6 +381,11 @@ E         + Mail [PHONE]@example.com now
 | 18 | 3.2 的「時區注意」、D2、D22（repo 結構） | 補上實作：`app/quota.py` 的 `period_of(moment)`，以固定偏移 `TAIPEI_TZ`（UTC+8）換算後回傳 `YYYY-MM`；只收帶時區的時間，沒帶時區丟 `ValueError`；不使用時區資料庫與 `tzdata`。repo 結構加上 `app/quota.py`（E86） |
 | 19 | D30、8.2 的 M2 與 M3、D22（repo 結構） | 補上 M2 的實作：`app/pricing.py` 的 `cost_micro_usd(model, input_tokens, output_tokens)`；單價以整數存（每一百萬個 token 多少 micro-USD），輸入與輸出加總後進位一次；沒有單價的模型丟 `ValueError`。M2 單價為程式內的字典常數，M3 搬到設定檔並加入 `gpt-6-sol`。repo 結構加上 `app/pricing.py`（E87） |
 | 20 | 12.5「超額回應的狀態碼與重試語意」、10.3 第 9 點、2.2 流程圖 [3]、3.2 的 `audit` 表、8.2 的 M2 | 補上超額回應的定案：429、`{"detail": "Monthly quota exceeded"}`、附 `Retry-After`（到台北時間下個月 1 號 00:00 的秒數，進位成整數）；已用 ≥ 額度就擋；被擋的請求寫稽核（`status` 新增 `quota_exceeded`），API Key 驗證失敗的不寫；額度讀不到回 503 `Quota service unavailable`、Key 錯誤回 401 `Authentication failed`。12.5 該列劃掉。實作為 `app/quota.py` 的 `is_over_quota()`、`seconds_until_next_period()`（E88） |
+| 21 | D22（repo 結構） | 加上 `compose.yaml`、`app/db.py`、`scripts/create_tables.py`、`tests/conftest.py`（E89） |
+| 22 | D36、8.2 的 M2 | 補上 D36 之後的資料層做法：本機用 DynamoDB Local（`amazon/dynamodb-local:3.3.1`，鎖 digest，`-sharedDb -inMemory`，只綁 `127.0.0.1:8001`）；連線由 `app/db.py` 的 `make_dynamodb_client()` 建立，網址來自必填的環境變數 `DYNAMODB_ENDPOINT_URL`；建表在 `scripts/create_tables.py`，不放進 Gateway（E89） |
+| 23 | 3.2 的 `quotas` 表 | 補上欄位名：`limit_micro_usd`、`used_micro_usd`；M2 只建 `api_keys`、`quotas`、`audit` 三張，`usage` 於 M5 建立（E89） |
+| 24 | 8.2 的 M2 | 補上：碰資料庫的測試打真的 DynamoDB Local，標 `integration`；測試用獨立的容器（`127.0.0.1:8002`），每個測試前清空（E89） |
+| 25 | 12.8 的「冷卻期的一次例外」、12.5 | 補上複查結果：10/7 以 `docker buildx imagetools inspect` 確認 `python:3.12-slim` 的 digest 仍存在且未變；未掃弱點（E89） |
 
 ---
 
@@ -1616,13 +1621,472 @@ E       ValueError: month must be in 1..12
 
 ---
 
-**推送：** `is_over_quota` 與空殼：`8184c53`（10/7 16:57，已推送）。`seconds_until_next_period` 的實作（`feat: implement seconds_until_next_period for Retry-After`）與本筆紀錄於 10/7 晚上一起推送；commit 前以 `git status` 確認只有 `app/quota.py`、`tests/test_quota.py`。
+**推送：** `is_over_quota` 與空殼：`8184c53`（10/7 16:57，已推送）。`seconds_until_next_period` 的實作 `a5bd2e9`（`feat: implement seconds_until_next_period for Retry-After`）、測試註解的更正 `cf4ac06`（`test: correct comments on what the period tests guard`）、本筆紀錄 `b3d1d73`（`docs: record M2 step 7 pure logic evidence`），10/7 18:34 推送，結果 `8184c53..b3d1d73  main -> main`；commit 前以 `git status` 確認只有 `app/quota.py`、`tests/test_quota.py`。
 
 ---
 
-## 目前進度（2026-10-07 18:40）
+## E89. 步驟 5：DynamoDB Local、boto3 連線、建表（2026-10-07 18:57～10-08 00:04；收尾 10-08 11:19～13:50）
 
-- 開工前待辦 1 ✅（E76）；待辦 2（digest 複查）已可執行，尚未做
+**依據：** 決策書 3.2（四張表與主鍵）、D2（`quotas` 用 `user_id` + `period`）、D3（`api_keys` 只存雜湊）、D19（版本與 digest 鎖定）、D35（套件冷卻期）、D36（M1 的稽核存檔案，M2 換成 DynamoDB Local）、8.2 M2（本機階段用 DynamoDB Local）、10.3 第 6 點（Gateway 的角色只給讀寫權限）；E13（官方範例預設對外開埠）、E74（`python:3.12-slim` 的冷卻期例外）。
+
+**範圍：** 把本機的資料庫跑起來、讓程式連得上、建好 M2 要用的三張表。`main.py` 這一步沒有動；讀寫資料表的接線在步驟 6～9。
+
+**生活比喻：** 駕訓班有兩塊場地。練習場（8001）是平常開發、驗收用的，裡面的東西會留著；考場（8002）每考一題就把場地清空重擺。兩塊分開，考試才不會把練習場擺好的東西清掉。程式裡的註解也用「練習場」「考場」這兩個詞。
+
+### 開工前待辦 2：`python:3.12-slim` 的 digest 複查（10/7 19:04～19:06，E74 的冷卻期例外結案）
+
+| 指令 | 結果 |
+|---|---|
+| `docker manifest inspect python:3.12-slim@sha256:dddfd7e0…0016` | `manifest verification failed for digest sha256:dddfd7e0…` |
+| `docker buildx imagetools inspect`（同一個 digest） | `MediaType: application/vnd.oci.image.index.v1+json`、`Digest: sha256:dddfd7e07f9d15aeeca61529320492139d21cac7f0070c00609243e51e4e0016` |
+
+- 第二個指令回報的 digest 與 `Dockerfile` 鎖定的一致：映像仍然存在，指紋沒有變
+- 第一個指令的訊息不是「被撤回」；撤回會是 `no such manifest` 或 `manifest unknown`。推測是這個較舊的指令遇到多平台索引時，自己驗算指紋對不上；**這個推測沒有查證**
+- **限制：** 只確認存在且指紋未變，沒有掃弱點（Trivy 於 CI 建立時加入）
+
+### 定案 1：compose（10/7 19:09 本人決定）
+
+| # | 決定 | 定案 | 不選的選項與理由 |
+|---|---|---|---|
+| 1 | 映像 | `amazon/dynamodb-local:3.3.1`，鎖 digest `sha256:ff89bd48…0dab`（7/31 上架，已過冷卻期；Docker Hub 的標籤清單與本人 `docker buildx imagetools inspect` 的結果一致） | `latest`：不可重現（D19） |
+| 2 | 資料 | `-inMemory`，容器停止即清空 | 掛磁碟：會留下資料檔，測試被舊資料干擾。代價：每次重開要重新建表、塞種子資料 |
+| 3 | 埠 | `127.0.0.1:8001:8000` | 8000 是 Gateway 的；不寫 `127.0.0.1` 會開給區域網路（E13） |
+| 4 | `-sharedDb` | 加 | 不加：會依存取金鑰與區域分成不同的資料庫，互相看不到，而且沒有任何錯誤 |
+| 5 | 檔名 | 根目錄 `compose.yaml` | `docker-compose.yml` 是舊檔名 |
+| 6 | 內容 | 只放 DynamoDB Local；Gateway 等步驟 11 前再加 | 一次只引入一樣新東西 |
+
+### 定案 2：連線（10/7 19:37 本人決定）
+
+| # | 決定 | 定案 | 不選的選項與理由 |
+|---|---|---|---|
+| 1 | 網址來源 | 環境變數 `DYNAMODB_ENDPOINT_URL`，必填，沒設就 `KeyError` | 給預設值：boto3 的預設是連真的 AWS，並自動使用電腦上 `aws login` 的身分 |
+| 2 | 假帳密 | 程式內的具名常數 `LOCAL_ACCESS_KEY`、`LOCAL_SECRET_KEY`（值 `"local"`），明確帶入 | 不帶：boto3 會去找真的 AWS 身分。放 `.env`：會讓人以為它是秘密 |
+| 3 | 位置 | `app/db.py` 的 `make_dynamodb_client()` | 放 `main.py`：腳本要用連線就得匯入整個 Gateway |
+
+**弱點：** M4 上雲時要回頭改 `app/db.py`。真的 AWS 不給網址、不帶假帳密，用 Fargate 的 IAM 角色。列入待決。
+
+### 定案 3：資料表與測試（10/7 20:10、20:39 本人決定）
+
+| # | 決定 | 定案 | 不選的選項與理由 |
+|---|---|---|---|
+| 1 | M2 建哪幾張 | `api_keys`、`quotas`、`audit` | `usage`：M5 的 Worker 才寫 |
+| 2 | 主鍵 | 照決策書 3.2：`key_hash`；`user_id` + `period`；`request_id`。全部是字串 | — |
+| 3 | 計費模式 | 練習場用 `PAY_PER_REQUEST` | 雲端用哪一種留到 M4（與免費額度有關，未查證），列入待決 |
+| 4 | 表名 | `app/db.py` 的常數 `API_KEYS_TABLE`、`QUOTAS_TABLE`、`AUDIT_TABLE` | 各處寫字串：打錯只會變成「找不到表」。常數名稱打錯會直接報錯 |
+| 5 | 建表程式 | `scripts/create_tables.py` 的 `create_tables(client)`，已存在的表就跳過 | 放 `app/`：會進容器；Gateway 在雲端不該有建表的權限（10.3 第 6 點） |
+| 6 | 碰資料庫的測試 | 打真的 DynamoDB Local，標 `integration`；連不到就明確地紅，不自動跳過 | 手寫的假 DynamoDB：不會解讀運算式，步驟 8 最容易錯的部分測不到。`moto`：多一個相依套件。沒有 Docker 的環境用 `uv run pytest -m "not integration"` |
+| 7 | 測試隔離 | compose 多一個 `dynamodb-test`（`127.0.0.1:8002`），測試只連它；`tests/conftest.py` 的 `dynamodb` fixture 把網址寫死為 8002，每個測試前刪掉所有表 | 共用 8001：驗收中途跑測試會清掉種子資料。拿掉 `-sharedDb`、用不同的假帳號分庫：依賴練習場獨有的行為 |
+
+**欄位名（10/7 20:21）：** `quotas` 的額度與已用量欄位叫 `limit_micro_usd`、`used_micro_usd`，與 `is_over_quota()` 的參數同名（E88）。
+
+### 做法：分九小段
+
+| 段 | 內容 | 結果 |
+|---|---|---|
+| 1 | `compose.yaml`，把 DynamoDB Local 跑起來 | 容器 `Up`，`127.0.0.1:8001->8000/tcp` |
+| 2 | `uv add boto3` | `64 passed` |
+| 3 | 互動模式第一次連線 | `list_tables()` 回空清單、狀態 200 |
+| 4 | `make_dynamodb_client()`：先寫 2 個測試 → 寫函式 → 兩個破壞實驗 | `1 error during collection` → `66 passed` |
+| 5 | 互動模式建第一張表、寫一筆、讀一筆 | `ACTIVE`；找不到資料時回應沒有 `Item` |
+| 6 | 測試專用的容器 `dynamodb-test` | 兩個容器都 `Up`（8001、8002） |
+| 7 | `create_tables()`：先寫 5 個測試 → 寫函式 | `1 error during collection` → `5 errors` → `1 failed, 70 passed` → `71 passed` |
+| 8 | 補註解與型別、三個破壞實驗（10/8） | 見「破壞實驗」；還原後 `71 passed` |
+| 9 | 執行入口，對練習場實際建表（10/8） | 8001 上有三張表；重複執行沒有錯誤 |
+
+### 第一部分：DynamoDB Local 跑起來（10/7 19:15）
+
+- `docker compose up -d`：映像 `Pulled 26.9s`、網路 `llm-gateway_default`、容器 `llm-gateway-dynamodb-1 Started`
+- `docker compose ps`：`Up`，`127.0.0.1:8001->8000/tcp`
+- 直接用 `curl.exe` 連 `http://127.0.0.1:8001`，回應內容是：
+
+```
+{"__type":"com.amazonaws.dynamodb.v20120810#MissingAuthenticationToken","Message":"Request must contain either a valid (registered) AWS access key ID or X.509 certificate."}
+```
+
+容器有在回應，並且要求帶存取金鑰（任何值都可以，但一定要有）。指令的 `-i` 打成了 `-1`，所以只看到回應內容，沒看到狀態碼那一行。
+
+- `docker stats --no-stream`：`190.9MiB / 3.823GiB`，`PIDS 41`
+
+| 項目 | 待機記憶體 | 來源 |
+|---|---|---|
+| 本案 Gateway（M1 映像） | 56.08 MiB | E76 |
+| DynamoDB Local（一個容器） | 190.9 MiB | 本筆 |
+| LiteLLM v1.102.0（有資料庫） | 584 MiB | E16 |
+
+DynamoDB Local 只在開發機上跑，不算進 Fargate 的 512 MiB；雲端用的是託管的 DynamoDB。兩個容器同時開時（20:53）：`dynamodb-test-1` 170.9 MiB、`dynamodb-1` 212.1 MiB。
+
+### 第二部分：boto3 與 `make_dynamodb_client()`（10/7 19:27～20:07）
+
+**安裝：** `uv add boto3` → `boto3==1.43.103`、`botocore==1.43.103`、`jmespath==1.1.0`、`python-dateutil==2.9.0.post0`、`s3transfer==0.19.2`、`six==1.17.0`、`urllib3==2.8.0`，共 7 個套件；`64 passed`。`pyproject.toml` 的 `exclude-newer` 是 `2026-09-27T00:00:00Z`（D35），這 7 個都在冷卻期之外。
+
+**互動模式第一次連線（19:32）：** `db.list_tables()` → `'TableNames': []`、`'HTTPStatusCode': 200`、`'server': 'Jetty(12.1.11)'`。
+
+**新觀念：`boto3.client(…)` 的五格。** 要連哪個服務、網址、區域、存取金鑰、密鑰。**生活比喻：** 寄包裹的託運單，五格都要填；「收件地址」那一格空著，貨運行會照預設送到總倉（真的 AWS）。
+
+**測試（`tests/test_db.py`，2 個，不需要容器；測試數 64 → 66）：**
+
+| 測試 | 準備 | 檢查 | 在守什麼 |
+|---|---|---|---|
+| `test_make_dynamodb_client_requires_endpoint` | `monkeypatch.delenv` 拿掉環境變數 | 丟 `KeyError` | 沒說要連哪裡就不連 |
+| `test_make_dynamodb_client_uses_endpoint_from_env` | `monkeypatch.setenv` 設成 `http://127.0.0.1:9999` | `client.meta.endpoint_url` 等於這個網址 | 連線真的指向環境變數給的網址 |
+
+- 第二個測試的埠用 9999 而不是 8001：函式把網址寫死成 8001 時，用 8001 測會碰巧通過
+- **新道具 `monkeypatch`：** 在一個測試的期間暫時改環境變數，測試結束自動還原。**生活比喻：** 試衣間，出來時衣服會掛回原位，不會穿著走
+
+**先寫測試：** `ERROR tests/test_db.py`，`1 error during collection`（`app/db.py` 還不存在）。
+
+**本人撰寫（`app/db.py`）：**
+
+```python
+import os
+
+import boto3
+from botocore.client import BaseClient
+
+# 區域固定東京，和之後上雲一致
+REGION = "ap-northeast-1"
+
+# 練習場用的假帳密：DynamoDB Local 不驗證真假，但一定要有值
+# 明確帶入，boto3 才不會去找這台電腦上真的 AWS 身分來用
+LOCAL_ACCESS_KEY = "local"
+LOCAL_SECRET_KEY = "local"
+
+# 表名只寫在這一處，別處一律用常數：常數名稱打錯會直接報錯，字串打錯只會變成「找不到資料表」
+API_KEYS_TABLE = "api_keys"
+QUOTAS_TABLE = "quotas"
+AUDIT_TABLE = "audit"
+
+
+# 要連哪裡一定要明講：沒設定就報錯，不讓 boto3 照預設去連真的 AWS
+def make_dynamodb_client() -> BaseClient:
+    """Return a DynamoDB client for the endpoint named in the environment."""
+    endpoint = os.environ["DYNAMODB_ENDPOINT_URL"]
+    client = boto3.client(
+        "dynamodb",
+        endpoint_url=endpoint,
+        region_name=REGION,
+        aws_access_key_id=LOCAL_ACCESS_KEY,
+        aws_secret_access_key=LOCAL_SECRET_KEY,
+    )
+    return client
+```
+
+第一版的回傳型別寫成 `-> bytes`、`import os, boto3` 寫在同一行；改為 `-> BaseClient`、分行匯入。結果 `66 passed`。
+
+**破壞實驗（兩個測試各看過一次失敗）：**
+
+| # | 改了什麼 | 結果 | 失敗訊息 |
+|---|---|---|---|
+| A | `os.environ["…"]` 改成 `os.environ.get("…")` | `1 failed, 65 passed` | `Failed: DID NOT RAISE KeyError` |
+| B | `endpoint_url=endpoint,` 那一行註解掉 | `1 failed, 65 passed` | `- http://127.0.0.1:9999` / `+ https://dynamodb.ap-northeast-1.amazonaws.com` |
+
+**判讀：**
+
+- 實驗 A：`.get()` 查不到會安靜地回 `None`，`boto3` 拿到 `None` 就照預設連真的 AWS。中括號查不到會當場報錯。兩種寫法只差在「查不到時吵不吵」
+- 實驗 B：少傳一格，連線就指向真的 AWS 東京，**程式沒有任何錯誤**。失敗訊息裡的 `+` 那行就是它本來會去的地方
+
+### 第三部分：互動模式建第一張表（10/7 20:17～20:30，連 8001）
+
+- `create_table` 建 `quotas`：`'TableStatus': 'ACTIVE'`，`'TableArn': 'arn:aws:dynamodb:ddblocal:000000000000:table/quotas'`
+- `put_item`（`alice`、`2026-10`、`limit_micro_usd` 為 `{"N": "1000"}`、`used_micro_usd` 為 `{"N": "0"}`）→ 200
+- `get_item` 拿回四欄；數字是帶引號的字串，要用時得 `int()`
+- 找不存在的 `bob`：回應裡沒有 `Item`（`"Item" in …` 為 `False`），不會報錯
+
+**新觀念：**
+
+| 觀念 | 白話 | 生活比喻 |
+|---|---|---|
+| `KeySchema` 的 `HASH`／`RANGE` | 分割鍵／排序鍵 | 置物櫃：`HASH` 是「哪一排」，`RANGE` 是「那一排的第幾格」 |
+| `AttributeDefinitions` | 只列主鍵用到的欄位；其他欄位寫入時才出現，不用事先宣告 | 訂抽屜櫃時只要講怎麼分格，不用講每格會放什麼 |
+| 型別標籤 `{"S": …}`／`{"N": "…"}` | 每個值都要標是字串還是數字；數字也寫成字串 | 寄國際包裹，每樣物品都要在申報單上填類別 |
+
+**步驟 7 的伏筆：** 「這個人這個月沒有額度紀錄」不會報錯，和「資料庫壞了」是兩種不同的情況。前者要擋還是放，尚未定案（列入待決）。
+
+### 第四部分：測試專用的容器（10/7 20:49～20:53）
+
+compose 加上 `dynamodb-test` 後，兩個容器都 `Up`，埠 8001 與 8002（過程見挫折 2）。
+
+**為什麼要分兩個容器：** fixture 每個測試前會刪掉所有資料表。和開發用的共用一個，驗收做到一半跑一次測試，種子資料就沒了。
+
+**為什麼 fixture 的網址寫死、不讀環境變數：** 這個道具會刪掉它連到的地方的所有資料表。讀環境變數的話，哪天環境變數指到別的地方，它就去刪那裡的表。
+
+**本人撰寫（`tests/conftest.py`，由提供的版本改寫）：**
+
+```python
+"""Shared fixtures for tests."""
+
+import pytest
+
+from app.db import make_dynamodb_client
+
+# 考場的網址寫死在這裡：這個道具會刪掉所有資料表，絕不能被指到別的地方
+TEST_ENDPOINT_URL = "http://127.0.0.1:8002"
+
+
+# 每個測試拿到的都是空的考場：先把上一個測試留下的表全部刪掉
+@pytest.fixture
+def dynamodb(monkeypatch):
+    """Return a client for the test-only DynamoDB Local, with all tables removed."""
+    monkeypatch.setenv("DYNAMODB_ENDPOINT_URL", TEST_ENDPOINT_URL)
+    client = make_dynamodb_client()
+    for name in client.list_tables()["TableNames"]:
+        client.delete_table(TableName=name)
+    return client
+```
+
+**新觀念：** `conftest.py` 是 pytest 的固定檔名，裡面的 fixture 所有測試檔都拿得到，不用匯入；`pytestmark = pytest.mark.integration` 把整個檔的測試都貼上同一張標籤；標籤要先在 `pyproject.toml` 的 `markers` 登記。
+
+**標籤的驗證（10/8 11:24）：** `uv run pytest -m "not integration"` → `66 passed, 5 deselected`。`deselected` 是「這次沒選它」，與 E88 的 `skipped`（測試自己掛著跳過）不同。
+
+### 第五部分：`create_tables()`（10/7 20:54～10/8 00:04；註解與型別 10/8 11:41）
+
+**測試（`tests/test_create_tables.py`，5 個，都要連考場；測試數 66 → 71）：**
+
+| 測試（開頭皆為 `test_create_tables`） | 檢查 | 在守什麼 |
+|---|---|---|
+| `…_creates_three_tables` | `sorted(names) == ["api_keys", "audit", "quotas"]` | 三張表都在；表名直接寫字串，常數的值打錯才抓得到 |
+| `…_gives_quotas_a_two_part_key` | `quotas` 的 `KeySchema` 是 `user_id`（`HASH`）加 `period`（`RANGE`） | 少了 `period`，換月會蓋掉上個月的紀錄 |
+| `…_keys_api_keys_by_key_hash` | `api_keys` 的 `KeySchema` 是 `key_hash` | 拿到 Key 的雜湊就能直接查 |
+| `…_keys_audit_by_request_id` | `audit` 的 `KeySchema` 是 `request_id` | 使用者拿回應裡的編號就能對回紀錄 |
+| `…_can_run_twice_and_keeps_data` | 建表、寫一筆、再建一次，沒有錯誤，而且那一筆還在 | 重複執行不出錯、不清資料 |
+
+**從紅到綠：**
+
+| 次 | 結果 | 原因 |
+|---|---|---|
+| 1 | `ModuleNotFoundError: No module named 'scripts.create_tables'`，`1 error during collection` | 函式還沒寫（預期的） |
+| 2 | `fixture 'dynamodb' not found`，`66 passed, 5 errors` | 見挫折 3 |
+| 3 | `1 failed, 70 passed`：`At index 0 diff: {'AttributeName': 'user_id', 'KeyType': 'HASH'} != {'AttributeName': 'key_hash', 'KeyType': 'HASH'}` | 見挫折 4 |
+| 4 | `71 passed` | — |
+
+函式以填空版（提示二）完成。
+
+**本人撰寫（`scripts/create_tables.py`，`dac3d3c` 的版本）：**
+
+```python
+from botocore.client import BaseClient
+
+from app.db import API_KEYS_TABLE, QUOTAS_TABLE, AUDIT_TABLE, make_dynamodb_client
+
+
+# 建表放在 scripts/，不放 app/：Gateway 在雲端不該有建表的權限
+def create_tables(client: BaseClient) -> None:
+    """Create the tables this milestone needs, skipping any that already exist."""
+    # 已經存在的表就跳過：重複執行不會報錯，也不會清掉裡面的資料
+    existing = client.list_tables()["TableNames"]
+
+    # 主鍵是 key_hash：Gateway 手上只有 Key 的雜湊，要拿它查出是誰
+    if API_KEYS_TABLE not in existing:
+        client.create_table(
+            TableName=API_KEYS_TABLE,
+            AttributeDefinitions=[
+                {"AttributeName": "key_hash", "AttributeType": "S"},
+            ],
+            KeySchema=[
+                {"AttributeName": "key_hash", "KeyType": "HASH"},
+            ],
+            # 練習場用隨用隨付；雲端用哪一種留到 M4 決定
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+    # user_id + period：換月自然是新的一筆，不用寫每月重置的排程
+    if QUOTAS_TABLE not in existing:
+        client.create_table(
+            TableName=QUOTAS_TABLE,
+            AttributeDefinitions=[
+                {"AttributeName": "user_id", "AttributeType": "S"},
+                {"AttributeName": "period", "AttributeType": "S"},
+            ],
+            KeySchema=[
+                {"AttributeName": "user_id", "KeyType": "HASH"},
+                {"AttributeName": "period", "KeyType": "RANGE"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+    # 一筆請求一筆紀錄，事後用 request_id 找
+    if AUDIT_TABLE not in existing:
+        client.create_table(
+            TableName=AUDIT_TABLE,
+            AttributeDefinitions=[
+                {"AttributeName": "request_id", "AttributeType": "S"},
+            ],
+            KeySchema=[
+                {"AttributeName": "request_id", "KeyType": "HASH"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+
+# 直接執行這個檔時才建表；被測試 import 時不會自己跑
+if __name__ == "__main__":
+    create_tables(make_dynamodb_client())
+```
+
+**為什麼 `api_keys` 的主鍵一定是 `key_hash`：** Gateway 收到請求時手上只有 Key 的雜湊，要拿它去查「這是誰」。主鍵是 `user_id` 的話查不了，而且一個人只能有一把 Key。
+
+**為什麼「已存在就跳過」：** 練習場的資料只放記憶體，每次重開容器都要重新建表；腳本要能放心地重複執行。
+
+**`-> None`（10/8）：** 表示這個函式做完事就結束，不交回東西。第一次補型別時漏了這一段，程式照跑、測試也是綠的（型別標註執行時不起作用），是讀 `git diff` 才看到的。
+
+### 破壞實驗（10/8 12:18～13:35）
+
+5 個測試裡，只有「`api_keys` 的主鍵」在寫功能時看過為了對的原因失敗（上表第 3 次），其餘四個一寫就通過。一次改一處，跑完立刻改回。
+
+| # | 改了什麼 | 結果 | 紅的是哪幾個 | 失敗訊息 |
+|---|---|---|---|---|
+| A | `audit` 那一段整個註解掉 | `2 failed, 3 passed` | 三張表都在；`audit` 主鍵 | `assert ['api_keys', 'quotas'] == ['api_keys', ...it', 'quotas']`、`At index 1 diff: 'quotas' != 'audit'`；`ResourceNotFoundException … DescribeTable operation: Cannot do operations on a non-existent table` |
+| B | `quotas` 的主鍵拿掉 `period`（`AttributeDefinitions` 與 `KeySchema` 各一行） | `2 failed, 3 passed` | `quotas` 兩段式主鍵；重複執行 | `assert [{'AttributeN...ype': 'HASH'}] == [{'AttributeN...pe':'RANGE'}]`；`ValidationException … GetItem operation: The number of conditions on the keys is invalid` |
+| C | `quotas` 的 `if QUOTAS_TABLE not in existing:` 改成 `if True:` | `1 failed, 4 passed` | 重複執行 | `ResourceInUseException … CreateTable operation: Cannot create preexisting table` |
+
+**判讀：**
+
+- **實驗 A：** 少建一張表，被兩個角度各抓一次。「數有幾張」的測試走到 `assert` 才紅；「`audit` 主鍵」的測試還沒走到 `assert`，在 `describe_table` 那一步就被資料庫退回。pytest 的 `At index 1 diff` 是照位置一格一格比的，「右邊多一項 `quotas`」指的是右邊的清單比較長，真正少的是 `audit`
+- **實驗 B：** 主鍵設錯，**建表照樣成功**。只用 `user_id` 當主鍵是合法的表，資料庫不知道設計上想要兩段。這個錯要靠測試把「我要兩段式主鍵」寫下來才抓得到
+- **實驗 B 的第二個紅：** 錯誤發生在 `GetItem`，不是 `PutItem`。寫入時 `period` 被當成普通欄位收下，沒有任何錯誤；讀取時指定兩段主鍵才對不上。「10 月的額度蓋掉 9 月的」就是這樣無聲發生的
+- **實驗 C：** 只紅一個。fixture 每個測試前都清空考場，所以只呼叫一次 `create_tables` 的四個測試碰不到「表已存在」；只有「跑兩次」的測試會製造這個情況
+- 實驗 B 的 `AttributeDefinitions` 要一起拿掉：只拿掉 `KeySchema` 那一行，DynamoDB 會在建表時先回報宣告了沒用到的欄位，五個測試全紅，但那是為了別的原因而紅
+
+**生活比喻（實驗 B）：** 跟木工訂抽屜櫃，本來要「每人一排、每月一格」，下單時漏寫月份，木工就做成每人一格。這是一張正常的訂單，木工不會打電話來問。
+
+**還原確認：** 每個實驗做完立刻改回，`git diff` 沒有輸出；最後 `71 passed`。
+
+### 執行入口：第一次對練習場建表（10/8 13:47）
+
+`scripts/create_tables.py` 最下面加上 `if __name__ == "__main__":`。**新觀念：** 檔案被直接執行時 `__name__` 是 `"__main__"`，被 `import` 時是檔案自己的名字。沒有這個判斷，測試檔 `import` 這個檔的瞬間就會去建表。**生活比喻：** 樂譜被收進館藏時不會發出聲音，有人拿上台演奏才會響。
+
+| 步驟 | 指令 | 結果 |
+|---|---|---|
+| 1 | `uv run pytest` | `71 passed`：`import` 時不會自己建表 |
+| 2 | `uv run python -m scripts.create_tables`（沒設環境變數） | `KeyError: 'DYNAMODB_ENDPOINT_URL'` |
+| 3 | 設 `DYNAMODB_ENDPOINT_URL` 為 `http://127.0.0.1:8001` 後再執行 | 沒有輸出、沒有錯誤 |
+| 4 | `list_tables()` | `['api_keys', 'audit', 'quotas']` |
+| 5 | 再執行一次 | 沒有輸出、沒有錯誤 |
+
+步驟 2 的輸出：
+
+```
+  File "…\scripts\create_tables.py", line 57, in <module>
+    create_tables(make_dynamodb_client())
+  File "…\app\db.py", line 23, in make_dynamodb_client
+    endpoint = os.environ["DYNAMODB_ENDPOINT_URL"]
+KeyError: 'DYNAMODB_ENDPOINT_URL'
+```
+
+**判讀：** 定案 2 第 1 項（沒設就報錯，不照預設連真的 AWS）第一次在測試以外的實際執行中起作用。
+
+**為什麼用 `python -m scripts.create_tables`：** `python scripts/create_tables.py` 會從 `scripts/` 資料夾找 `app`，找不到；`-m` 從專案根目錄找。
+
+### 挫折 1：兩個 `KeyType` 都打成 `HASH`（互動模式，10/7）
+
+```
+botocore.exceptions.ClientError: An error occurred (ValidationException) when calling the CreateTable operation: Too many hash keys specified.  All Dynamo DB tables must have exactly one hash key
+```
+
+- **怎麼讀 `ClientError`：** 括號裡是錯誤的種類，`when calling the … operation` 是哪個動作，冒號後面是原因
+- **判讀：** 這個檢查是 DynamoDB Local 做的，手寫的假資料庫不會有。佐證定案 3 第 6 項「測試打真的」
+
+### 挫折 2：`Started`，但 `ps` 看不到容器（10/7 20:49）
+
+`dynamodb-test` 的 `command` 把 `DynamoDBLocal.jar` 的句點打成逗號。`docker compose up -d` 顯示 `Started`，但 `docker compose ps`、`docker stats` 都只有一個容器。
+
+- **原因（本人找到）：** compose 不懂 `command` 裡的字是什麼意思，照樣啟動容器；容器裡的 Java 找不到那個檔，啟動後立刻結束
+- **容器的錯誤訊息沒有留下**
+- **學到的：** `Started` 只代表「啟動的動作做了」，不代表還活著。`Started` 但 `ps` 看不到時，用 `docker compose ps -a`（連已結束的也列出來）與 `docker compose logs 服務名稱` 找原因
+
+### 挫折 3：`fixture 'dynamodb' not found`（10/7）
+
+```
+E       fixture 'dynamodb' not found
+66 passed, 5 errors
+```
+
+- **原因：** 檔案存成 `tests/test_conftest.py`。pytest 只認 `conftest.py` 這個檔名；多了 `test_` 開頭，它被當成一般的測試檔，裡面沒有 `test_` 開頭的函式，所以什麼都沒做，也沒有報錯
+- **解法：** `ren` 改名
+- **新的失敗樣子：** `ERROR at setup of …`，結果列是 `E` 不是 `F`。測試本身還沒開始跑，是道具準備失敗
+- 與 E87 挫折 1（`test_princing.py`）同類：檔名打錯不會有任何錯誤訊息指出檔名
+
+### 挫折 4：`api_keys` 的主鍵寫成 `user_id`（10/7）
+
+三段 `create_table` 是照著第一段改的，`api_keys` 那段留著 `user_id`。失敗訊息的 `At index 0 diff` 指出第 0 項（第一個主鍵）的 `AttributeName` 不同，改成 `key_hash` 後 `71 passed`。這是 5 個測試裡第一個為了對的原因失敗的。
+
+### 挫折 5：破壞實驗 A 第一次做的不是原本要做的實驗（10/7）
+
+把 `os.environ["…"]` 改成 `.get` 時，留著中括號寫成 `os.environ.get["…"]`：
+
+```
+TypeError: 'method' object is not subscriptable
+2 failed, 64 passed
+```
+
+- **怎麼讀：** `not subscriptable` 是「這個東西不能用中括號」。`.get` 是一個方法，要用圓括號呼叫
+- 兩個測試都紅，但原因是語法用錯，不是「查不到時不報錯」。重做後得到 `1 failed, 65 passed` 與 `DID NOT RAISE KeyError`（與 E87 挫折 2 同類）
+
+### 更正：`.env.example` 有一行不合法的內容（10/8 11:26 修正，`c7e279a`）
+
+`b3a41fa` 推送的 `.env.example`，註解被斷成兩行，第二行 `from compose.yaml` 前面沒有 `#`，既不是註解也不是 `名稱=值`。接回一行。
+
+- `.env` 本身沒有這個問題（10/7 以 `Select-String "^DYNAMODB" .env` 確認，只印出符合的那一行，不露出金鑰）
+- 讀取工具遇到這一行會報錯還是略過，沒有實測
+- **學到的：** 範本檔沒有任何測試在讀它，內容錯了只能靠推送前讀 `git diff`
+
+### 三種「不是綠的」
+
+| 樣子 | 意思 | 這一步在哪裡看到 |
+|---|---|---|
+| `error during collection` | 測試檔讀不進來，一個都沒跑 | 函式或檔案還不存在 |
+| `ERROR at setup of …`（結果列是 `E`） | 道具準備失敗，測試還沒開始 | 挫折 3 |
+| `FAILED`（結果列是 `F`） | 跑了，但結果不對 | 挫折 4、破壞實驗 |
+
+### 限制（誠實記錄）
+
+- **`audit` 主鍵那個測試的斷言沒有看過失敗。** 實驗 A 讓這個測試變紅，但它停在 `describe_table`，沒有走到 `assert schema == …`。把 `audit` 的 `request_id` 改成別的欄位才會讓斷言本身變紅，這個實驗沒有做
+- **「重複執行不會清掉資料」的斷言（`"Item" in …`）沒有看過失敗。** 實驗 B、C 讓這個測試變紅，但都停在斷言之前。要改成「表存在就先刪再建」才會讓它紅，沒有做
+- 執行入口的兩行沒有自動化測試，只有 10/8 的手動執行
+- `make_dynamodb_client()` 的區域與假帳密有沒有帶對，沒有斷言在看
+- 假帳密寫在程式裡，只能連 DynamoDB Local；M4 上雲要改 `app/db.py`（定案 2 的弱點）
+- 資料只放記憶體：容器重開後表與資料都不見，要重新執行建表腳本；目前沒有自動化，靠人記得
+- 5 個 `integration` 測試需要容器開著；沒開時會紅，不會自動跳過（定案 3 第 6 項，刻意的）。CI 要怎麼跑它們尚未定案
+- DynamoDB Local 與雲端的 DynamoDB 行為不保證完全相同（例如 `TableArn` 是 `ddblocal`、帳號是 12 個 0，建表立刻 `ACTIVE`）；雲端要到 M4 才驗證
+- 雲端的建表會由 Terraform 做，`scripts/create_tables.py` 只用於本機；兩邊的主鍵定義要靠人保持一致
+- `create_tables()` 只看「表在不在」，不檢查已存在的表主鍵對不對
+- `quotas` 的 `limit_micro_usd`、`used_micro_usd` 目前只在互動模式寫過，程式還沒有讀寫它們
+- digest 複查沒有掃弱點；第一個指令失敗的原因是推測
+- `curl.exe` 那次沒有看到狀態碼
+
+### 面試可用的說法
+
+- 「連資料庫的函式，網址我設成必填，沒給就直接報錯。因為 boto3 的預設是連真的 AWS，還會自動用電腦上登入的身分。我做過一個實驗：把傳網址的那一行拿掉，程式沒有任何錯誤，連線就指向東京的正式端點。這種『少寫一行就打到正式環境』的事，我用一個測試鎖住。」
+- 「碰資料庫的測試我打真的 DynamoDB Local，不用手寫的假資料庫。建第一張表時我把兩個鍵都打成分割鍵，是資料庫本身把我退回的，假的不會擋。代價是測試要容器開著，所以我用標籤把它們分出來，沒有 Docker 的環境可以只跑其他的。」
+- 「測試用的資料庫和開發用的是兩個容器。測試道具每次都會清空所有資料表，所以它連的網址我直接寫死，不讀環境變數，避免哪天被指到別的地方去刪表。」
+- 「我把 `quotas` 的主鍵故意少寫一段，建表完全成功，寫入也成功，是讀取的時候才出錯。資料庫不會替你檢查設計對不對，只用一段主鍵的話，每個月的額度紀錄會互相覆蓋，而且沒有任何錯誤訊息。」
+- 「建表的腳本可以重複執行，已經有的表會跳過。我把那個判斷拿掉試過，五個測試只有『跑兩次』的那一個會紅；沒寫那個測試的話，要到第二次執行腳本才會發現。」
+- 「建表的程式我放在 `scripts/`，不放在 Gateway 的程式裡。Gateway 在雲端的角色只需要讀寫資料，不該有建表的權限。」
+
+---
+
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `a5ae0a2` | 10/7 18:56 | `style: remove a duplicated comment marker`（`tests/test_quota.py` 一行註解開頭多了一個 `#`） |
+| `8a2543b` | 10/7 19:25 | `chore: add compose file for DynamoDB Local` |
+| `977a4c6` | 10/7 19:36 | `chore: add boto3 dependency` |
+| `0519419` | 10/7 20:00 | `feat: add DynamoDB client factory that requires an explicit endpoint` |
+| `b3a41fa` | 10/7 20:06 | `chore: document the DynamoDB endpoint setting` |
+| `a92e373` | 10/7 20:54 | `chore: add a test-only DynamoDB Local, table names and the integration marker` |
+| `f9b15e8` | 10/8 00:03 | `feat: add create_tables with integration tests against DynamoDB Local` |
+| `c7e279a` | 10/8 11:26 | `fix: repair a broken comment line in .env.example`（`f9b15e8..c7e279a`） |
+| `eb46507` | 10/8 11:41 | `docs: add comments and type hints to create_tables`（`c7e279a..eb46507`） |
+| `dac3d3c` | 10/8 13:50 | `feat: add a run entry point to create_tables`（`eb46507..dac3d3c`） |
+
+10/8 的三筆，commit 前都以 `git status`、`git diff` 確認只有預期的那一個檔。
+
+---
+
+## 目前進度（2026-10-08 13:50）
+
+- 開工前待辦 1 ✅（E76）；待辦 2（digest 複查）✅（E89）
 - 步驟 1-1（Email）✅（E77，已推送）
 - 步驟 1-2（手機）✅（E78，已推送）
 - 10/5 老師回饋已記錄（E79）
@@ -1632,12 +2096,13 @@ E       ValueError: month must be in 1..12
 - 步驟 1-6（兩個去處都已遮罩）✅（E83，已推送）
 - **步驟 1 全部完成**
 - 期末簡報 v1 已記錄（E84），已推送（簡報 `8508164`；紀錄 `docs: record final presentation v1 evidence`，`8508164..b33144c`，10/6 02:08）
-- 交接說明為 `docs/handoff/m2-step5-handoff.md`（接在 `m2-step3-handoff.md` 之後；後者的第 3、4、5、9、10 節仍有效）
+- 交接說明為 `docs/handoff/m2-step5-part2-handoff.md`（接在 `m2-step5-handoff.md`、`m2-step3-handoff.md` 之後；後者的第 3、4、5、9、10 節仍有效）
 - **步驟 2（個資類別進稽核）✅（E85，程式已推送 `53a4491`）；目前 `45 passed`**
 - **步驟 3（`period_of()`：台北時間切月）✅（E86）；已推送 `249921d`**
 - **步驟 4（`cost_micro_usd()`：最小成本函式）✅（E87，已推送 `3491977`）**
-- **步驟 7 的純邏輯（超額回應五項定案、`is_over_quota()`、`seconds_until_next_period()`）✅（E88）；目前 `64 passed`。** 接線（429、`Retry-After`、503、稽核）尚未做
-- 下一步：步驟 5（DynamoDB Local：docker-compose、boto3、建表）；步驟 6 的純邏輯（API Key 算成 SHA-256）可先做；下一筆是 E89
+- **步驟 7 的純邏輯（超額回應五項定案、`is_over_quota()`、`seconds_until_next_period()`）✅（E88）。** 接線（429、`Retry-After`、503、稽核）尚未做
+- **步驟 5（DynamoDB Local、boto3 連線、建表）✅（E89，程式已推送 `dac3d3c`）；目前 `71 passed`（其中 5 個是 `integration`，要 `dynamodb-test` 容器開著；沒有 Docker 時 `-m "not integration"` 為 `66 passed, 5 deselected`）**
+- 下一步：步驟 6（API Key 驗證，S01）；開工前要先定三件事（見待決）；下一筆是 E90
 - 預計 10/10 結案（原訂 10/11）
 
 ---
@@ -1646,7 +2111,13 @@ E       ValueError: month must be in 1..12
 
 | 項目 | 目前的建議 | 何時定 |
 |---|---|---|
-| `python:3.12-slim` digest 複查（E74 的冷卻期例外） | 10/5 05:50（台北時間）起已滿 3 天，尚未執行；步驟 5 開 Docker 時一併確認 digest 仍可拉取 | 步驟 5 |
+| ~~`python:3.12-slim` digest 複查（E74 的冷卻期例外）~~ | ✅ 10/7 完成：digest 仍存在且未變；未掃弱點（E89） | — |
+| API Key 從哪個標頭來（`Authorization: Bearer …` 或自訂標頭）；`api_keys` 除了 `key_hash`、`user_id` 要不要 `status` 欄位（決策書 3.2 有「狀態」）；Key 的格式與長度 | 步驟 6 開工時把選項攤開比 | 步驟 6 |
+| 這個人這個月沒有額度紀錄時，擋還是放（E89） | 與「資料庫讀不到」（503）是兩種情況；步驟 7 開工時定 | 步驟 7 |
+| 既有 9 個 `test_chat` 測試怎麼提供身分與額度（依賴覆寫，或也打 `dynamodb-test`） | 步驟 6、7 接線時定 | 步驟 6～7 |
+| CI 怎麼跑 `integration` 測試（E89） | 預設在 CI 起 `dynamodb-test` 容器；不行才用 `-m "not integration"` | 10/12 那週 |
+| M4 上雲時 `app/db.py` 怎麼表示連真的 AWS（不給網址、不帶假帳密，用 Fargate 的 IAM 角色）（E89） | 保留「沒講清楚要連哪裡就報錯」的性質 | M4 |
+| 雲端 DynamoDB 的計費模式（E89） | 查證免費額度適用哪一種後定 | M4 |
 | ~~超額回應的狀態碼、錯誤類型、是否附 `Retry-After`（決策書 12.5）~~ | ✅ 10/7 定案：429、固定字串、附 `Retry-After`（E88） | — |
 | `Retry-After` 長達 31 天時，客戶端 SDK 的行為（E88） | 查 OpenAI SDK 等常見客戶端對很大的 `Retry-After` 怎麼處理；步驟 11 真實驗收時觀察一次 | 步驟 7 接線或步驟 11 |
 | `pii_types` 在 DynamoDB 的型別（E85） | 預計用 List（要能存空值）；查證官方文件後定案 | 步驟 9 |
