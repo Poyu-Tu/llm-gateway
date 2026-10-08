@@ -10,11 +10,7 @@ from scripts.create_tables import create_tables
 from tests.fakes import make_fake_client
 
 # 這個檔的測試都要連 DynamoDB Local（考場，8002）
-# pytestmark = pytest.mark.integration
-pytestmark = [
-    pytest.mark.integration,
-    pytest.mark.skip(reason="authentication is not wired into main.py yet"),
-]
+pytestmark = pytest.mark.integration
 
 # 測試用的假 Key：格式和真的一樣（gw_ 加 64 個字元），但一看就知道是假的
 TEST_KEY = "gw_" + "a" * 64

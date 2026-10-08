@@ -5,7 +5,7 @@ import json
 from openai import OpenAIError
 from fastapi.testclient import TestClient
 
-from app.main import app, get_audit_path, get_client, get_hmac_key
+from app.main import app, get_audit_path, get_client, get_hmac_key, get_user_id
 from tests.fakes import make_fake_client
 
 
@@ -17,6 +17,8 @@ def make_test_client(tmp_path, error=None):
     app.dependency_overrides[get_client] = lambda: fake_client
     app.dependency_overrides[get_hmac_key] = lambda: b"test-key"
     app.dependency_overrides[get_audit_path] = lambda: audit_path
+    # 驗票口換成直接放行：這個檔測的是遮罩與稽核，驗證另外在 test_chat_auth.py 測
+    app.dependency_overrides[get_user_id] = lambda: "alice"
     return TestClient(app), completions, audit_path
 
 

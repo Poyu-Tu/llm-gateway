@@ -5,14 +5,15 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
+from botocore.client import BaseClient
+from fastapi import Depends, FastAPI, Header, HTTPException
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, Field
-from botocore.client import BaseClient
 
 from app.audit import append_audit, hash_prompt, make_summary, mask, detect_pii_types
-from app.providers.openai_client import chat
+from app.auth import extract_bearer_token, find_user_id, hash_api_key
 from app.db import make_dynamodb_client
+from app.providers.openai_client import chat
 
 # M1 固定用便宜模型、不思考；M3 才會依內容選模型
 MODEL = "gpt-6-luna"
@@ -52,6 +53,30 @@ def get_dynamodb() -> BaseClient:
     return make_dynamodb_client()
 
 
+# 驗票口：通過才交出「這個請求是誰」；沒通過在這裡就結束，進不了對話入口
+def get_user_id(
+    authorization: str | None = Header(default=None),
+    dynamodb: BaseClient = Depends(get_dynamodb),
+) -> str:
+    """Return the caller's user id, or stop the request with 401."""
+    token = extract_bearer_token(authorization)
+    if token is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication failed",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    key_hash = hash_api_key(token)
+    user_id = find_user_id(dynamodb, key_hash)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication failed",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user_id
+
+
 # 健康檢查：只回狀態，不透露版本等資訊
 @app.get("/health")
 def health_check():
@@ -71,6 +96,7 @@ def chat_endpoint(
     client: OpenAI = Depends(get_client),
     hmac_key: bytes = Depends(get_hmac_key),
     audit_path: Path = Depends(get_audit_path),
+    user_id: str = Depends(get_user_id),
 ):
     """Send the masked message to the model and write an audit record."""
     request_id = str(uuid.uuid4())
