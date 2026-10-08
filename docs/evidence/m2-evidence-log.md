@@ -1929,7 +1929,7 @@ if __name__ == "__main__":
 
 **`-> None`（10/8）：** 表示這個函式做完事就結束，不交回東西。第一次補型別時漏了這一段，程式照跑、測試也是綠的（型別標註執行時不起作用），是讀 `git diff` 才看到的。
 
-### 破壞實驗（10/8 12:18～13:35）
+### 破壞實驗（10/8 12:18～14:06）
 
 5 個測試裡，只有「`api_keys` 的主鍵」在寫功能時看過為了對的原因失敗（上表第 3 次），其餘四個一寫就通過。一次改一處，跑完立刻改回。
 
@@ -1938,6 +1938,7 @@ if __name__ == "__main__":
 | A | `audit` 那一段整個註解掉 | `2 failed, 3 passed` | 三張表都在；`audit` 主鍵 | `assert ['api_keys', 'quotas'] == ['api_keys', ...it', 'quotas']`、`At index 1 diff: 'quotas' != 'audit'`；`ResourceNotFoundException … DescribeTable operation: Cannot do operations on a non-existent table` |
 | B | `quotas` 的主鍵拿掉 `period`（`AttributeDefinitions` 與 `KeySchema` 各一行） | `2 failed, 3 passed` | `quotas` 兩段式主鍵；重複執行 | `assert [{'AttributeN...ype': 'HASH'}] == [{'AttributeN...pe':'RANGE'}]`；`ValidationException … GetItem operation: The number of conditions on the keys is invalid` |
 | C | `quotas` 的 `if QUOTAS_TABLE not in existing:` 改成 `if True:` | `1 failed, 4 passed` | 重複執行 | `ResourceInUseException … CreateTable operation: Cannot create preexisting table` |
+| D | `audit` 的兩處 `request_id` 改成 `user_id` | `1 failed, 4 passed` | `audit` 主鍵 | `At index 0 diff: {'AttributeName': 'user_id', 'KeyType': 'HASH'} != {'AttributeName': 'request_id', 'KeyType': 'HASH'}` |
 
 **判讀：**
 
@@ -1945,7 +1946,8 @@ if __name__ == "__main__":
 - **實驗 B：** 主鍵設錯，**建表照樣成功**。只用 `user_id` 當主鍵是合法的表，資料庫不知道設計上想要兩段。這個錯要靠測試把「我要兩段式主鍵」寫下來才抓得到
 - **實驗 B 的第二個紅：** 錯誤發生在 `GetItem`，不是 `PutItem`。寫入時 `period` 被當成普通欄位收下，沒有任何錯誤；讀取時指定兩段主鍵才對不上。「10 月的額度蓋掉 9 月的」就是這樣無聲發生的
 - **實驗 C：** 只紅一個。fixture 每個測試前都清空考場，所以只呼叫一次 `create_tables` 的四個測試碰不到「表已存在」；只有「跑兩次」的測試會製造這個情況
-- 實驗 B 的 `AttributeDefinitions` 要一起拿掉：只拿掉 `KeySchema` 那一行，DynamoDB 會在建表時先回報宣告了沒用到的欄位，五個測試全紅，但那是為了別的原因而紅
+- **實驗 D 與實驗 A 的差別：** 兩個都讓「`audit` 主鍵」的測試變紅。A 是表不存在，測試停在 `describe_table`，沒有走到 `assert`；D 是表在、主鍵欄位錯，停在 `assert schema == …`。這個斷言要抓的是後者，所以 A 不能算看過它失敗，另外補做 D。失敗摘要的第一行兩邊都被縮成 `[{'AttributeN...ype': 'HASH'}]`，看起來一樣，差異要看 `At index 0 diff` 那一行
+- 實驗 B、D 的 `AttributeDefinitions` 要一起改；以 B 為例：只拿掉 `KeySchema` 那一行，DynamoDB 會在建表時先回報宣告了沒用到的欄位，五個測試全紅，但那是為了別的原因而紅
 
 **生活比喻（實驗 B）：** 跟木工訂抽屜櫃，本來要「每人一排、每月一格」，下單時漏寫月份，木工就做成每人一格。這是一張正常的訂單，木工不會打電話來問。
 
@@ -2040,8 +2042,7 @@ TypeError: 'method' object is not subscriptable
 
 ### 限制（誠實記錄）
 
-- **`audit` 主鍵那個測試的斷言沒有看過失敗。** 實驗 A 讓這個測試變紅，但它停在 `describe_table`，沒有走到 `assert schema == …`。把 `audit` 的 `request_id` 改成別的欄位才會讓斷言本身變紅，這個實驗沒有做
-- **「重複執行不會清掉資料」的斷言（`"Item" in …`）沒有看過失敗。** 實驗 B、C 讓這個測試變紅，但都停在斷言之前。要改成「表存在就先刪再建」才會讓它紅，沒有做
+- **「重複執行不會清掉資料」的斷言（`"Item" in …`）沒有看過失敗。** 實驗 B、C 讓這個測試變紅，但都停在斷言之前；其餘四個測試的斷言都看過失敗。要改成「表存在就先刪再建」才會讓它紅，沒有做
 - 執行入口的兩行沒有自動化測試，只有 10/8 的手動執行
 - `make_dynamodb_client()` 的區域與假帳密有沒有帶對，沒有斷言在看
 - 假帳密寫在程式裡，只能連 DynamoDB Local；M4 上雲要改 `app/db.py`（定案 2 的弱點）
