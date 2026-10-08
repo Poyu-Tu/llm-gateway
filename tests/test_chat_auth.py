@@ -1,6 +1,7 @@
 """Tests for API key authentication on POST /v1/chat."""
 
 import pytest
+from botocore.exceptions import EndpointConnectionError
 from fastapi.testclient import TestClient
 
 from app.auth import hash_api_key
@@ -39,6 +40,14 @@ def make_auth_test_client(tmp_path, dynamodb):
     create_tables(dynamodb)
     put_test_key(dynamodb, "active")
     return TestClient(app), completions, audit_path
+
+
+# 測試道具：壞掉的資料庫，一查就丟連線錯誤；用它就不必真的停掉容器、也不用等逾時
+class BrokenDynamoDB:
+    """Stands in for a DynamoDB client that cannot reach the database."""
+
+    def get_item(self, **kwargs):
+        raise EndpointConnectionError(endpoint_url="http://127.0.0.1:8002")
 
 
 def test_chat_accepts_valid_key(tmp_path, dynamodb):
@@ -87,3 +96,24 @@ def test_chat_rejected_request_reaches_neither_model_nor_audit(tmp_path, dynamod
     assert completions.last_request is None
     assert not audit_path.exists()
     
+
+def test_chat_returns_503_when_database_is_unreachable(tmp_path, dynamodb):
+    client, completions,audit_path = make_auth_test_client(tmp_path, dynamodb)
+
+    app.dependency_overrides[get_dynamodb] = lambda: BrokenDynamoDB()
+    response = client.post("/v1/chat", json={"message": "Say hi"}, headers={"Authorization": "Bearer " + TEST_KEY})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Service temporarily unavailable"}
+    assert completions.last_request is None
+    assert not audit_path.exists()
+
+
+def test_chat_returns_503_when_key_table_is_missing(tmp_path, dynamodb):
+    client, completions,audit_path = make_auth_test_client(tmp_path, dynamodb)
+
+    dynamodb.delete_table(TableName=API_KEYS_TABLE)
+    response = client.post("/v1/chat", json={"message": "Say hi"}, headers={"Authorization": "Bearer " + TEST_KEY})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Service temporarily unavailable"}

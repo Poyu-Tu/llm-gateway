@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from botocore.client import BaseClient
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, FastAPI, Header, HTTPException
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, Field
@@ -58,7 +59,7 @@ def get_user_id(
     authorization: str | None = Header(default=None),
     dynamodb: BaseClient = Depends(get_dynamodb),
 ) -> str:
-    """Return the caller's user id, or stop the request with 401."""
+    """Return the caller's user id, or stop the request with 401 or 503."""
     token = extract_bearer_token(authorization)
     if token is None:
         raise HTTPException(
@@ -67,7 +68,11 @@ def get_user_id(
             headers={"WWW-Authenticate": "Bearer"},
         )
     key_hash = hash_api_key(token)
-    user_id = find_user_id(dynamodb, key_hash)
+    # 資料庫讀不到時不放行，也不說成是 Key 的問題：回 503，請對方稍後再試
+    try:
+        user_id = find_user_id(dynamodb, key_hash)
+    except (BotoCoreError, ClientError):
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
     if user_id is None:
         raise HTTPException(
             status_code=401,
