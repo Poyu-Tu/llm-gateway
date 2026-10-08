@@ -1,6 +1,6 @@
 from botocore.client import BaseClient
 
-from app.db import API_KEYS_TABLE, QUOTAS_TABLE, AUDIT_TABLE
+from app.db import API_KEYS_TABLE, QUOTAS_TABLE, AUDIT_TABLE, make_dynamodb_client
 
 
 # 建表放在 scripts/，不放 app/：Gateway 在雲端不該有建表的權限
@@ -50,3 +50,8 @@ def create_tables(client: BaseClient) -> None:
             ],
             BillingMode="PAY_PER_REQUEST",
         )
+
+
+# 直接執行這個檔時才建表；被測試 import 時不會自己跑
+if __name__ == "__main__":
+    create_tables(make_dynamodb_client())
