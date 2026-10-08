@@ -386,6 +386,10 @@ E         + Mail [PHONE]@example.com now
 | 23 | 3.2 的 `quotas` 表 | 補上欄位名：`limit_micro_usd`、`used_micro_usd`；M2 只建 `api_keys`、`quotas`、`audit` 三張，`usage` 於 M5 建立（E89） |
 | 24 | 8.2 的 M2 | 補上：碰資料庫的測試打真的 DynamoDB Local，標 `integration`；測試用獨立的容器（`127.0.0.1:8002`），每個測試前清空（E89） |
 | 25 | 12.8 的「冷卻期的一次例外」、12.5 | 補上複查結果：10/7 以 `docker buildx imagetools inspect` 確認 `python:3.12-slim` 的 digest 仍存在且未變；未掃弱點（E89） |
+| 26 | 2.2 流程圖 [2]、8.2 的 M2、4.2 應用層 | 補上驗證的做法：`Authorization: Bearer gw_…`；失敗一律回 401 `{"detail": "Authentication failed"}` 並附 `WWW-Authenticate: Bearer`；驗證寫成 FastAPI 的相依，失敗的請求不碰模型、不寫稽核（E90） |
+| 27 | 3.2 的 `api_keys` 表、D3 | 補上 `status` 欄位：值是 `active` 才放行，其餘（含欄位不存在）一律拒絕；Key 的格式為 `gw_` 加 `secrets.token_hex(32)`（E90） |
+| 28 | 12.5「超額回應…」那一列與本表第 20 項、2.2 流程圖 [3]、10.3 第 1 點 | 資料庫讀不到時的 503 訊息改為驗證與額度共用：`{"detail": "Service temporarily unavailable"}`（取代第 20 項寫的 `Quota service unavailable`）；資料庫連不上時最先出錯的是驗證（E90） |
+| 29 | D10、3.4 或 3.2、D22（repo 結構） | 補上資料庫連線的逾時與重試：連線 2 秒、讀取 5 秒、總共試 2 次、`standard` 模式；實測預設值要 48.1 秒才報錯，設定後 6.7 秒。repo 結構加上 `app/auth.py`（E90） |
 
 ---
 
@@ -2085,7 +2089,466 @@ TypeError: 'method' object is not subscriptable
 
 ---
 
-## 目前進度（2026-10-08 13:50）
+## E90. 步驟 6：API Key 驗證（2026-10-08 14:02 定案；14:15～21:04 實作）
+
+**依據：** 決策書 2.2 流程圖 [2]（驗證失敗回 401）、3.2 的 `api_keys` 表（`key_hash` → `user_id`、狀態）、D3（只存 SHA-256 雜湊）、8.2 M2（API Key 錯誤只回「驗證失敗」，不透露是不存在還是已停用；fail-closed）、10.3 第 1、7、8 點；D10（重試與逾時要自己設）；E88 定案 4（驗證失敗的請求不寫稽核）。對應驗收 S01。
+
+**範圍：** 請求帶著 API Key 進來，Gateway 查出是誰；查不到回 401，資料庫讀不到回 503。`user_id` 目前只是被查出來，還沒有用在額度（步驟 7）與稽核（步驟 9）。Key 的產生在步驟 10。
+
+**生活比喻：** 演唱會入口的驗票口。票不對的人在門口就被擋下，走不到座位區；裡面的工作人員遇到的都是驗過票的人。
+
+### 定案 1：開工前（10/8 14:02 本人決定）
+
+| # | 決定 | 定案 | 不選的選項與理由 |
+|---|---|---|---|
+| 1 | Key 放哪個標頭 | `Authorization: Bearer gw_…` | `X-API-Key`：解析最簡單，但它是自訂標頭，客戶端與工具不認得它是機密。`Authorization` 是 HTTP 的標準位置 |
+| 2 | `api_keys` 的 `status` 欄位 | 要；值是 `active` 才放行，其餘（`disabled`、欄位不存在、不認得的值）一律拒絕 | 不加、要停用就刪掉那一筆：刪掉後查不到這把 Key 原本屬於誰 |
+| 3 | Key 的格式 | `gw_` 加 `secrets.token_hex(32)`，共 67 個字元 | `uuid4`：設計來當編號，不是當密碼。不加前綴：一串亂數看不出是哪個系統的 |
+| 4 | 放哪個檔 | `app/auth.py`；測試分三個檔（見下） | 放進 `main.py`：純計算的部分就無法單獨測試 |
+| 5 | `Bearer` 的大小寫 | 只認開頭剛好是 `Bearer `（B 大寫、後面一個空格） | 不分大小寫：HTTP 規範的寫法，但常見的客戶端都送 `Bearer`；先做嚴格版，記為限制 |
+
+### 定案 2：接進 `main.py` 時（10/8 16:42 本人決定）
+
+| # | 決定 | 定案 | 不選的選項與理由 |
+|---|---|---|---|
+| 6 | 驗證寫在哪 | FastAPI 的相依 `get_user_id()`，與既有的三個「領用窗口」同一個做法；`chat_endpoint` 把它列為參數 | 寫在 `chat_endpoint` 裡面：失敗的請求可能已經做了遮罩、準備了稽核。寫成相依，沒通過的請求進不了 `chat_endpoint`，E88 定案 4（不寫稽核）與「不碰模型」由結構保證 |
+| 7 | 既有的 9 個 `test_chat` 測試 | `make_test_client` 把 `get_user_id` 換成直接交回 `"alice"`；驗證另寫新測試、走真的流程、連考場 | 9 個都先放 Key 再帶上：`test_chat` 整個檔變成要 Docker。代價：這 9 個測試不再經過驗證 |
+| 8 | 401 的標頭 | 附 `WWW-Authenticate: Bearer` | 不附：HTTP 規範要求 401 用這個標頭說明驗證方式 |
+
+### 定案 3：資料庫讀不到時（10/8 19:58 本人決定，量測之後）
+
+| # | 決定 | 定案 | 不選的選項與理由 |
+|---|---|---|---|
+| 9 | 多久放棄 | 連線逾時 2 秒、讀取逾時 5 秒、總共試 2 次（含第一次）、重試模式 `standard` | 只試 1 次：一次瞬間的連線問題就變成 503。維持預設：實測要等 48 秒 |
+| 10 | 回什麼 | **503**，`{"detail": "Service temporarily unavailable"}`；驗證與額度（步驟 7）共用這一個訊息 | 驗證與額度各用一個訊息：對外透露內部哪一塊壞了，而兩者其實是同一個資料庫 |
+
+**定案 10 修訂了 E88：** E88 寫「額度資料讀不到回 503 `Quota service unavailable`」。資料庫連不上時，最先出錯的是驗證（查 `api_keys`），請求走不到額度檢查；S03 的示範實際上會先撞到驗證。步驟 7 實作時改用共用的訊息。E88 的字串當時尚未實作，只改文件。
+
+**不管哪一種都一樣：** 不能回 401（有效的使用者會以為自己的 Key 壞了），更不能放行；這種請求不寫稽核，因為還不知道是誰。
+
+### 做法：分六小段，先寫測試、看它失敗，再寫功能
+
+| 段 | 內容 | 結果 |
+|---|---|---|
+| 1 | `hash_api_key()`：Key 算成 SHA-256 | `ModuleNotFoundError` → `2 passed`（共 73） |
+| 2 | `extract_bearer_token()`：從標頭取出 Key | `ImportError` → `2 failed, 4 passed` → `6 passed`（共 77） |
+| 3 | `find_user_id()`：拿雜湊查 `user_id`、檢查 `status` | `ImportError` → `4 failed` → `4 passed`（共 81） |
+| 4 | `get_user_id()` 接進 `main.py`，回 401 | `4 failed, 1 passed` → `5 passed`；全部 `9 failed, 77 passed` → `86 passed` |
+| 5 | 連線設定：快點放棄 | 量到 48.1 秒 → `1 failed, 2 passed` → `87 passed`，再量 6.7 秒 |
+| 6 | 資料庫讀不到回 503 | `2 failed, 5 passed` → `7 passed`（共 89） |
+
+### 第 1 段：`hash_api_key()`（14:15～14:31）
+
+**生活比喻：** 果汁機。同一種水果打出來的果汁每次都一樣，但拿著果汁變不回水果。資料庫只放果汁，整張表被搬走也拿不到能用的 Key。
+
+**為什麼不像 `hash_prompt()` 那樣用 HMAC：** 使用者的問句很短、很好猜，把常見問句逐一算雜湊就比對得出來，所以要多加一把金鑰（D4）。API Key 是 256 位元的亂數，沒有人猜得完，直接算 SHA-256 就夠（D3；LiteLLM 也是這樣存，E18）。
+
+**測試（`tests/test_auth.py`，不需容器）：**
+
+| 測試（開頭皆為 `test_hash_api_key`） | 檢查 | 在守什麼 |
+|---|---|---|
+| `…_matches_known_sha256` | `hash_api_key("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"` | 算出來的真的是 SHA-256；`abc` 的雜湊是公開的標準答案 |
+| `…_gives_different_hashes_for_different_keys` | `hash_api_key("gw_aaa") != hash_api_key("gw_aab")` | 函式有用到傳進來的 Key |
+
+先寫測試：`ModuleNotFoundError: No module named 'app.auth'`。寫完一次 `2 passed`，所以做破壞實驗：
+
+| # | 改了什麼 | 結果 | 失敗訊息 |
+|---|---|---|---|
+| A | `hashlib.sha256(bytes_text)` 改成 `hashlib.sha256(b"abc")`（不理會輸入） | `1 failed, 1 passed` | `assert 'ba7816bf…' != 'ba7816bf…'` |
+| B | `sha256` 改成 `sha1` | `1 failed, 1 passed` | `+ a9993e364706816aba3e25717850c26c9cd0d89d`（40 個字元，預期是 64 個） |
+
+**判讀（實驗 A）：** 兩把不同的 Key 算出同一串，等於拿任何一把 Key 都查到同一個人。**「標準答案」那個測試這時是綠的**：寫死的剛好是 `abc`，和它的輸入相同。只有一個測試的話這個錯會過關，兩個測試各守一個方向才夾得住（與 E81「對任何輸入都回 `False`」同類）。
+
+### 第 2 段：`extract_bearer_token()`（14:31～15:49）
+
+**生活比喻：** 信封上寫「王小明 收」。收發室要的是名字，先確認格式對、再把固定的字拿掉；信封空白或格式不對，就當成收件人不明。
+
+**測試（4 個，同一個檔）：**
+
+| 測試（開頭皆為 `test_extract_bearer_token`） | 輸入 | 預期 | 在守什麼 |
+|---|---|---|---|
+| `…_returns_key_after_prefix` | `"Bearer gw_abc"` | `"gw_abc"` | 拿得到 Key，前綴拿得乾淨 |
+| `…_returns_none_without_header` | `None` | `None` | 沒帶標頭不能讓程式當掉 |
+| `…_rejects_other_scheme` | `"Basic gw_abc"` | `None` | 不是 `Bearer` 開頭的不收 |
+| `…_rejects_empty_key` | `"Bearer "` | `None` | 不能交回空字串去查資料庫 |
+
+**新語法：** `str | None`（可能是文字，也可能沒有）；`startswith()`；`[n:]`（從第 n 個位置取到最後，與做摘要的 `[:50]` 方向相反）。前綴長度用 `len(BEARER_PREFIX)` 算，不寫死成 7。
+
+**破壞實驗（各 `1 failed, 5 passed`）：**
+
+| # | 改了什麼 | 紅的是 | 失敗訊息 |
+|---|---|---|---|
+| A | 拿掉「標頭是 `None`」的檢查 | 沒帶標頭 | `AttributeError: 'NoneType' object has no attribute 'startswith'` |
+| B | 拿掉前綴的檢查 | 別的驗證方式 | `assert 'w_abc' is None` |
+| C | 拿掉空字串的檢查 | 空 Key | `assert '' is None` |
+
+加上第一版的失敗（見挫折 1），四個斷言都看過失敗。
+
+**判讀（實驗 A）：** 沒帶標頭的請求會讓程式當掉，使用者拿到的是 500 而不是 401。
+
+### 第 3 段：`find_user_id()`（15:50～16:40）
+
+**生活比喻：** 健身房櫃檯刷會員卡。查無此卡不給進；查到了但會籍是「停權」也不給進；會籍那一欄是空白的，櫃檯不會自己當成有效。
+
+**測試（`tests/test_auth_db.py`，4 個，`integration`）：** 道具 `put_key(client, key_hash, user_id, status)` 往 `api_keys` 放一筆，`status` 給 `None` 就不寫這個欄位。
+
+| 測試（開頭皆為 `test_find_user_id`） | 準備 | 查 | 預期 |
+|---|---|---|---|
+| `…_returns_user_for_active_key` | 放 `hash-a`／`alice`／`active` | `hash-a` | `"alice"` |
+| `…_returns_none_for_unknown_key` | 同上 | `hash-b` | `None` |
+| `…_rejects_disabled_key` | 放 `hash-a`／`alice`／`disabled` | `hash-a` | `None` |
+| `…_rejects_key_without_status` | 放 `hash-a`／`alice`，不寫 `status` | `hash-a` | `None` |
+
+測試裡的 `hash-a` 只是代號：這個函式只負責「拿一串字去查」，算雜湊是 `hash_api_key()` 的事。
+
+**破壞實驗（各 `1 failed, 3 passed`）：**
+
+| # | 改了什麼 | 紅的是 | 失敗訊息 |
+|---|---|---|---|
+| A | 回傳時忘了剝型別標籤（`item["user_id"]`） | 有效的 Key | `assert {'S': 'alice'} == 'alice'` |
+| B | 拿掉「回應沒有 `Item`」的檢查 | 查無此 Key | `KeyError: 'Item'` |
+| C | 拿掉狀態的比對 | 被停用的 Key | `assert 'alice' is None` |
+| D | 拿掉「沒有 `status` 欄位」的檢查 | 沒有狀態欄 | `KeyError: 'status'` |
+
+**判讀：**
+
+- **實驗 C 是四個裡最危險的：** 程式不會當掉、沒有任何錯誤，停用的 Key 照樣查得到人，停用功能安靜地失效。與 E85 實驗 3、E89 實驗 B 同類
+- 實驗 B、D 停在函式裡（`KeyError`），不是停在測試的斷言。這兩個測試要守的就是「遇到這種資料不能當掉、要安靜地拒絕」，所以算數
+- 實驗 D：一筆資料少一欄，就讓持有那把 Key 的人每次都拿到 500
+
+**本人撰寫（`app/auth.py`，`96278fd` 的版本）：**
+
+```python
+import hashlib
+
+from botocore.client import BaseClient
+
+from app.db import API_KEYS_TABLE
+
+# Authorization 標頭的固定開頭；結尾的空格是前綴的一部分
+BEARER_PREFIX = "Bearer "
+
+
+# 資料庫只存 Key 的雜湊：整張表被搬走也拿不到能用的 Key；Key 是長亂數，不用另外加金鑰
+def hash_api_key(key: str) -> str:
+    """Return the SHA-256 hex digest of an API key, the only form the key is stored in."""
+    bytes_text = key.encode("utf-8")
+    result = hashlib.sha256(bytes_text)
+    return result.hexdigest()
+
+
+# 格式不對一律交回 None，由呼叫的人統一回 401；不在這裡分辨是哪一種不對
+def extract_bearer_token(header: str | None) -> str | None:
+    """Return the key from an Authorization header, or None when it is missing or malformed."""
+    if header is None:
+        return None
+    if not header.startswith(BEARER_PREFIX):
+        return None
+    token = header[len(BEARER_PREFIX):]
+    if token == "":
+        return None
+    return token
+
+
+# 查不到、被停用、狀態欄不存在，一律交回 None：呼叫的人分不出是哪一種，也就不會透露給外面
+def find_user_id(client: BaseClient, key_hash: str) -> str | None:
+    """Return the user id for an active API key hash, or None when the key must not be used."""
+    response = client.get_item(TableName=API_KEYS_TABLE, Key={"key_hash": {"S": key_hash}})
+    if "Item" not in response:
+        return None
+    item = response["Item"]
+    if "status" not in item:
+        return None
+    if item["status"]["S"] != "active":
+        return None
+    return item["user_id"]["S"]
+```
+
+### 第 4 段：`get_user_id()` 接進 `main.py`（16:42～19:45）
+
+**新觀念：**
+
+| 寫法 | 白話 |
+|---|---|
+| `authorization: str \| None = Header(default=None)` | 請 FastAPI 從請求的標頭裡找 `Authorization`，把值放進這個參數；沒帶就給 `None` |
+| `dynamodb: BaseClient = Depends(get_dynamodb)` | 窗口也能向別的窗口領東西：驗票口自己先領一條資料庫連線 |
+| `app.dependency_overrides.clear()` | 「換窗口」的設定是全域的，上一個測試換過的會留著；要測真的驗票口，先全部清掉再重設 |
+
+**測試（`tests/test_chat_auth.py`，5 個，`integration`）：** 道具 `make_auth_test_client(tmp_path, dynamodb)` 把模型、HMAC 金鑰、稽核檔換成假的，資料庫換成考場，**驗證走真的**；並在 `api_keys` 放一把 `alice` 的有效 Key（存的是雜湊）。測試用的 Key 是 `"gw_" + "a" * 64`。
+
+| 測試（開頭皆為 `test_chat`） | 請求 | 檢查 |
+|---|---|---|
+| `…_accepts_valid_key` | 帶正確的 Key | 200 |
+| `…_rejects_missing_key` | 不帶標頭 | 401；`{"detail": "Authentication failed"}`；`WWW-Authenticate` 是 `Bearer` |
+| `…_rejects_unknown_key` | `Bearer gw_wrong_key` | 401；回應內容同上 |
+| `…_rejects_disabled_key` | 先把那把 Key 改成 `disabled`，再帶正確的 Key | 401；回應內容同上 |
+| `…_rejected_request_reaches_neither_model_nor_audit` | 不帶標頭 | 401；假的 OpenAI 沒被呼叫（`last_request is None`）；稽核檔沒有被建立 |
+
+第 2、3、4 個的回應內容完全相同：外面的人分不出是沒帶、查不到，還是被停用。
+
+**未完成時的推送（18:18，`bcad448`）：** 測試寫好、驗票口還沒寫時要先推送。沿用 E88 的做法：`get_dynamodb()` 先進 `main.py`（它本身是完整的），5 個測試掛 `skip`，`81 passed, 5 skipped`。回來第一步是撕掉標記、先看到紅：
+
+```
+FAILED …::test_chat_rejects_missing_key - assert 200 == 401
+FAILED …::test_chat_rejects_unknown_key - assert 200 == 401
+FAILED …::test_chat_rejects_disabled_key - assert 200 == 401
+FAILED …::test_chat_rejected_request_reaches_neither_model_nor_audit - assert 200 == 401
+4 failed, 1 passed
+```
+
+**判讀：** 沒帶 Key、帶錯的 Key、帶被停用的 Key，全部回 200。這就是「還沒有驗證」的樣子。有效 Key 那個是綠的：門沒鎖，拿對鑰匙的人當然進得去。
+
+**本人撰寫（`app/main.py` 的驗票口，`87f6f7c` 的版本，含第 6 段的 503）：**
+
+```python
+# 領用窗口：資料庫連線（測試時會換成考場的）
+def get_dynamodb() -> BaseClient:
+    return make_dynamodb_client()
+
+
+# 驗票口：通過才交出「這個請求是誰」；沒通過在這裡就結束，進不了對話入口
+def get_user_id(
+    authorization: str | None = Header(default=None),
+    dynamodb: BaseClient = Depends(get_dynamodb),
+) -> str:
+    """Return the caller's user id, or stop the request with 401 or 503."""
+    token = extract_bearer_token(authorization)
+    if token is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication failed",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    key_hash = hash_api_key(token)
+    # 資料庫讀不到時不放行，也不說成是 Key 的問題：回 503，請對方稍後再試
+    try:
+        user_id = find_user_id(dynamodb, key_hash)
+    except (BotoCoreError, ClientError):
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication failed",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user_id
+```
+
+`chat_endpoint` 的參數最後加上 `user_id: str = Depends(get_user_id)`。函式內目前用不到它，但列在參數裡，驗票口就會先執行。
+
+**接上之後，既有的 9 個測試全部變紅：**
+
+```
+FAILED tests/test_chat.py::test_chat_returns_reply - KeyError: 'DYNAMODB_ENDPOINT_URL'
+（其餘 8 個相同）
+9 failed, 77 passed
+```
+
+**判讀：** 這 9 個測試沒有換資料庫窗口，驗票口去領真的連線；沒有設定要連哪裡，`make_dynamodb_client()` 就拒絕連（E89 定案 2 第 1 項）。測試沒說要連哪個資料庫，程式沒有偷偷去連別的地方。照定案 7 在 `make_test_client` 加一行覆寫後 `86 passed`；驗票口被換掉後，它底下的資料庫窗口也不會被呼叫，這 9 個測試仍然不需要 Docker。
+
+**破壞實驗：**
+
+| # | 改了什麼 | 結果 | 失敗訊息 |
+|---|---|---|---|
+| A | `key_hash = hash_api_key(token)` 改成 `key_hash = token`（忘了算雜湊） | `1 failed, 4 passed`：有效的 Key | `assert 401 == 200` |
+| B | 第二個 `raise` 的 `detail` 改成 `"Key not found"` | `2 failed, 3 passed`：查無此 Key、被停用 | `{'detail': 'Key not found'} != {'detail': 'Authentication failed'}` |
+| C | 第一個 `raise` 拿掉 `headers=` | `1 failed, 4 passed`：沒帶 Key | `KeyError: 'WWW-Authenticate'` |
+
+**判讀（實驗 A）：** 拿 Key 本身去查，資料庫存的是雜湊，永遠查不到，**所有人都進不來**。五個測試裡四個是「該擋的有擋」，本來就預期 401，所以是綠的；只有「該放的有放」那一個抓得到。少了它，一個把所有人都擋掉的驗票口也會全綠（與 E77「只測該遮的有遮」同類）。
+
+### 第 5 段：資料庫連不上時，先量再決定（19:51～20:29）
+
+**先觀察現況：** 叫程式去連一個沒有任何東西在聽的埠（8003），用 PowerShell 的 `Measure-Command` 計時。
+
+| | 設定前（boto3 預設） | 設定後（定案 9） |
+|---|---|---|
+| 花的時間 | **48.1 秒** | **6.7 秒** |
+| 最底層的錯誤 | `ConnectionRefusedError: [WinError 10061]`（目標電腦拒絕連線） | `TimeoutError: timed out` |
+| 程式實際拿到的錯誤 | `botocore.exceptions.EndpointConnectionError: Could not connect to the endpoint URL: "http://127.0.0.1:8003/"` | `botocore.exceptions.ConnectTimeoutError: Connect timeout on endpoint URL: "http://127.0.0.1:8003/"` |
+
+**48 秒是怎麼來的：** 對方是立刻拒絕，照理一秒內就該知道。boto3 預設的重試模式是 `legacy`，連線類的錯誤會自動重試，每次之間的等待加倍；連線與讀取的逾時預設各 60 秒（官方文件）。Claude 以同版本的 boto3 在 Linux 上重現，預設值花 25.57 秒，幾乎等於 9 次等待的總和（0.05 秒起每次加倍，合計 25.55 秒），也就是**總共試了 10 次**；套用定案 9 後是 0.8 秒。Windows 上每次被拒絕要多等約 2 秒，10 次約 20 秒，兩邊對得起來。
+
+**6.7 秒的組成：** Python 啟動約 2 秒，加上連兩次、每次等滿 2 秒就放棄，中間再等一小段。
+
+**錯誤的類型變了：** 在 Windows 上，連一個沒人聽的埠要 2 秒多才收到「拒絕」，設定 2 秒就不等之後，「等到逾時」先發生。同一種故障在不同的設定與作業系統上，會以不同的錯誤類型出現；所以第 6 段接錯誤時接的是它們共同的上一層。
+
+**生活比喻：** 打電話給一家已經歇業的店，是空號，一撥就知道。但手機設定成「打不通就自動重撥，每次多等一下」，結果拿著手機站了快一分鐘才放棄。
+
+**與 D10 是同一個想法：** M1 把 OpenAI SDK 的重試調成 1 次、逾時 30 秒（預設是重試 2 次、逾時 10 分鐘，E70）。預設值是為了「盡量成功」，不是為了「快點告訴使用者失敗」；閘道要自己決定等多久。
+
+**`app/db.py` 的改動（宣告式設定，骨架由 Claude 提供）：**
+
+```python
+# 多久放棄：DynamoDB 正常是毫秒等級，連不上就該快點讓使用者知道，而不是默默重試
+CONNECT_TIMEOUT_SECONDS = 2
+READ_TIMEOUT_SECONDS = 5
+# 總共試幾次（含第一次）：留一次重試，網路瞬間抖一下不會直接變成失敗
+TOTAL_MAX_ATTEMPTS = 2
+```
+
+```python
+    config = Config(
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
+        read_timeout=READ_TIMEOUT_SECONDS,
+        retries={"total_max_attempts": TOTAL_MAX_ATTEMPTS, "mode": "standard"},
+    )
+```
+
+`boto3.client(…)` 多帶一格 `config=config`。用 `total_max_attempts` 而不是 `max_attempts`：前者含第一次，後者不含，官方文件建議用前者。
+
+**測試（`tests/test_db.py`，1 個，不需容器）：** `test_make_dynamodb_client_gives_up_quickly` 檢查 `client.meta.config` 的 `connect_timeout == 2`、`read_timeout == 5`、`retries == {"total_max_attempts": 2, "mode": "standard"}`。
+
+| 程式的狀態 | 結果 | 失敗訊息 |
+|---|---|---|
+| 還沒加設定 | `1 failed, 2 passed` | `assert 60 == 2` |
+| 破壞 A：拿掉 `read_timeout` | `1 failed, 2 passed` | `assert 60 == 5` |
+| 破壞 B：拿掉 `retries` | `1 failed, 2 passed` | `{'mode': 'legacy'} != {'mode': 'standard'}` |
+
+三個斷言都看過失敗。**這個測試只檢查設定有被帶進連線，不會真的去等；** 實際的秒數是上表手動量的那兩次。
+
+### 第 6 段：資料庫讀不到時回 503（20:31～21:04）
+
+**boto3 的錯誤有兩個家族：**
+
+| 家族 | 發生了什麼 | 生活比喻 | 例子 |
+|---|---|---|---|
+| `BotoCoreError` | 根本沒拿到回覆 | 電話打不通 | 連不上、等到逾時（第 5 段量到的兩種都是） |
+| `ClientError` | 接通了，但對方說辦不到 | 電話接通，總機說「沒有這個部門」 | 表不存在、沒有權限 |
+
+**測試（`tests/test_chat_auth.py`，2 個；請求都帶正確的 Key）：**
+
+| 測試 | 怎麼讓資料庫出問題 | 檢查 |
+|---|---|---|
+| `test_chat_returns_503_when_database_is_unreachable` | 資料庫窗口換成替身 `BrokenDynamoDB`，它的 `get_item` 一律丟 `EndpointConnectionError` | 503；`{"detail": "Service temporarily unavailable"}`；沒碰模型；沒寫稽核 |
+| `test_chat_returns_503_when_key_table_is_missing` | 真的把考場的 `api_keys` 表刪掉 | 503；回應內容同上 |
+
+用替身的理由：不必真的停掉容器，也不用每次等逾時。第二個測試的錯誤是 DynamoDB Local 親口回的。
+
+寫功能前：
+
+```
+FAILED …::test_chat_returns_503_when_database_is_unreachable - botocore.exceptions.EndpointConnectionError: Could not connect to the endpoint URL: "http://127.0.0.1:8002"
+FAILED …::test_chat_returns_503_when_key_table_is_missing - botocore.errorfactory.ResourceNotFoundException: An error occurred (ResourceNotFoundException) when calling the GetItem …
+2 failed, 5 passed
+```
+
+把查資料庫的那一行用 `try / except (BotoCoreError, ClientError)` 包起來（程式見第 4 段），`7 passed`，全部 `89 passed`。這一段以填空版（提示二）完成。
+
+**生活比喻（`try / except`）：** 請同事去倉庫拿東西，先交代一句：「門打不開的話不要硬撬，回來跟我說暫時拿不到。」
+
+**破壞實驗：**
+
+| # | 改了什麼 | 結果 | 失敗訊息 |
+|---|---|---|---|
+| A | 只接 `BotoCoreError` | `1 failed, 6 passed`：表不存在 | `ResourceNotFoundException … Cannot do operations on a non-existent table` |
+| B | 只接 `ClientError` | `1 failed, 6 passed`：連不上 | `EndpointConnectionError: Could not connect to the endpoint URL` |
+| C | `503` 改成 `500` | `2 failed, 5 passed` | `assert 500 == 503` |
+
+**判讀：** 兩個測試各守一個家族，少接哪一個，就是哪一個測試紅。
+
+### 挫折 1：取單一位置與切片（第 2 段）
+
+第一版的 `header[len(BEARER_PREFIX)]` 少了冒號：
+
+```
+AssertionError: assert 'g' == 'gw_abc'
+IndexError: string index out of range
+2 failed, 4 passed
+```
+
+- **原因：** 沒有冒號是「拿第 7 個位置的那一個字」，所以只拿到 `g`；`"Bearer "` 剛好 7 個字（位置 0～6），沒有第 7 個，所以空 Key 那個測試是 `IndexError`
+- **生活比喻：** 一排 7 個座位，編號 0～6。「7 號座位」不存在，會被擋下；「7 號以後的所有座位」是合法的問法，答案是沒有人。取單一位置會報錯，切片不會
+- 本人依訊息自行修正。第一個測試是為了對的原因紅的；空 Key 那個紅的原因是 `IndexError`，不算，另以實驗 C 補做
+
+### 挫折 2：`get_item() only accepts keyword arguments`（第 3 段）
+
+第一版寫成 `client.get_item({"key_hash": {"S": key_hash}})`：
+
+```
+TypeError: get_item() only accepts keyword arguments.
+4 failed
+```
+
+- **原因：** boto3 的每個動作都只收有寫名字的參數（`TableName=…`、`Key=…`），不收只照位置排的
+- 四個測試全紅、訊息完全相同、都停在同一行：那一行之後的程式還沒有被走到（E88 學到的），所以這次的紅不算看過斷言失敗
+- 本人依訊息自行修正
+
+### 挫折 3：推送前逐行讀測試抓到的六處
+
+這六處都不會自己報錯，測試結果是綠的或被別的錯誤蓋住，是讀程式才看到的。
+
+| # | 寫成 | 問題 | 為什麼沒有自己露出來 |
+|---|---|---|---|
+| 1 | 測試名稱 `…_rejects_other_schema`、`token__rejects`（雙底線） | `schema` 是「結構」，這裡要的是 `scheme`「方式」 | pytest 只看名稱是不是 `test_` 開頭 |
+| 2 | `API_KEY_TABLE`（少一個 `S`） | 常數名稱不存在 | 上一行的 `ImportError` 先發生，蓋住了它 |
+| 3 | 「查無此 Key」的測試放的和查的是同一把（`hash-b`） | 正確的函式反而會讓這個測試紅 | 函式還沒寫，測試停在收集階段 |
+| 4 | 網址 `"/V1/chat"`（四處） | 路徑分大小寫，會得到 404 | 同上 |
+| 5 | `TEST_KEY = "gw_ " + …`（多一個空格） | 與註解「格式和真的一樣」不符 | 存和查用的是同一串，測試照過 |
+| 6 | 「不碰模型、不寫稽核」的測試沒有檢查狀態碼 | 配上第 4 項打錯的網址，請求在 404 就結束，**不管有沒有做驗證都會通過** | 它的兩個斷言在 404 時也成立 |
+
+- **第 6 項的修正：** 在那兩個斷言之前加 `assert response.status_code == 401`，先確認請求真的是被驗證擋下的。這個斷言在撕掉 `skip` 之後確實變紅（`assert 200 == 401`）
+- **生活比喻（第 6 項）：** 要檢查「沒票的人進不了場」，派去的人走錯棟樓。他確實沒進場，但這不能證明驗票口有在運作
+- **學到的：** 「某件事沒有發生」的斷言，要先確認請求走到了預期的那一步；否則任何提早失敗都會讓它通過。與 E85「更正」（對字典用 `in` 永遠通過）同類
+- 常數名稱打錯會直接報錯（第 2 項），字串打錯不會（第 4 項）；這是 E89 把表名寫成常數的理由
+
+### 挫折 4：撕掉 `skip` 之後仍然是 `5 skipped`
+
+回來接著做時，第一次重跑的結果列是 `sssss`、`5 skipped`，修改沒有生效。以 `Select-String "skip" tests\test_chat_auth.py` 確認檔案裡已經沒有 `skip` 之後才看到紅。
+
+- **學到的：** E88 記過「跳過的測試不會提醒自己還在跳過」。這次是實例：以為撕掉了，結果是綠的。撕標記之後要看結果列有沒有 `s`，不能只看有沒有 `F`
+
+### 挫折 5：量測指令在別的資料夾執行
+
+第一次量測得到 `ModuleNotFoundError: No module named 'app'`、1.9 秒。那個終端機不在專案資料夾，Python 從目前所在的資料夾找 `app`，在第一行就停了，還沒走到連線。回到專案資料夾重做才得到 48.1 秒。與 E89「為什麼用 `python -m`」是同一件事。
+
+### 限制（誠實記錄）
+
+- **`user_id` 查出來之後還沒有被使用。** 額度（步驟 7）與稽核（步驟 9）尚未接上；目前的效果只有「沒有有效 Key 的人進不來」
+- **既有的 9 個 `test_chat` 測試不經過驗證**（定案 7 的代價）；驗證壞了只有 `test_chat_auth.py` 的 7 個會發現
+- **「不碰模型、不寫稽核」的兩個斷言沒有做破壞實驗。** 要讓它們變紅，得把驗證搬進 `chat_endpoint`、排在呼叫模型之後，那是結構的改寫，不是改一行；目前由「驗證在 `chat_endpoint` 之外」的結構保證
+- 503 兩個測試的 `detail` 斷言沒有單獨看過失敗（實驗 C 停在前一個斷言）
+- **每個請求都新建一條 boto3 連線**（`get_dynamodb()` 沒有重複使用）。建立連線的成本沒有量測；步驟 12 量延遲與記憶體時評估
+- **`get_item` 沒有指定強一致讀取。** 雲端上剛被停用的 Key 可能在短時間內仍然通過；DynamoDB Local 看不出這個差異。是否加 `ConsistentRead=True` 尚未定案
+- **驗證失敗沒有任何紀錄與計數**（E88 定案 4 的代價）。有人大量嘗試 Key 時目前看不到；限速不在本專題範圍（7.9）
+- `bearer` 小寫會被拒絕（定案 5）；`Bearer` 後面多個空格時，取出的 Key 帶著空格，查不到而回 401
+- Key 的格式（`gw_` 開頭、長度）沒有檢查，任何字串都會被拿去算雜湊再查一次資料庫
+- 連不上資料庫時，使用者仍要等約 4～5 秒才拿到 503（6.7 秒扣掉 Python 啟動）；這個數字只在 Windows 的本機量過一次，雲端的情況要到 M4 才知道
+- 逾時與重試的數字（2 秒、5 秒、2 次）是依「DynamoDB 正常是毫秒等級」定的，沒有壓力測試佐證
+- `BrokenDynamoDB` 是替身，只模擬 `EndpointConnectionError`；真的停掉容器的情況留到步驟 11 的驗收（S03）
+- 503 沒有附 `Retry-After`
+- 只接了 `find_user_id` 的錯誤。`get_dynamodb()` 本身出錯（例如沒設定網址）仍是 500
+- `hash_api_key()` 用未加鹽的 SHA-256，前提是 Key 夠長夠亂；步驟 10 產生 Key 時要守住定案 3 的格式
+- 只驗證假的 OpenAI 與考場；真實呼叫留到步驟 11（S01）
+
+### 面試可用的說法
+
+- 「API Key 我只存 SHA-256 雜湊。稽核的指紋我用 HMAC，因為問句很短、猜得到；API Key 是 256 位元的亂數，猜不完，所以不需要另外加金鑰。兩個地方用不同的做法，依據是被雜湊的東西好不好猜。」
+- 「驗證我寫成 FastAPI 的相依，放在對話入口之外。沒通過的請求進不了主流程，所以不會碰到模型、也不會寫稽核，這是結構保證的，不是靠每個地方記得檢查。」
+- 「沒帶 Key、Key 不存在、Key 被停用，三種我回完全相同的 401。我做過一個實驗，把其中一種的訊息改掉，兩個測試立刻變紅。外面的人不該能從訊息分辨一把 Key 存不存在。」
+- 「我有一個測試是『被拒絕的請求不碰模型、不寫稽核』。推上去之前我讀到自己把網址的大小寫打錯了，請求其實是 404，那個測試照樣是綠的。所以我在它前面加了一行，先確認狀態碼是 401。『某件事沒發生』的測試，要先確認請求真的走到了該被擋的地方。」
+- 「資料庫連不上時會怎樣，我是先量的：boto3 預設花了 48 秒才報錯，因為它默默重試了十次。我改成 2 秒逾時、最多試兩次，同樣的情況變成 6.7 秒。預設值是為了盡量成功，不是為了快點告訴使用者失敗；閘道要自己決定等多久。」
+- 「資料庫讀不到的時候我回 503，不是 401。那個人帶的可能是正確的 Key，只是我們沒辦法確認；回 401 會讓他以為自己的 Key 壞了。不確認就不放行，這是 fail-closed。」
+- 「boto3 的錯誤有兩個家族：連不上，和連上了但對方說辦不到。我各寫一個測試，也實際把其中一個家族拿掉，看到對應的測試變紅。」
+
+---
+
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `04202c3` | 14:31 | `feat: add hash_api_key for API key lookup` |
+| `0ba5841` | 15:49 | `feat: add extract_bearer_token for the Authorization header` |
+| `96278fd` | 16:40 | `feat: add find_user_id to look up active API keys` |
+| `bcad448` | 18:18 | `feat: add the DynamoDB dependency and skipped authentication tests` |
+| `8d90c4a` | 19:45 | `feat: require an API key on POST /v1/chat` |
+| `9a0957e` | 20:29 | `feat: make the DynamoDB client give up quickly` |
+| `87f6f7c` | 21:04 | `feat: return 503 when the key lookup cannot reach the database` |
+
+每一筆 commit 前都以 `git status` 確認只有預期的檔案，破壞實驗已還原。
+
+---
+
+## 目前進度（2026-10-08 21:05）
 
 - 開工前待辦 1 ✅（E76）；待辦 2（digest 複查）✅（E89）
 - 步驟 1-1（Email）✅（E77，已推送）
@@ -2097,14 +2560,15 @@ TypeError: 'method' object is not subscriptable
 - 步驟 1-6（兩個去處都已遮罩）✅（E83，已推送）
 - **步驟 1 全部完成**
 - 期末簡報 v1 已記錄（E84），已推送（簡報 `8508164`；紀錄 `docs: record final presentation v1 evidence`，`8508164..b33144c`，10/6 02:08）
-- 交接說明為 `docs/handoff/m2-step5-part2-handoff.md`（接在 `m2-step5-handoff.md`、`m2-step3-handoff.md` 之後；後者的第 3、4、5、9、10 節仍有效）
+- 交接說明為 `docs/handoff/m2-step6-handoff.md`（接在 `m2-step5-part2-handoff.md`、 `m2-step5-handoff.md`、`m2-step3-handoff.md` 之後；後者的第 3、4、5、9、10 節仍有效）
 - **步驟 2（個資類別進稽核）✅（E85，程式已推送 `53a4491`）；目前 `45 passed`**
 - **步驟 3（`period_of()`：台北時間切月）✅（E86）；已推送 `249921d`**
 - **步驟 4（`cost_micro_usd()`：最小成本函式）✅（E87，已推送 `3491977`）**
 - **步驟 7 的純邏輯（超額回應五項定案、`is_over_quota()`、`seconds_until_next_period()`）✅（E88）。** 接線（429、`Retry-After`、503、稽核）尚未做
-- **步驟 5（DynamoDB Local、boto3 連線、建表）✅（E89，程式已推送 `dac3d3c`）；目前 `71 passed`（其中 5 個是 `integration`，要 `dynamodb-test` 容器開著；沒有 Docker 時 `-m "not integration"` 為 `66 passed, 5 deselected`）**
-- 下一步：步驟 6（API Key 驗證，S01）；開工前要先定三件事（見待決）；下一筆是 E90
-- 預計 10/10 結案（原訂 10/11）
+- **步驟 5（DynamoDB Local、boto3 連線、建表）✅（E89，程式已推送 `dac3d3c`）**
+- **步驟 6（API Key 驗證：401、資料庫讀不到回 503、連線逾時設定）✅（E90，程式已推送 `87f6f7c`）；目前 `89 passed`（其中 16 個是 `integration`，要 `dynamodb-test` 容器開著）**
+- 下一步：步驟 7 的接線（額度檢查、429、`Retry-After`、被擋的請求寫稽核）；開工前要先定「沒有額度紀錄的人怎麼處理」；下一筆是 E91
+- 目標 10/10 結案；10/8 評估後，10/11 較為實際（仍在 W2 內）
 
 ---
 
@@ -2113,9 +2577,12 @@ TypeError: 'method' object is not subscriptable
 | 項目 | 目前的建議 | 何時定 |
 |---|---|---|
 | ~~`python:3.12-slim` digest 複查（E74 的冷卻期例外）~~ | ✅ 10/7 完成：digest 仍存在且未變；未掃弱點（E89） | — |
-| API Key 從哪個標頭來（`Authorization: Bearer …` 或自訂標頭）；`api_keys` 除了 `key_hash`、`user_id` 要不要 `status` 欄位（決策書 3.2 有「狀態」）；Key 的格式與長度 | 步驟 6 開工時把選項攤開比 | 步驟 6 |
+| ~~API Key 從哪個標頭來；`api_keys` 要不要 `status` 欄位；Key 的格式與長度~~ | ✅ 10/8 定案：`Authorization: Bearer`、要 `status`、`gw_` 加 `token_hex(32)`（E90） | — |
 | 這個人這個月沒有額度紀錄時，擋還是放（E89） | 與「資料庫讀不到」（503）是兩種情況；步驟 7 開工時定 | 步驟 7 |
-| 既有 9 個 `test_chat` 測試怎麼提供身分與額度（依賴覆寫，或也打 `dynamodb-test`） | 步驟 6、7 接線時定 | 步驟 6～7 |
+| 既有 9 個 `test_chat` 測試怎麼提供**額度**（身分已定案：覆寫 `get_user_id`，E90） | 步驟 7 接線時定；傾向比照身分的做法，把額度檢查也做成可覆寫的相依 | 步驟 7 |
+| `get_item` 要不要強一致讀取（`ConsistentRead=True`）（E90） | 雲端上剛停用的 Key 可能短暫仍可用；查證成本與延遲後定 | M4 前 |
+| 每個請求新建一條 boto3 連線的成本（E90） | 步驟 12 量延遲與記憶體時評估是否改為重複使用 | 步驟 12 |
+| 503 要不要附 `Retry-After`（E90） | D10 對供應商限流的 503 有附；資料庫故障的 503 尚未決定 | 步驟 7 |
 | CI 怎麼跑 `integration` 測試（E89） | 預設在 CI 起 `dynamodb-test` 容器；不行才用 `-m "not integration"` | 10/12 那週 |
 | M4 上雲時 `app/db.py` 怎麼表示連真的 AWS（不給網址、不帶假帳密，用 Fargate 的 IAM 角色）（E89） | 保留「沒講清楚要連哪裡就報錯」的性質 | M4 |
 | 雲端 DynamoDB 的計費模式（E89） | 查證免費額度適用哪一種後定 | M4 |
