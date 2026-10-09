@@ -15,6 +15,7 @@ from app.audit import append_audit, hash_prompt, make_summary, mask, detect_pii_
 from app.auth import extract_bearer_token, find_user_id, hash_api_key
 from app.db import make_dynamodb_client
 from app.providers.openai_client import chat
+from app.quota import is_over_quota, period_of, read_limit, read_used, seconds_until_next_period
 
 # M1 固定用便宜模型、不思考；M3 才會依內容選模型
 MODEL = "gpt-6-luna"
@@ -82,6 +83,26 @@ def get_user_id(
     return user_id
 
 
+# 領用窗口：現在的時間（測試時會換成固定的時間點）
+def get_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+# 領用窗口：這個人的額度與本月已用量；讀不到就不放行
+def get_quota(
+    user_id: str = Depends(get_user_id),
+    dynamodb: BaseClient = Depends(get_dynamodb),
+    now: datetime = Depends(get_now),
+) -> tuple[int, int]:
+    """Return the caller's limit and usage this month, or stop the request with 503."""
+    try:
+        limit_micro_usd = read_limit(dynamodb, user_id)
+        used_micro_usd = read_used(dynamodb, user_id, period_of(now))
+    except (BotoCoreError, ClientError):
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+    return limit_micro_usd, used_micro_usd
+
+
 # 健康檢查：只回狀態，不透露版本等資訊
 @app.get("/health")
 def health_check():
@@ -102,6 +123,8 @@ def chat_endpoint(
     hmac_key: bytes = Depends(get_hmac_key),
     audit_path: Path = Depends(get_audit_path),
     user_id: str = Depends(get_user_id),
+    quota: tuple[int, int] = Depends(get_quota),
+    now: datetime = Depends(get_now),
 ):
     """Send the masked message to the model and write an audit record."""
     request_id = str(uuid.uuid4())
@@ -110,11 +133,22 @@ def chat_endpoint(
     # 先準備紀錄的前半段：不管成功或失敗都要記的欄位
     record = {
         "request_id": request_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": now.isoformat(),
         "prompt_hash": hash_prompt(request.message, hmac_key),
         "summary": make_summary(request.message),
         "pii_types": detect_pii_types(request.message)
     }
+
+    # 額度用完就擋：先記一筆稽核（查得到誰在用完後還一直送），再回 429 並告知何時恢復
+    limit_micro_usd, used_micro_usd = quota
+    if is_over_quota(limit_micro_usd, used_micro_usd):
+        record["status"] = "quota_exceeded"
+        append_audit(record, audit_path)
+        raise HTTPException(
+            status_code=429,
+            detail="Monthly quota exceeded",
+            headers={"Retry-After": str(seconds_until_next_period(now))},
+        )
 
     # 試著呼叫模型；OpenAI 出錯就記一筆失敗，回 502
     try:

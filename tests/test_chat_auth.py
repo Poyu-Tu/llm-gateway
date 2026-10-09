@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.auth import hash_api_key
 from app.db import API_KEYS_TABLE
-from app.main import app, get_audit_path, get_client, get_dynamodb, get_hmac_key
+from app.main import app, get_audit_path, get_client, get_dynamodb, get_hmac_key, get_quota
 from scripts.create_tables import create_tables
 from tests.fakes import make_fake_client
 
@@ -37,6 +37,8 @@ def make_auth_test_client(tmp_path, dynamodb):
     app.dependency_overrides[get_hmac_key] = lambda: b"test-key"
     app.dependency_overrides[get_audit_path] = lambda: audit_path
     app.dependency_overrides[get_dynamodb] = lambda: dynamodb
+    # 額度換成一定夠用：這個檔只測驗證，額度另外在 test_chat_quota.py 測
+    app.dependency_overrides[get_quota] = lambda: (1_000_000, 0)
     create_tables(dynamodb)
     put_test_key(dynamodb, "active")
     return TestClient(app), completions, audit_path
