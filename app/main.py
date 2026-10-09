@@ -14,8 +14,9 @@ from pydantic import BaseModel, Field
 from app.audit import append_audit, hash_prompt, make_summary, mask, detect_pii_types
 from app.auth import extract_bearer_token, find_user_id, hash_api_key
 from app.db import make_dynamodb_client
+from app.pricing import cost_micro_usd
 from app.providers.openai_client import chat
-from app.quota import is_over_quota, period_of, read_limit, read_used, seconds_until_next_period
+from app.quota import add_usage, is_over_quota, period_of, read_limit, read_used, seconds_until_next_period
 
 # M1 固定用便宜模型、不思考；M3 才會依內容選模型
 MODEL = "gpt-6-luna"
@@ -125,6 +126,7 @@ def chat_endpoint(
     user_id: str = Depends(get_user_id),
     quota: tuple[int, int] = Depends(get_quota),
     now: datetime = Depends(get_now),
+    dynamodb: BaseClient = Depends(get_dynamodb),
 ):
     """Send the masked message to the model and write an audit record."""
     request_id = str(uuid.uuid4())
@@ -150,6 +152,13 @@ def chat_endpoint(
             headers={"Retry-After": str(seconds_until_next_period(now))},
         )
 
+    # 花錢之前先確認扣得了帳：對當月那一筆加 0，寫不進去就回 503，一毛都還沒花
+    period = period_of(now)
+    try:
+        add_usage(dynamodb, user_id, period, 0)
+    except (BotoCoreError, ClientError):
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+    
     # 試著呼叫模型；OpenAI 出錯就記一筆失敗，回 502
     try:
         result = chat(client, MODEL, [{"role": "user", "content": masked}], REASONING_EFFORT)
@@ -165,6 +174,16 @@ def chat_endpoint(
     record["output_tokens"] = result.output_tokens
     record["reasoning_tokens"] = result.reasoning_tokens
     record["status"] = "ok"
+
+    # 把這次的成本加到當月已用量；這時模型已經回答了，扣失敗也照樣把回答交出去，並記下沒扣到
+    cost = cost_micro_usd(MODEL, result.input_tokens, result.output_tokens)
+    record["cost_micro_usd"] = cost
+    try:
+        add_usage(dynamodb, user_id, period, cost)
+        record["charged"] = True
+    except (BotoCoreError, ClientError):
+        record["charged"] = False
+        
     append_audit(record, audit_path)
     return {
         "request_id": request_id,

@@ -78,3 +78,18 @@ def read_used(client: BaseClient, user_id: str, period: str) -> int:
     if "used_micro_usd" not in item:
         return 0
     return int(item["used_micro_usd"]["N"])
+
+
+# 用「加上去」而不是「讀出來算好再寫回去」：兩個請求同時扣也不會互相蓋掉
+def add_usage(client: BaseClient, user_id: str, period: str, amount_micro_usd: int) -> None:
+    """Add an amount to the user's usage for the period, creating the record if needed."""
+    key = {
+         "user_id": {"S": user_id},
+         "period": {"S": period},
+    }
+    client.update_item(
+        TableName=QUOTAS_TABLE,
+        Key=key,
+        UpdateExpression="ADD used_micro_usd :amount",
+        ExpressionAttributeValues={":amount": {"N": str(amount_micro_usd)}},
+    )

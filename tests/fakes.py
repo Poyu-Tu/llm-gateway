@@ -38,3 +38,14 @@ def make_fake_client(content="Hi there", has_details=True, error=None):
     completions = FakeCompletions(content, has_details, error)
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     return client, completions
+
+
+# 假的資料庫：只把收到的寫入記下來，什麼都不存；讓不測額度的測試不需要 Docker
+class FakeDynamoDB:
+    """Stands in for a DynamoDB client and records the updates it receives."""
+
+    def __init__(self):
+        self.updates = []
+
+    def update_item(self, **kwargs):
+        self.updates.append(kwargs)

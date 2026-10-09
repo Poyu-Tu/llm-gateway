@@ -5,8 +5,8 @@ import json
 from openai import OpenAIError
 from fastapi.testclient import TestClient
 
-from app.main import app, get_audit_path, get_client, get_hmac_key, get_user_id, get_quota
-from tests.fakes import make_fake_client
+from app.main import app, get_audit_path, get_client, get_dynamodb, get_hmac_key, get_quota, get_user_id
+from tests.fakes import FakeDynamoDB, make_fake_client
 
 
 # 把四個領用窗口換成假的，回傳：測試用戶端、筆記本、稽核檔位置
@@ -20,6 +20,7 @@ def make_test_client(tmp_path, error=None):
     # 驗票口換成直接放行：這個檔測的是遮罩與稽核，驗證另外在 test_chat_auth.py 測
     app.dependency_overrides[get_user_id] = lambda: "alice"
     app.dependency_overrides[get_quota] = lambda: (1_000_000, 0)
+    app.dependency_overrides[get_dynamodb] = lambda: FakeDynamoDB()
     return TestClient(app), completions, audit_path
 
 
