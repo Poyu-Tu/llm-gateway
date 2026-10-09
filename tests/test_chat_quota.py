@@ -141,3 +141,16 @@ def test_chat_returns_503_when_quota_cannot_be_read(tmp_path, dynamodb):
     assert response.json() == {"detail": "Service temporarily unavailable"}
     assert completions.last_request is None
     assert not audit_path.exists()
+
+
+# 被額度擋下的請求也要記是誰：用完之後還一直送的人，要查得到
+def test_chat_blocked_request_audit_records_user_id(tmp_path, dynamodb):
+    client, _, audit_path = make_quota_test_client(tmp_path, dynamodb)
+    put_limit(dynamodb, 1000)
+    put_used(dynamodb, "2026-10", 1000)
+
+    client.post("/v1/chat", json={"message": "Say hi"}, headers=HEADERS)
+
+    record = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert record["status"] == "quota_exceeded"
+    assert record["user_id"] == "alice"

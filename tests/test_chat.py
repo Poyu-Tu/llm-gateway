@@ -132,3 +132,13 @@ def test_chat_error_audit_still_records_pii_types(tmp_path):
     assert record["status"] == "error"
     assert record["pii_types"] == ["TW_ID"]
     assert "A123456780" not in text
+
+
+# 稽核要記「是誰送的」：沒有這一欄，就查不出每個人各用了多少
+def test_chat_audit_records_user_id(tmp_path):
+    client, _, audit_path = make_test_client(tmp_path)
+
+    client.post("/v1/chat", json={"message": "Say hi"})
+
+    record = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert record["user_id"] == "alice"

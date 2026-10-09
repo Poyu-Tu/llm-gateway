@@ -135,6 +135,7 @@ def chat_endpoint(
     # 先準備紀錄的前半段：不管成功或失敗都要記的欄位
     record = {
         "request_id": request_id,
+        "user_id": user_id,
         "timestamp": now.isoformat(),
         "prompt_hash": hash_prompt(request.message, hmac_key),
         "summary": make_summary(request.message),
