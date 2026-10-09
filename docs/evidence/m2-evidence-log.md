@@ -390,6 +390,13 @@ E         + Mail [PHONE]@example.com now
 | 27 | 3.2 的 `api_keys` 表、D3 | 補上 `status` 欄位：值是 `active` 才放行，其餘（含欄位不存在）一律拒絕；Key 的格式為 `gw_` 加 `secrets.token_hex(32)`（E90） |
 | 28 | 12.5「超額回應…」那一列與本表第 20 項、2.2 流程圖 [3]、10.3 第 1 點 | 資料庫讀不到時的 503 訊息改為驗證與額度共用：`{"detail": "Service temporarily unavailable"}`（取代第 20 項寫的 `Quota service unavailable`）；資料庫連不上時最先出錯的是驗證（E90） |
 | 29 | D10、3.4 或 3.2、D22（repo 結構） | 補上資料庫連線的逾時與重試：連線 2 秒、讀取 5 秒、總共試 2 次、`standard` 模式；實測預設值要 48.1 秒才報錯，設定後 6.7 秒。repo 結構加上 `app/auth.py`（E90） |
+| 30 | 3.2 的 `quotas` 表、D2、本表第 23 項 | 額度改放使用者層級：`user_id` + `period = "limit"` 那一筆存 `limit_micro_usd`；每月一筆的只存 `used_micro_usd`。D2「換月自然是新的一筆」只對已用量成立。查不到已用量當成 0；查不到額度當成 0、回 429（E91） |
+| 31 | 2.2 流程圖 [3]、7.10、8.2 的 M2、10.3 第 9 點 | 補上扣額度的做法：呼叫模型前對當月那一筆 `ADD` 0 確認寫得進去（寫不進去回 503）；模型回答後以 `ADD` 原子累加實際成本；事後扣失敗時回答照給，稽核記 `charged: false` 與金額。說明它是預扣的前半步，M2 會超扣（實測 892 → 1120）（E91、E92） |
+| 32 | D36、3.2 的 `audit` 表、8.2 的 M2 與 M4、11.4 的 S14 | 稽核在 M2 仍存檔案，M4 上雲前搬進 `audit` 表；理由是扣額度失敗的紀錄不能和額度放在同一個資料庫。`audit` 的欄位補上 `user_id`、`cost_micro_usd`、`charged`（E91） |
+| 33 | 4.2 應用層、D22（repo 結構） | 補上領用窗口 `get_now()`、`get_quota()`；repo 結構加上 `scripts/seed.py`、`tests/fakes.py` 的 `FakeDynamoDB`；成本以程式指定的模型名稱查單價（E91） |
+| 34 | 8.2 的 M2、3.2 的 `api_keys` 表 | 補上種子腳本：alice 1,000、bob 1,000,000 micro-USD；Key 只印一次；重跑會產生新的 Key、舊的不失效（限制）（E91） |
+| 35 | 11.4 截圖清單、8.2 的 M2 | S01～S04 標為完成（10/9）；S02 註明目前是終端機畫面，M6 用 Console 重拍。M2 的驗證條件補上實測結果與 `Retry-After` 的驗算（E92） |
+| 36 | D15、12.5、10.2 的記憶體對照 | 補上 M2 映像的待機記憶體 62.06 MiB（M1 為 56.08 MiB）（E92） |
 
 ---
 
@@ -2548,7 +2555,413 @@ TypeError: get_item() only accepts keyword arguments.
 
 ---
 
-## 目前進度（2026-10-08 21:05）
+## E91. 步驟 7～10：額度檢查、扣額度、稽核記使用者、種子腳本（2026-10-08 21:18 定案；10-09 12:46～17:14 實作）
+
+**依據：** 決策書 2.2 流程圖 [3]、3.2 的 `quotas` 與 `api_keys` 表、D2（`user_id` + `period`）、D30（成本進位）、D36（M2 換成 DynamoDB Local）、7.10（預扣）、8.2 M2；E86（`period_of`）、E87（`cost_micro_usd`）、E88（超額回應五項定案）、E90（驗證與共用的 503）。對應驗收 S02、S03。
+
+**範圍：** 驗證通過之後，Gateway 讀出這個人的額度與本月已用量，用完就擋；沒用完就呼叫模型，並把這次的成本加到已用量上。稽核紀錄多記「是誰」。另外寫一支腳本，建立示範用的兩個人。
+
+**生活比喻：** 儲值卡。進門先看卡裡還有沒有錢（額度檢查）；刷卡前先確認刷卡機有連線（事前寫入檢查）；消費完才知道金額，再從卡裡扣（扣額度）。
+
+### 定案 1：開工前（10/8 21:18～21:45 本人決定）
+
+| # | 決定 | 定案 | 不選的選項與理由 |
+|---|---|---|---|
+| 1 | 額度放在哪 | **使用者層級**：`quotas` 表多一筆固定排序鍵的紀錄（`user_id` + `period = "limit"`，欄位 `limit_micro_usd`）；每個月的已用量照舊一個月一筆（`used_micro_usd`） | 額度與已用量都放在當月那一筆（決策書 3.2 與 E89 的原樣）：換月時新的那一筆沒有人建，所有人查不到額度，要每月開帳。放在 `api_keys` 那一筆：額度變成跟著 Key 而不是跟著人 |
+| 2 | 查不到當月已用量 | 當成已用 0，放行（定案 1 的直接結果：換月不用任何人動手） | — |
+| 3 | 查不到額度那一筆 | 當成額度 0，回 429（只會在帳號沒設定好時發生） | 回 403 並另記一種稽核狀態：語意較準，但多一條路。放行：等於沒有上限 |
+| 4 | 額度檢查放哪一層 | **讀**做成領用窗口 `get_quota()`（讀不到回 503）；**判斷**、寫稽核、回 429 放在 `chat_endpoint` 裡，排在準備好 `record` 前半段之後、呼叫模型之前 | 全放進 `chat_endpoint`：既有的 9 個測試不好提供額度。全做成窗口：寫稽核需要請求內容、HMAC 金鑰、稽核檔位置，窗口拿不到 |
+| 5 | 模型已回答、扣額度才出錯 | 呼叫模型**之前**先對當月那一筆做一次「加 0」的寫入；寫不進去回 503（還沒花錢）。之後真的扣失敗時，回答照給，稽核記下沒扣到的金額 | 不給回答、回 503：使用者白等、錢白花。照給但不做事前檢查：資料庫「讀得到、寫不進去」時可以一直免費用 |
+| 6 | 測試由誰寫 | 步驟 7～10 的測試檔由 Claude 整份提供並說明；本人寫功能、做破壞實驗 | 照舊由本人照表格寫：10/8 的錯字多半出在測試檔，預估多花約 1.5 小時 |
+
+**定案 5 的背景：** 資料庫整個連不上時，請求在查 Key 那一步就回 503，走不到花錢的地方。會持續免費的只有「讀得到、寫不進去」（例如權限只給了讀）。事前「加 0」就是用來擋這一種。
+
+**定案 1 修訂了什麼：** 決策書 3.2 的 `quotas`（額度不再放在當月那一筆）、D2 的說明（「換月自然是新的一筆」只對已用量成立）、E89 的欄位說明。
+
+### 定案 2：實作中（10/9 本人決定）
+
+| # | 決定 | 定案 | 不選的選項與理由 |
+|---|---|---|---|
+| 7 | 既有測試怎麼提供額度 | `test_chat.py` 與 `test_chat_auth.py` 的道具把 `get_quota` 換成固定交回 `(1_000_000, 0)`；額度的測試再把覆寫拿掉、走真的 | 每個測試都先放一筆額度：`test_chat.py` 整個檔變成要 Docker |
+| 8 | 「現在」從哪來 | 領用窗口 `get_now()`，測試換成固定時間；`period`、`Retry-After`、稽核的 `timestamp` 用同一個 `now` | 各處自己呼叫 `datetime.now()`：`Retry-After` 的測試無法寫出固定的預期值，而且月底最後一秒可能出現 `period` 與 `Retry-After` 對不上 |
+| 9 | 成本用哪個模型名稱查單價 | 程式指定的常數 `MODEL` | 用 OpenAI 回報的名稱：回報的名稱可能帶日期尾碼，查不到單價時會在已經花錢之後出錯 |
+| 10 | 稽核紀錄的存放（步驟 9） | **留在檔案**（`data/audit.jsonl`），只加 `user_id`；M4 上雲前搬進 `audit` 表 | 現在搬進 DynamoDB（D36 的原計畫）：扣額度失敗時要靠稽核記下沒扣到的金額（定案 5），稽核與額度放同一個資料庫，資料庫寫不進去時這筆紀錄也寫不進去；另需改寫約 15 個讀稽核檔的測試 |
+| 11 | 種子腳本 | `scripts/seed.py`：alice 1,000 micro-USD、bob 1,000,000 micro-USD；Key 只印一次；每次執行產生新的 Key；會先建表 | 把 Key 寫進檔案：多一個要保護的檔案 |
+
+**定案 10 偏離了 D36，列入 v2.8 待改項目。** 代價：工作是往後挪，不是省掉；檔案不能按人查詢；容器重開就消失，所以 M4 上雲前一定要搬，屆時一併決定扣額度失敗的紀錄放哪裡。
+
+### 步驟 7 之一：讀額度與已用量（10/9 12:46～13:57）
+
+**本人撰寫（`app/quota.py`）：**
+
+```python
+# 額度那一筆用固定的排序鍵，和每個月的已用量放在同一個人底下
+LIMIT_SORT_KEY = "limit"
+
+
+# 額度放在使用者層級的那一筆；查不到就當成 0：沒設定好的帳號不能變成沒有上限
+def read_limit(client: BaseClient, user_id: str) -> int:
+    """Return the user's monthly limit in micro-USD, or 0 when none is set."""
+    key = {
+        "user_id": {"S": user_id},
+        "period": {"S": LIMIT_SORT_KEY},
+    }
+    response = client.get_item(TableName=QUOTAS_TABLE, Key=key)
+    if "Item" not in response:
+        return 0
+    item = response["Item"]
+    if "limit_micro_usd" not in item:
+        return 0
+    return int(item["limit_micro_usd"]["N"])
+```
+
+`read_used(client, user_id, period)` 的形狀相同，排序鍵是 `period`，欄位是 `used_micro_usd`。
+
+**測試（`tests/test_quota_db.py`，6 個，`integration`）：** 讀得到額度、沒有額度那一筆回 0、那一筆沒有欄位回 0；讀得到已用量、沒有當月那一筆回 0、別的月份的已用量不算。測試數 89 → 95。
+
+**破壞實驗：**
+
+| 實驗 | 改法 | 失敗訊息 | 判讀 |
+|---|---|---|---|
+| A | `read_limit` 最後不包 `int()` | `assert '1000' == 1000` | DynamoDB 的數字交回來是字串；不轉型，後面的大小比較會出錯或比成字串順序 |
+| B | `read_used` 的排序鍵寫成 `LIMIT_SORT_KEY` | `assert 0 == 250` | 讀到額度那一筆，裡面沒有已用量欄位，被當成 0，等於永遠不會超額 |
+
+推送 `c61931b`（13:57）。
+
+### 步驟 7 之二：接進對話入口（10/9 13:57～14:24）
+
+**本人撰寫（`app/main.py`）：**
+
+```python
+# 領用窗口：現在的時間（測試時會換成固定的時間點）
+def get_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+# 領用窗口：這個人的額度與本月已用量；讀不到就不放行
+def get_quota(
+    user_id: str = Depends(get_user_id),
+    dynamodb: BaseClient = Depends(get_dynamodb),
+    now: datetime = Depends(get_now),
+) -> tuple[int, int]:
+    """Return the caller's limit and usage this month, or stop the request with 503."""
+    try:
+        limit_micro_usd = read_limit(dynamodb, user_id)
+        used_micro_usd = read_used(dynamodb, user_id, period_of(now))
+    except (BotoCoreError, ClientError):
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+    return limit_micro_usd, used_micro_usd
+```
+
+`chat_endpoint` 裡，準備好 `record` 前半段之後：
+
+```python
+    # 額度用完就擋：先記一筆稽核（查得到誰在用完後還一直送），再回 429 並告知何時恢復
+    limit_micro_usd, used_micro_usd = quota
+    if is_over_quota(limit_micro_usd, used_micro_usd):
+        record["status"] = "quota_exceeded"
+        append_audit(record, audit_path)
+        raise HTTPException(
+            status_code=429,
+            detail="Monthly quota exceeded",
+            headers={"Retry-After": str(seconds_until_next_period(now))},
+        )
+```
+
+**測試（`tests/test_chat_quota.py`，8 個，`integration`）：** 低於額度 200；等於額度 429（`detail`、`Retry-After == "60"`、沒碰模型）；被擋的請求寫稽核（`quota_exceeded`、有 `pii_types`、沒有 `model` 欄位、全文沒有個資）；沒有額度那一筆 429；額度 0 是嚴格上限 429；沒有當月已用量 200；別的月份的已用量不算 200；`quotas` 表不存在時 503 且沒碰模型、沒寫稽核。固定時間是 `datetime(2026, 10, 31, 15, 59, tzinfo=timezone.utc)`（台北 10/31 23:59，離下個月剛好 60 秒）。測試數 95 → 103。
+
+**連帶調整：** `test_chat_auth.py` 的道具也覆寫 `get_quota`（定案 7），否則「有效的 Key 得到 200」會因為沒有額度而變成 429。
+
+**破壞實驗：**
+
+| 實驗 | 改法 | 結果 | 判讀 |
+|---|---|---|---|
+| A | `get_quota` 的回傳順序對調 | `3 failed`，都是 `assert 429 == 200` | 還有額度的人被擋下。程式沒有當掉，只是擋錯人 |
+| B | 被擋的那條路拿掉 `append_audit` | `1 failed`，`FileNotFoundError` | 稽核檔沒有被建立；使用者照樣收到 429，從外面看不出少了紀錄 |
+
+推送 `bebc135`（14:24）。
+
+### 步驟 8：扣額度（10/9 14:24～15:20）
+
+**先實測「加 0」（Python 互動模式，對 DynamoDB Local）：**
+
+| 動作 | 結果 |
+|---|---|
+| 對不存在的 `carol` 做 `ADD used_micro_usd :amount`，`:amount` 是 0 | 那一筆被建立，`'used_micro_usd': {'N': '0'}` |
+| 再做兩次，`:amount` 是 7 | `{'N': '14'}` |
+
+`ADD` 對不存在的紀錄會建立它，對已有的紀錄是累加；定案 5 可行。
+
+**本人撰寫（`app/quota.py`）：**
+
+```python
+# 用「加上去」而不是「讀出來算好再寫回去」：兩個請求同時扣也不會互相蓋掉
+def add_usage(client: BaseClient, user_id: str, period: str, amount_micro_usd: int) -> None:
+    """Add an amount to the user's usage for the period, creating the record if needed."""
+    key = {
+         "user_id": {"S": user_id},
+         "period": {"S": period},
+    }
+    client.update_item(
+        TableName=QUOTAS_TABLE,
+        Key=key,
+        UpdateExpression="ADD used_micro_usd :amount",
+        ExpressionAttributeValues={":amount": {"N": str(amount_micro_usd)}},
+    )
+```
+
+**本人撰寫（`app/main.py` 的 `chat_endpoint`，兩段）：**
+
+```python
+    # 花錢之前先確認扣得了帳：對當月那一筆加 0，寫不進去就回 503，一毛都還沒花
+    period = period_of(now)
+    try:
+        add_usage(dynamodb, user_id, period, 0)
+    except (BotoCoreError, ClientError):
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+```
+
+```python
+    # 把這次的成本加到當月已用量；這時模型已經回答了，扣失敗也照樣把回答交出去，並記下沒扣到
+    cost = cost_micro_usd(MODEL, result.input_tokens, result.output_tokens)
+    record["cost_micro_usd"] = cost
+    try:
+        add_usage(dynamodb, user_id, period, cost)
+        record["charged"] = True
+    except (BotoCoreError, ClientError):
+        record["charged"] = False
+```
+
+第二段的 `except` 底下沒有 `raise`：出錯只記一筆，請求繼續往下走。
+
+**請求的順序（步驟 8 之後）：** 驗證（401／503）→ 讀額度（503）→ 遮罩、準備稽核 → 判斷超額（429，寫稽核）→ **加 0（503）** → 呼叫模型（502，寫稽核）→ **算成本、加到已用量** → 寫稽核 → 回傳。
+
+**測試（`tests/test_chat_charge.py`，7 個，`integration`）：**
+
+| 測試 | 檢查 |
+|---|---|
+| 成功的請求把成本加上去 | 已用 100 → 107 |
+| 這個月第一次請求 | 原本沒有紀錄 → 7 |
+| 連續呼叫到被擋（S02） | 額度 14：第 1、2 次 200，第 3 次 429，已用量停在 14 |
+| 被額度擋下的不扣錢 | 已用量維持 1000 |
+| 稽核留下成本 | `cost_micro_usd == 7`、`charged is True` |
+| 寫不進去就不花錢 | 503，模型沒被呼叫 |
+| 模型回答後才扣失敗 | 200、回答照給；稽核 `charged is False`、金額 7；已用量 0 |
+
+7 的來源：假的模型回報輸入 13、輸出 11 個 token，`cost_micro_usd` 算出 6.8、進位成 7（與決策書 D30 的例子同一組數字）。最後兩個測試各用一個包住真連線的替身：`ReadOnlyDynamoDB`（讀照常、寫入一律被拒）與 `FailsAfterFirstWriteDynamoDB`（第一次寫入成功、之後失敗）。
+
+`tests/fakes.py` 新增 `FakeDynamoDB`（只記下收到的寫入），`test_chat.py` 的道具用它覆寫 `get_dynamodb`，那 9 個測試仍然不需要 Docker。測試數 103 → 110。
+
+**挫折：替身裡的屬性名稱少一個字母。** `FakeDynamoDB.update_item` 寫成 `self.update.append(…)`，`__init__` 建的是 `self.updates`。只跑 `test_chat_charge.py` 時是 `7 passed`（那個檔用真的考場，不經過替身）；跑全部才出現 `8 failed, 102 passed`，都是 `AttributeError: 'FakeDynamoDB' object has no attribute 'update'`。改正後 `110 passed`。只跑改動的那個檔，看不到別的檔受到的影響。
+
+**這一步的測試沒有先看過「功能還沒寫」的紅：** 測試檔與功能是同一輪完成的。改以下面兩個破壞實驗補上。
+
+**破壞實驗：**
+
+| 實驗 | 改法 | 結果 | 判讀 |
+|---|---|---|---|
+| A | 把「加 0」那一段註解掉 | `2 failed`：`assert 200 == 503`、`assert True is False` | 寫不進去時模型照樣被呼叫、回答照給；另一個測試裡第一次寫入變成真的扣款，所以反而扣成功 |
+| B | 事後那一次 `add_usage` 的金額寫成 0 | `3 failed`：`assert 100 == (100 + 7)`、`assert 0 == 7`、`assert 200 == 429` | 請求都成功、稽核也寫「有扣到」，但已用量不動，額度形同沒有 |
+
+推送 `9fc86cc`（15:20）。
+
+### 步驟 9：稽核記使用者（10/9 15:20～16:40）
+
+`record` 的前半段加一行 `"user_id": user_id`，成功、模型失敗、被額度擋下三種紀錄都有。存放位置不變（定案 10）。
+
+**測試：** `test_chat.py` 加 `test_chat_audit_records_user_id`；`test_chat_quota.py` 加 `test_chat_blocked_request_audit_records_user_id`。寫功能前 `2 failed, 110 passed`，都是 `KeyError: 'user_id'`。
+
+**挫折：把函式呼叫寫進了欄位。** 第一版是 `"user_id": chat_endpoint()`，結果 `25 failed, 87 passed`，都是 `TypeError: chat_endpoint() missing 1 required positional argument: 'request'`，每一條都指向 `app\main.py:138`。要的是參數裡已經領到的值 `user_id`，不是再呼叫一次函式。`record` 是每個請求一進來就準備的，這一行出錯，所有走得到對話入口的請求都失敗；沒紅的 87 個是純函式的測試，以及在驗證就被擋下的。改正後 `112 passed`。
+
+推送 `ff6739b`（16:40）。
+
+### 步驟 10：種子腳本（10/9 16:41～17:14）
+
+**本人撰寫（`scripts/seed.py`，節錄）：**
+
+```python
+# 用 secrets 而不是 random：random 的亂數猜得出來，不能拿來當 Key
+def generate_api_key() -> str:
+    """Return a new random API key."""
+    return API_KEY_PREFIX + secrets.token_hex(32)
+
+
+# 資料庫只收到雜湊；Key 本身只在這裡交回去一次，之後沒有任何地方查得到
+def seed_user(client: BaseClient, user_id: str, limit_micro_usd: int) -> str:
+    """Store a new active API key and the monthly limit for the user, and return the key."""
+    key = generate_api_key()
+    key_item = {
+        "key_hash": {"S": hash_api_key(key)},
+        "user_id": {"S": user_id},
+        "status": {"S": "active"},
+    }
+    client.put_item(TableName=API_KEYS_TABLE, Item=key_item)
+    limit_item = {
+        "user_id": {"S": user_id},
+        "period": {"S": LIMIT_SORT_KEY},
+        "limit_micro_usd": {"N": str(limit_micro_usd)},
+    }
+    client.put_item(TableName=QUOTAS_TABLE, Item=limit_item)
+    return key
+```
+
+執行：`uv run python -m scripts.seed`（要先設 `DYNAMODB_ENDPOINT_URL`）。會先呼叫 `create_tables`，再印出 `alice: gw_…`、`bob: gw_…` 兩行。
+
+**測試（`tests/test_seed.py`，7 個，`integration`）：** Key 是 `gw_` 開頭、總長 67；連產生兩把不相等；交回來的 Key 算成雜湊後查得到這個人；掃整張 `api_keys` 表找不到 Key 本身；`read_limit` 讀得到額度；兩個人的 Key 與額度互不影響；用腳本建出的 `bob` 拿他的 Key 打對話入口得到 200，稽核的 `user_id` 是 `bob`。寫功能前 `1 error`（`cannot import name 'generate_api_key'`）。測試數 112 → 119。
+
+**挫折：第一版 `6 failed, 1 passed`，兩個原因。**
+
+| 訊息 | 原因 | 改正 |
+|---|---|---|
+| `assert 131 == 67` | `token_hex(64)`：參數是位元組數，一個位元組印成 2 個十六進位字元，64 個位元組是 128 個字元 | `token_hex(32)` |
+| `ParamValidationError`（5 個） | `"key_hash": {"S": hash_api_key}`：少了 `(key)`，交出去的是函式本身而不是算出來的雜湊；boto3 在送出前就拒絕 | `hash_api_key(key)` |
+
+與步驟 9 的挫折方向相反：那次是不該呼叫卻加了括號，這次是該呼叫卻沒加。
+
+**破壞實驗：**
+
+| 實驗 | 改法 | 結果 | 判讀 |
+|---|---|---|---|
+| A | `key_hash` 直接存 `key` | `4 failed`：兩個 `assert None == 'alice'`、一個「表裡找得到 Key」、一個 `FileNotFoundError` | 資料庫裡躺著能直接用的 Key，而功能看起來只是「登不進去」 |
+| B | `return hash_api_key(key)` | `4 failed`，同樣四個 | 交回去的東西再算一次雜湊就對不上 |
+
+兩個實驗的第四個都是 `FileNotFoundError`：Key 對不上被 401 擋下，而 401 不寫稽核，稽核檔不存在。
+
+推送 `b34edce`（17:14）。
+
+### 限制（誠實記錄）
+
+- **會超扣。** 檢查在呼叫前、扣款在呼叫後，事前不知道這次會花多少；最後一次成功的請求可以讓已用量超過額度。真實驗收看到 892 → 1120（超出 12%）、818 → 1039（E92）。同一個人同時送很多請求時，超出的幅度更大。7.10 的預扣還沒做；「加 0」只是它的前半步
+- **扣額度失敗的金額只記在稽核檔，沒有補收的機制，也沒有告警。** 目前要人去讀檔才會發現
+- **「加 0」之後、真的扣款之前，資料庫仍可能出問題**（測試 `…charge_fails_after_the_model_replied` 模擬的就是這一段）；這時回答照給、錢沒扣到
+- **稽核仍是本機檔案**（定案 10）：不能按人查詢、容器重開就消失、多個 Gateway 行程同時寫入沒有測過
+- **事前檢查與讀額度回 503 時不寫稽核**，資料庫故障期間有多少請求被擋下沒有紀錄
+- **模型呼叫失敗（502）時不扣錢，是由程式的順序保證的，沒有專屬的測試**
+- **每個請求最多對 DynamoDB 做 5 次往返**（查 Key、讀額度、讀已用量、加 0、扣款），而且每個請求新建一條連線；延遲沒有量測
+- 兩次讀取沒有指定強一致（同 E90）；DynamoDB Local 看不出差異
+- 額度是每人一個數字，沒有依模型或用途區分；改額度只能重跑種子腳本或手動改資料
+- **種子腳本重跑會產生新的 Key，舊的不會失效**，同一個人會有多把有效的 Key；沒有停用 Key 的指令
+- 種子腳本把 Key 印在終端機上；只用於本機的示範帳號
+- 稽核的 `charged`、`cost_micro_usd` 只有成功的紀錄才有；被額度擋下與模型失敗的紀錄沒有這兩欄
+- `ReadOnlyDynamoDB` 等替身模擬的是 `ClientError`；真的權限不足的情況要到 M4 接上 IAM 才驗得到
+
+### 面試可用的說法
+
+- 「額度我一開始照設計書放在每個月的那一筆裡，寫到一半發現換月那天沒有人會去建新的那一筆，所有人都會查不到額度。我改成額度放在使用者層級、已用量才是一個月一筆，換月就不用任何人動手。」
+- 「扣額度我用 DynamoDB 的原子累加，不是讀出來、算好、再寫回去。兩個請求同時進來時，後者那種做法會有一筆被蓋掉。」
+- 「模型已經回答、才發現扣不了帳，這時候怎麼辦？我的做法是呼叫模型之前先對那一筆做一次加 0 的寫入，寫不進去就直接回 503，一毛都還沒花。這擋掉的是『讀得到、寫不進去』的情況；資料庫整個連不上的話，在驗證那一步就擋掉了。」
+- 「稽核紀錄我原本計畫這一關搬進資料庫，後來決定先不搬。原因是扣款失敗時我靠稽核記下沒扣到的金額，稽核和帳本放同一個資料庫，資料庫出事時兩個一起寫不進去。這是把工作往後挪，上雲之前還是要處理。」
+- 「我的額度會超扣：檢查在呼叫前，金額要呼叫後才知道。驗收時實際看到額度 1000 用到 1120。要解決得先預扣一筆估計值、事後再多退少補，這是下一步。」
+- 「種子腳本有一個測試是掃整張表，確認裡面找不到 Key 本身。我把程式改成直接存 Key 試過，那個測試會紅。」
+
+---
+
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `c61931b` | 10/9 13:57 | `feat: read the quota limit and monthly usage from DynamoDB` |
+| `bebc135` | 14:24 | `feat: enforce the monthly quota on POST /v1/chat` |
+| `9fc86cc` | 15:20 | `feat: charge usage to the monthly quota` |
+| `ff6739b` | 16:40 | `feat: record the user id in the audit log` |
+| `b34edce` | 17:14 | `feat: add a seed script for demo users` |
+
+---
+
+## E92. 步驟 11、12：真實驗收（S01～S04）、錄影、再量記憶體（2026-10-09 17:28～18:37）
+
+**依據：** 決策書 8.2 M2 的驗證條件、11.4 截圖清單（S01～S04）、11.5 截圖規範、8.3 每關收尾清單；E79（每關驗收錄影）、E76（M1 映像的待機記憶體）。
+
+**環境：** Gateway 以 `uv run --env-file .env uvicorn app.main:app --host 127.0.0.1 --port 8000` 啟動，連真的 OpenAI（`gpt-6-luna`，`reasoning_effort` 為 `none`）與練習場的 DynamoDB Local（8001）。使用者由種子腳本建立。Gateway 的 Key 以 `Read-Host` 收進變數，不出現在指令與畫面上。請求以 `curl.exe -i` 送出，訊息內容放在 `data\` 底下的三個檔案。
+
+### 先不錄影走一遍（17:39～17:50）
+
+| # | 動作 | 結果 | 對應 |
+|---|---|---|---|
+| 1 | bob 送 `Say hi` | `200`，`"reply":"Hi!"`，`"model":"gpt-6-luna"` | — |
+| 2 | 用 `gw_wrong` 當 Key | `401 Unauthorized`，`www-authenticate: Bearer`，`{"detail":"Authentication failed"}` | S01 |
+| 3 | bob 送 `Repeat this sentence exactly: My ID is A123456780` | `200`，`"reply":"My ID is [TW_ID]"` | S04 |
+| 4 | 看稽核最後一行 | `user_id: bob`、`summary` 是 `…My ID is [TW_ID]`、`pii_types: ["TW_ID"]`、`input_tokens: 18`、`output_tokens: 10`、`cost_micro_usd: 7`、`charged: true` | S04 |
+| 5 | `Select-String "A123456780" data\audit.jsonl` | 沒有輸出 | S04 |
+| 6 | alice 連續送 `Write a 300-word story about a lighthouse`，每次之後讀已用量 | 見下表 | S02 |
+| 7 | 看稽核最後一行 | `user_id: alice`、`status: quota_exceeded`、`pii_types: []`；沒有 `model`、`cost_micro_usd`、`charged` | S02 |
+| 8 | `docker compose stop dynamodb` 後 bob 送 `Say hi` | `503 Service Unavailable`，`{"detail":"Service temporarily unavailable"}` | S03 |
+
+**第 3 步的設計：** 請模型原樣重複那句話。它重複出來的是 `[TW_ID]`，表示它收到的內容裡沒有號碼。
+
+**第 4 步的成本可以手算：** 輸入 18 × 0.1 ＋ 輸出 10 × 0.5 ＝ 6.8，進位成 7 micro-USD。
+
+**第 6 步（alice，額度 1,000 micro-USD）：**
+
+| 次數 | 狀態碼 | 之後的已用量 |
+|---|---|---|
+| 1 | 200 | 444 |
+| 2 | 200 | 665 |
+| 3 | 200 | 892 |
+| 4 | 200 | 1120 |
+| 5 | **429** `Monthly quota exceeded`，`retry-after: 1923143` | — |
+
+- **`retry-after` 的驗算：** 第 5 次的時間是台北 10/9 17:47:37。到當天午夜 22,343 秒，加 10/10～10/31 共 22 天的 1,900,800 秒，合計 1,923,143 秒，即台北 11/1 00:00
+- **第 4 次超扣：** 送出時已用 892，未達 1000，所以放行；回來後加上這次的 228，變成 1120（E91 的限制第一項）
+- 第 1 次之後才讀到已用量（444）：讀已用量的小工具所在的終端機沒有設 `DYNAMODB_ENDPOINT_URL`，第一次執行得到 `KeyError`；Gateway 本身的網址來自 `--env-file`，不受影響
+
+**第 8 步之後：** `docker compose start dynamodb`。練習場的資料只放記憶體，重開後是空的，Key 全部失效，錄影前重跑種子腳本。
+
+### 錄影與截圖（18:01～18:30）
+
+錄影前：`function prompt {"PS> "}`（提示字元不顯示使用者資料夾）、`cls`、放大字級。另做一個只印狀態碼的短指令，避免長回答洗掉畫面。
+
+| 編號 | 畫面內容 | 截圖（`docs/screenshots/`） | 影片（不進 repo） | 長度 |
+|---|---|---|---|---|
+| S01 | bob 200 → `gw_wrong` 401 | `s01-auth-401.png` | `m2-s01-auth-401.mp4` | 32 秒 |
+| S02 | 已用 609 → 200 → 818 → 200 → 1039 → 429，`retry-after: 1921598` | `s02-quota-429.png` | `m2-s02-quota-429.mp4` | 54 秒 |
+| S03 | bob 200 → `docker compose stop dynamodb` → bob 503 | `s03-fail-closed-503.png` | `m2-s03-fail-closed-503.mp4` | 48 秒 |
+| S04 | 訊息原文 → 回答 `My ID is [TW_ID]` → 稽核那一行 → 搜尋號碼無結果 | `s04-pii-masked.png` | `m2-s04-pii-masked.mp4` | 82 秒 |
+
+- S02 的 `retry-after: 1921598`：台北 18:13:22 到午夜 20,798 秒，加 1,900,800 秒，合計 1,921,598 秒，吻合
+- S02 錄影前先送幾次把已用量帶到 609（不在畫面內）
+- **檢查：** 四張截圖逐張看過，沒有 Key、金鑰、使用者資料夾名稱，不需遮蔽。影片每 2 秒抽一格畫面轉成文字，搜尋 `gw_` 加長字串、`sk-`、使用者名稱，皆無。**這個檢查的限制：** 短於 2 秒的畫面可能漏掉，文字辨識也可能有誤；本人另外從頭看過
+- 影片長度超過原訂的 20～30 秒（E79），剪輯時把打字的部分加速
+- 推送 `9aac84a`（18:30，`docs: add M2 acceptance screenshots`）
+
+### 再量一次待機記憶體（18:37，E76 的後續）
+
+```
+PS C:\Users\<user>\llm-gateway> docker build -t llm-gateway:m2 .
+[+] Building 12.3s (17/17) FINISHED
+
+PS C:\Users\<user>\llm-gateway> docker run -d --rm --name gw -p 127.0.0.1:8000:8000 llm-gateway:m2
+
+PS C:\Users\<user>\llm-gateway> curl.exe -s http://127.0.0.1:8000/health
+{"status":"ok"}
+
+PS C:\Users\<user>\llm-gateway> docker stats --no-stream gw
+CONTAINER ID   NAME      CPU %     MEM USAGE / LIMIT     MEM %     NET I/O         BLOCK I/O     PIDS
+97a93b03670a   gw        0.28%     62.06MiB / 3.823GiB   1.59%     1.77kB / 646B   15.8MB / 0B   2
+```
+
+| 項目 | 待機記憶體 | 對 Fargate 0.5 GB（512 MiB，D15） | 來源 |
+|---|---|---|---|
+| LiteLLM v1.102.0（有資料庫） | 584 MiB | 超過 | E16 |
+| 本案 Gateway（M1 映像） | 56.08 MiB | 約 11% | E76 |
+| **本案 Gateway（M2 映像）** | **62.06 MiB** | **約 12%** | 本筆 |
+
+- M2 加入 boto3 與驗證、額度、扣款之後，待機多 5.98 MiB（約 11%）
+- 沒帶 `--env-file`：容器照常啟動、`/health` 回 `ok`，資料庫網址與金鑰都是處理請求時才讀
+
+**限制（誠實記錄）：**
+- 只量一次、只送過一次 `/health`。boto3 的連線是處理請求時才建立的，這個數字不含它；有負載時的記憶體與延遲沒有量
+- **驗收用的是直接以 uvicorn 啟動的 Gateway，不是容器。** M2 的映像只確認建得起來、`/health` 有回應；容器內連 DynamoDB Local 的完整流程沒有驗（`compose.yaml` 還沒有 Gateway 這個服務）
+- S02 在 M6 會用 Demo Console 重拍（11.4）；這次是終端機畫面
+- S03 示範的是「資料庫整個停掉」，請求在驗證那一步就得到 503；「讀得到、寫不進去」只有測試涵蓋
+- 真實驗收只用 `gpt-6-luna`；輸出 token 是否已含思考 token，要到 M3 用 `gpt-6-sol` 才能實證（`luna` 設 `none`，思考 token 為 0）
+- `Retry-After` 長達 22 天時客戶端 SDK 的行為沒有觀察（這次用的是 `curl.exe`）
+
+**花費：** OpenAI 後台（專案 `llm-gateway-capstone`，10/9 18:35 查看，近 7 日）顯示 16 次請求、243 個輸入 token、花費 `$0.00`（未達顯示的最小單位）。後台的數字可能還沒包含最後幾次請求。
+
+---
+
+## 目前進度（2026-10-09 18:40）
 
 - 開工前待辦 1 ✅（E76）；待辦 2（digest 複查）✅（E89）
 - 步驟 1-1（Email）✅（E77，已推送）
@@ -2560,15 +2973,20 @@ TypeError: get_item() only accepts keyword arguments.
 - 步驟 1-6（兩個去處都已遮罩）✅（E83，已推送）
 - **步驟 1 全部完成**
 - 期末簡報 v1 已記錄（E84），已推送（簡報 `8508164`；紀錄 `docs: record final presentation v1 evidence`，`8508164..b33144c`，10/6 02:08）
-- 交接說明為 `docs/handoff/m2-step6-handoff.md`（接在 `m2-step5-part2-handoff.md`、 `m2-step5-handoff.md`、`m2-step3-handoff.md` 之後；後者的第 3、4、5、9、10 節仍有效）
+- 交接說明為 `docs/handoff/m2-close-handoff.md`（步驟 1～11 的過程另見 `m2-step7-handoff.md`、`m2-step6-handoff.md`、`m2-step5-part2-handoff.md`、`m2-step5-handoff.md`、`m2-step3-handoff.md`）
 - **步驟 2（個資類別進稽核）✅（E85，程式已推送 `53a4491`）；目前 `45 passed`**
 - **步驟 3（`period_of()`：台北時間切月）✅（E86）；已推送 `249921d`**
 - **步驟 4（`cost_micro_usd()`：最小成本函式）✅（E87，已推送 `3491977`）**
 - **步驟 7 的純邏輯（超額回應五項定案、`is_over_quota()`、`seconds_until_next_period()`）✅（E88）。** 接線（429、`Retry-After`、503、稽核）尚未做
 - **步驟 5（DynamoDB Local、boto3 連線、建表）✅（E89，程式已推送 `dac3d3c`）**
 - **步驟 6（API Key 驗證：401、資料庫讀不到回 503、連線逾時設定）✅（E90，程式已推送 `87f6f7c`）；目前 `89 passed`（其中 16 個是 `integration`，要 `dynamodb-test` 容器開著）**
-- 下一步：步驟 7 的接線（額度檢查、429、`Retry-After`、被擋的請求寫稽核）；開工前要先定「沒有額度紀錄的人怎麼處理」；下一筆是 E91
-- 目標 10/10 結案；10/8 評估後，10/11 較為實際（仍在 W2 內）
+- **步驟 7（額度檢查：429、`Retry-After`、被擋的請求寫稽核、讀不到回 503）✅（E91，`bebc135`）**
+- **步驟 8（扣額度：事前加 0、事後原子累加）✅（E91，`9fc86cc`）**
+- **步驟 9（稽核記 `user_id`；存放位置留在檔案，M4 前搬）✅（E91，`ff6739b`）**
+- **步驟 10（種子腳本 `scripts/seed.py`）✅（E91，`b34edce`）；目前 `119 passed`（其中 45 個是 `integration`）**
+- **步驟 11（真實驗收 S01～S04、錄影四段、截圖四張）✅（E92，`9aac84a`）**
+- **步驟 12：待機記憶體 62.06 MiB ✅（E92）；M2 結案報告、決策書 v2.8、簡報更新進行中**
+- 下一步：M2 結案報告 `docs/milestones/m2-report.md`、決策書 v2.8、簡報主影片 04 面板 2；下一筆是 E93
 
 ---
 
@@ -2578,18 +2996,18 @@ TypeError: get_item() only accepts keyword arguments.
 |---|---|---|
 | ~~`python:3.12-slim` digest 複查（E74 的冷卻期例外）~~ | ✅ 10/7 完成：digest 仍存在且未變；未掃弱點（E89） | — |
 | ~~API Key 從哪個標頭來；`api_keys` 要不要 `status` 欄位；Key 的格式與長度~~ | ✅ 10/8 定案：`Authorization: Bearer`、要 `status`、`gw_` 加 `token_hex(32)`（E90） | — |
-| 這個人這個月沒有額度紀錄時，擋還是放（E89） | 與「資料庫讀不到」（503）是兩種情況；步驟 7 開工時定 | 步驟 7 |
-| 既有 9 個 `test_chat` 測試怎麼提供**額度**（身分已定案：覆寫 `get_user_id`，E90） | 步驟 7 接線時定；傾向比照身分的做法，把額度檢查也做成可覆寫的相依 | 步驟 7 |
+| ~~這個人這個月沒有額度紀錄時，擋還是放（E89）~~ | ✅ 10/8 定案：沒有已用量當成 0、放行；沒有額度當成 0、回 429（E91） | — |
+| ~~既有 9 個 `test_chat` 測試怎麼提供**額度**~~ | ✅ 10/9 定案：覆寫 `get_quota`（E91） | — |
 | `get_item` 要不要強一致讀取（`ConsistentRead=True`）（E90） | 雲端上剛停用的 Key 可能短暫仍可用；查證成本與延遲後定 | M4 前 |
-| 每個請求新建一條 boto3 連線的成本（E90） | 步驟 12 量延遲與記憶體時評估是否改為重複使用 | 步驟 12 |
-| 503 要不要附 `Retry-After`（E90） | D10 對供應商限流的 503 有附；資料庫故障的 503 尚未決定 | 步驟 7 |
+| 每個請求新建一條 boto3 連線、最多 5 次往返的成本（E90、E91） | 步驟 12 只量了待機記憶體，延遲沒有量；M4 上雲後量一次再決定是否重複使用連線 | M4 |
+| 503 要不要附 `Retry-After`（E90） | M2 沒有附；資料庫故障多久恢復無從得知，傾向不附 | M4 前 |
 | CI 怎麼跑 `integration` 測試（E89） | 預設在 CI 起 `dynamodb-test` 容器；不行才用 `-m "not integration"` | 10/12 那週 |
 | M4 上雲時 `app/db.py` 怎麼表示連真的 AWS（不給網址、不帶假帳密，用 Fargate 的 IAM 角色）（E89） | 保留「沒講清楚要連哪裡就報錯」的性質 | M4 |
 | 雲端 DynamoDB 的計費模式（E89） | 查證免費額度適用哪一種後定 | M4 |
 | ~~超額回應的狀態碼、錯誤類型、是否附 `Retry-After`（決策書 12.5）~~ | ✅ 10/7 定案：429、固定字串、附 `Retry-After`（E88） | — |
-| `Retry-After` 長達 31 天時，客戶端 SDK 的行為（E88） | 查 OpenAI SDK 等常見客戶端對很大的 `Retry-After` 怎麼處理；步驟 11 真實驗收時觀察一次 | 步驟 7 接線或步驟 11 |
-| `pii_types` 在 DynamoDB 的型別（E85） | 預計用 List（要能存空值）；查證官方文件後定案 | 步驟 9 |
-| 輸出 token 數是否已包含思考 token（E87） | 對照 OpenAI 官方文件與 `app/providers/openai_client.py`，確認 `cost_micro_usd()` 不會漏算或重複計算 | 步驟 8 |
+| `Retry-After` 長達 31 天時，客戶端 SDK 的行為（E88） | 步驟 11 用的是 `curl.exe`，沒有觀察到；M6 做 Demo Console 時觀察 | M6 |
+| `pii_types` 在 DynamoDB 的型別（E85） | 預計用 List（要能存空值）；稽核搬進資料庫時定案（E91 定案 10） | M4 前 |
+| 輸出 token 數是否已包含思考 token（E87） | OpenAI 的 reasoning 指南以 Responses API 的範例顯示思考 token 算在輸出內；Chat Completions 的 `completion_tokens` 沒有找到同樣明講的句子。M2 不另外加；M3 用 `gpt-6-sol` 的一次真實回應實證 | M3 |
 | 沒有單價時的錯誤類型（E87） | 目前是通用的 `ValueError`；評估是否改為專用的錯誤類型，並把單價搬到設定檔 | M3 |
 | 本人尚未回覆：決策書 11.1 的 6 分鐘配置、D33～D40 是否符合理解 | 10/4 開場已問一次，不再重複詢問 | 本人回覆時 |
 | `protect-main` 加「CI 通過才能合併」、CodeQL | 沿用 M1 | 10/12 那週 |
@@ -2598,4 +3016,8 @@ TypeError: get_item() only accepts keyword arguments.
 | `m1-evidence-log.md` 與 M0 紀錄中對三張未存檔截圖的引用（E79 更正） | M2 結案整理文件時，把引用處改成「截圖未存檔」 | M2 結案 |
 | M7 是否開工（E79） | 看三個時段的條件 | 10/16、10/30、11/1 |
 | 簡報計時試講、用 PowerPoint 桌面版確認版面（E84） | 素材到齊前至少試講一次主影片 | 10/18 前 |
-| M2 結案時更新簡報：主影片 04 面板 2（月額度 503 畫面） | 用步驟 11 的 S03 截圖與錄影，版號 +0.1 | M2 結案 |
+| M2 結案時更新簡報：主影片 04 面板 2（月額度 503 畫面） | 用 S03 的截圖與錄影（E92），版號 +0.1 | M2 結案 |
+| 稽核搬進 `audit` 表；扣額度失敗的紀錄放哪裡、怎麼補收與告警（E91） | 搬的時候一併決定；至少加一行應用日誌 | M4 前 |
+| 預扣（7.10）：解決超扣與同時送出多個請求（E91） | 先預扣估計值，事後多退少補 | M3 或 M5 |
+| `compose.yaml` 加上 Gateway 服務，驗證容器內連 DynamoDB Local 的完整流程（E92） | M2 的驗收是直接以 uvicorn 啟動 | M4 前 |
+| 停用 Key 的指令；種子腳本重跑時舊 Key 的處理（E91） | 加一個把 `status` 改成 `disabled` 的腳本 | M4 前 |
