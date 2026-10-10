@@ -16,3 +16,6 @@ wheels/
 
 # Runtime data
 data/
+
+# Office lock files
+~$*
