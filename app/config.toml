@@ -1,0 +1,27 @@
+# LLM Gateway 的模型、單價與路由規則
+# 改這個檔就是改價或改規則，一律經過 commit；不從網路下載價格表（決策書 D8、D30）
+#
+# 單價的單位：每一百萬個 token 多少 micro-USD（$0.10 → 100_000；$2 → 2_000_000）
+# 單價來源：OpenAI 官方價目表，2026-09-26 查證
+
+[routing]
+# 便宜模型與強模型；名稱要和下面 [models.名稱] 的名稱完全相同
+cheap_model = "gpt-6-luna"
+strong_model = "gpt-6-sol"
+# 輸入達到這個字數就用強模型
+min_chars = 300
+# 輸入含有任何一個關鍵字就用強模型
+keywords = ["分析", "比較", "評估", "設計", "架構", "程式碼", "除錯", "code", "debug"]
+
+[models.gpt-6-luna]
+reasoning_effort = "none"
+# 輸出上限（暫定，用真實回應試過再調）：一次呼叫最多花多少，靠它才算得出來
+max_completion_tokens = 1000
+input_price = 100_000
+output_price = 500_000
+
+[models.gpt-6-sol]
+reasoning_effort = "low"
+max_completion_tokens = 2000
+input_price = 2_000_000
+output_price = 10_000_000
