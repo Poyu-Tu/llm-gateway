@@ -576,28 +576,179 @@ app.config.ConfigError: Routing uses a model with no settings: gpt-6-xxx
 
 ---
 
+## E97. 步驟 3：路由函式 `choose_model()`（2026-10-10 13:15～14:09）
+
+**依據：** 決策書 D8（路由規則 v1：輸入 ≥ 300 字或含關鍵字 → 強模型，其餘 → 便宜模型）、D9（使用者不能指定模型）；E94 定案 2；E95（路由規則在設定檔的 `[routing]`）。對應驗收 S05。
+
+**範圍：** 一個純函式：給它一段文字與路由規則，它交回「用哪一顆模型、為什麼」。**Gateway 還沒有呼叫它**，接進 `chat_endpoint` 是步驟 4。
+
+**生活比喻：** 診所櫃檯看掛號單決定掛一般科還是專科，並在單子上寫下原因。
+
+### 定案（10/10 13:51 本人決定，兩項）
+
+| # | 決定 | 定案 | 不選的選項與理由 |
+|---|---|---|---|
+| 1 | 呼叫前查不到模型設定時，對使用者回什麼（決策書 12.5、E96 的待決） | **回 500 與固定訊息 `Internal server error`；稽核記一筆 `status: error`、`error_type: ModelNotConfiguredError`；不呼叫模型、不扣錢** | 回 503 並沿用 `Service temporarily unavailable`：503 的意思是「稍後再試」，客戶端會白白重試，也會和資料庫故障混在一起。不處理、讓框架自己回 500：這個請求不會留下稽核紀錄（與 D37 的想法相反）。弱點：多一種狀態碼與一條要測的路 |
+| 2 | 路由函式回傳什麼（修訂 E94 定案 2） | **只回 `model` 與 `reason`，不回思考量** | 照 E94 原案連思考量一起回：思考量已經在 `find_model_config()` 查到的模型設定裡（E96），路由再回一次，同一個值就有兩個來源 |
+
+第 1 項在步驟 4 接線時實作，這一步還沒有做。
+
+### 做法與規則
+
+| 規則 | 做法 | 為什麼 |
+|---|---|---|
+| 字數 | `len(text) >= routing.min_chars` → 強模型，理由 `length` | D8 寫的是「≥」；剛好達到門檻就算 |
+| 關鍵字 | 文字與關鍵字都先轉成小寫，文字裡含任何一個 → 強模型，理由 `keyword` | 使用者打 `DEBUG`、設定檔寫 `Debug`，都應該算同一個字 |
+| 其餘 | 便宜模型，理由 `default` | — |
+| 兩者都符合時 | 先看字數，理由記 `length` | 同一句話每次的理由要一樣，稽核才能統計 |
+| 輸入 | 遮罩後的文字（由呼叫的人傳入） | 模型實際收到的是遮罩後的內容（E94 定案 2） |
+
+`choose_model()` 只看傳進來的文字與規則，不碰網路、資料庫，也不讀設定檔；規則由呼叫的人交給它。所以測試可以用自己的一份規則（門檻 10 個字），不用把句子寫到 300 字。
+
+### 新觀念
+
+| 觀念 | 白話 | 生活比喻 |
+|---|---|---|
+| `文字.lower()` | 交回一份全部小寫的新文字，原本的不變 | 比對名字前，兩邊都先抄成小寫再對 |
+| 迴圈裡的 `return` | 找到一個就直接交結果，後面的不用看 | 一串鑰匙一把一把試，開了就不試剩下的 |
+| 迴圈**外面**的 `return` | 全部都試過、都沒中，才走這一行 | 整串鑰匙都試完了才去找管理員 |
+
+### 本人撰寫（`app/router.py`，`81a87c2` 的版本，整份）
+
+```python
+"""Choose which model answers a request."""
+
+from dataclasses import dataclass
+
+from app.config import RoutingConfig
+
+
+# 路由的結果：用哪一顆模型，以及為什麼（稽核和示範畫面都要說得出理由）
+@dataclass(frozen=True)
+class RouteDecision:
+    """Which model to use and why it was chosen."""
+    model: str
+    reason: str
+
+
+# 夠長或含關鍵字就用強模型，其餘用便宜模型；只看文字和規則，不碰網路和資料庫
+def choose_model(text: str, routing: RoutingConfig) -> RouteDecision:
+    """Return the model for the text, together with the reason."""
+    if len(text) >= routing.min_chars:
+        return RouteDecision(model=routing.strong_model, reason="length")
+
+    # 英文關鍵字不分大小寫：兩邊都先轉成小寫再比
+    lowered = text.lower()
+    for keyword in routing.keywords:
+        if keyword.lower() in lowered:
+            return RouteDecision(model=routing.strong_model, reason="keyword")
+    return RouteDecision(model=routing.cheap_model, reason="default")
+```
+
+填空版七格，一次寫對：先看到 `1 error during collection`（`app/router.py` 還不存在），寫完 `150 passed`。
+
+### 測試（Claude 整份提供，`tests/test_router.py`，13 個；測試數 137 → 150）
+
+前十個用測試專用的規則（便宜 `small`、強 `big`、門檻 10 個字、關鍵字 `分析` 與 `debug`），後三個讀正式的設定檔。
+
+| 測試（前十個開頭皆為 `test_choose_model`） | 輸入 | 預期 | 在守什麼 |
+|---|---|---|---|
+| `…_uses_cheap_model_by_default` | `Say hi` | `small`、`default` | 短又沒有關鍵字 |
+| `…_uses_strong_model_at_the_length_threshold` | 10 個 `a` | `big`、`length` | 剛好達到門檻 |
+| `…_keeps_cheap_model_just_below_the_threshold` | 9 個 `a` | `small`、`default` | 差一個字；和上一個從兩邊夾住門檻 |
+| `…_counts_each_chinese_character_as_one` | 10 個、9 個中文字 | `length`、`default` | 一個中文字算一個字 |
+| `…_uses_strong_model_for_chinese_keyword` | `請分析一下` | `big`、`keyword` | 中文關鍵字 |
+| `…_uses_strong_model_for_english_keyword` | `go debug` | `big`、`keyword` | 清單裡的第二個關鍵字、出現在句子中間 |
+| `…_ignores_case_of_the_text` | `go DEBUG` | `big`、`keyword` | 文字要轉小寫 |
+| `…_ignores_case_of_the_keyword` | 關鍵字設成 `Debug`，輸入 `go debug` | `big`、`keyword` | 關鍵字也要轉小寫 |
+| `…_reports_length_first_when_both_apply` | `please debug this`（17 個字） | `big`、`length` | 兩者都符合時理由固定 |
+| `…_works_without_keywords` | 關鍵字清單是空的 | 短的 `small`、長的 `big` | 空清單不能讓函式壞掉 |
+| `test_shipped_rules_keep_m2_acceptance_prompts_on_the_cheap_model` | M2 驗收用過的三句話（先遮罩） | 都是 `gpt-6-luna` | S02 的示範靠便宜模型的單價連續呼叫到超額 |
+| `test_shipped_keywords_do_not_match_mask_labels` | `[EMAIL] [CARD] [PHONE] [TW_ID]` | `default` | 遮罩的標籤本身不能命中關鍵字 |
+| `test_shipped_rules_send_long_or_keyword_text_to_the_strong_model` | 門檻長度的文字、清單裡的每一個關鍵字 | 都是 `gpt-6-sol` | 正式規則的每一項都會生效 |
+
+- 讀正式設定檔的三個測試不寫死 300 與關鍵字清單，而是從設定讀出來再用；步驟 7 調整門檻時不用改它們
+- **遮罩標籤那一個測試連著 M2 與 M3：** 之後有人把 `id`、`card` 這類字加進關鍵字清單，所有含個資的訊息都會被送去強模型，這個測試會紅
+
+### 破壞實驗（本人執行，四個；每個做完立刻改回）
+
+| # | 改了什麼 | 結果 | 紅的是 |
+|---|---|---|---|
+| A | `>=` 改成 `>` | `4 failed, 9 passed` | 剛好達到門檻（`…son='default') == …ason='length')`）、中文字數（`'default' == 'length'`）、空清單（`'small' == 'big'`）、正式規則（`'gpt-6-luna' == 'gpt-6-sol'`） |
+| B | 文字不轉小寫 | `1 failed, 12 passed` | `ignores_case_of_the_text` |
+| C | 關鍵字不轉小寫 | `1 failed, 12 passed` | `ignores_case_of_the_keyword` |
+| D | 最後一行 `return` 往右縮一層（變成在 `for` 裡面） | `4 failed, 9 passed` | 英文關鍵字、文字大小寫、正式規則（三個都是 `…son='default') == …son='keyword')`）、空清單（`AttributeError: 'NoneType' object has no attribute 'model'`） |
+
+**判讀：**
+
+- **實驗 A：** 寫成 `>` 時，剛好 300 個字的請求會被送去便宜模型，與決策書的「≥ 300」差一個字
+- **實驗 B、C：** 兩個 `.lower()` 各由一個測試守著，拿掉哪一個就是哪一個紅。只轉其中一邊的話，大寫的 `DEBUG` 或設定檔裡的 `Debug` 會安靜地失效
+- **實驗 D：** 最後的 `return` 在迴圈裡面時，第一個關鍵字沒中就直接交回便宜模型，清單裡後面的關鍵字永遠不會被檢查。中文關鍵字那個測試沒有紅，因為 `分析` 剛好排在清單的第一個；英文的 `debug` 排第二個，才抓得到
+- **實驗 D 的第四個紅：** 關鍵字清單是空的時候，迴圈一圈都沒跑，函式走到底沒遇到 `return`，交回 `None`（E81 寫 Luhn 時看過的同一件事）
+
+### 更正：Claude 給的兩個預期數字與做法不符（照實記錄）
+
+| # | 內容 | 原因 |
+|---|---|---|
+| 1 | 實驗 D 的預期寫成 `3 failed, 10 passed`，實際是 `4 failed, 9 passed`。**本人的結果才是對的** | Claude 試跑時做的是「在迴圈裡多加一行 `return`、原本那一行留著」，與交給本人的做法（把最後一行縮進去）不是同一個實驗；少算了空清單交回 `None` 的那一個 |
+| 2 | Claude 第一次試跑時，實驗 B 與 C 紅的測試一度對調 | 兩次修改的檔案大小相同、又在同一秒內完成，Python 沿用了上一次的位元組碼快取。重跑後與邏輯相符（也就是上表的結果）；之後 Claude 的試跑一律關閉快取 |
+
+- **學到的：** 預期的數字要來自「和交出去的指示一模一樣」的實驗；實驗做得不一樣，預期就不能算數。第 2 項是試跑環境的問題，照人的速度操作不會遇到
+
+### 限制（誠實記錄）
+
+- **Gateway 還沒有呼叫這個函式。** 目前只有測試在用；模型仍是 `main.py` 裡的常數
+- **關鍵字是「出現在文字裡就算」，不是整個單字比對：** `code` 會命中 `decode`、`barcode`。步驟 7 用測試集決定要不要處理
+- **`len()` 把一個中文字與一個英文字母都算 1：** 300 個英文字母大約只有 50 個單字，中英文的門檻不一樣寬（E94 定案 2 的弱點）。步驟 7 決定
+- 遮罩會改變字數（10 碼手機變成 `[PHONE]` 7 個字），門檻邊界會差幾個字
+- 理由只記 `keyword`，不記命中的是哪一個關鍵字
+- 文字前後的空白、換行也算進字數；全形的英文字母（例如 `ｄｅｂｕｇ`）不會被當成關鍵字
+- 遮罩標籤的測試只涵蓋目前的四種標籤；之後新增標籤要記得補
+- **13 個測試裡有 6 個，本人沒有看過它們為了預期的原因而紅：** 預設用便宜模型、差一個字仍是便宜模型、中文關鍵字、兩者都符合時記 `length`、M2 驗收的三句話、遮罩標籤。前五個守的是「不該送去強模型的沒有被送去」與理由的先後。Claude 的試跑環境只對其中一個做過對應的破壞（把關鍵字的檢查排到字數前面：`reports_length_first` 紅）；其餘沒有做過「讓它為了對的原因而紅」的實驗
+
+### 面試可用的說法
+
+- 「路由是一個純函式：給它遮罩後的文字和規則，它回模型名稱和理由。它不碰網路也不讀設定檔，所以我可以用一份門檻只有 10 個字的測試規則把每條邊界都測到，20 題測試集也能直接重複呼叫它。」
+- 「我做過一個實驗，把函式最後那行 return 縮進迴圈裡。結果是只有第一個關鍵字有效，後面的全部安靜地失效；中文關鍵字的測試沒有紅，因為它剛好排在清單第一個，是排第二個的英文關鍵字把錯抓出來的。」
+- 「我有一個測試是把遮罩用的四個標籤直接丟給路由，確認它們不會命中關鍵字。不然哪天有人把 id 或 card 加進關鍵字清單，所有含個資的訊息都會被送去貴 20 倍的模型。」
+
+---
+
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `81a87c2` | 10/10 14:09 | `feat: add the routing function that picks the model` |
+| `6eaba32` | 14:09 | `docs: record M3 step 2 evidence`（`6c1c7b0..6eaba32`） |
+
+推送後由 Claude 讀取公開 repo 核對：`tests/test_router.py` 與交付的版本相同；`app/router.py` 與參考寫法只差一個空行與結尾的換行；在試跑環境執行 `6eaba32`：`150 passed`。
+
+---
+
 ## 決策書 v2.9 待改項目
 
 | # | v2.8 的位置 | 要改什麼 |
 |---|---|---|
 | 1 | D34、PART 9「開發機」 | 修訂為：金鑰、`.env` 與真實呼叫只在個人電腦（E94） |
 | 2 | D30、D8、12.5「沒有單價時的錯誤類型…」、D22（repo 結構） | 設定檔定案：TOML，`app/config.toml`，由 `app/config.py` 在啟動時讀取；路由會用到的模型缺設定就拒絕啟動。repo 結構加上 `app/config.toml`、`app/config.py`、`app/router.py`（E94 定案 1、2） |
-| 3 | D8、8.2 的 M3 | 路由函式吃遮罩後的文字，回傳模型、思考量與理由（E94 定案 2） |
+| 3 | D8、8.2 的 M3 | 路由函式 `choose_model()`（`app/router.py`）吃遮罩後的文字與路由規則，回傳模型與理由（`length`、`keyword`、`default`）；思考量由模型設定提供。先看字數、再看關鍵字；關鍵字不分大小寫（E94 定案 2、E97） |
 | 4 | D45、D30、2.2 流程圖 [4]、12.5「沒有單價時的錯誤類型…」 | 成本以實際拿到回答的那次請求所指定的名稱查單價；查單價的時機移到呼叫模型之前（E94 定案 3）。實作：`find_model_config()` 在呼叫前查設定，查不到丟 `ModelNotConfiguredError`；`cost_micro_usd()` 改收設定物件；`app/pricing.py` 不再有 `PRICES`；`main.py` 啟動時讀設定檔（E96） |
 | 5 | 3.2 的 `audit` 表、D10 | 稽核新增 `route_reason`、`routed_model`、`provider_model`、`fallback`、`fallback_reason`；`model` 改為記指定的名稱（E94 定案 3、4） |
 | 6 | 7.10、7.9「預扣」、12.5「預扣」那一列、3.4 | 預扣 M3 不做，留到 M5；M3 新增每顆模型的輸出上限（`max_completion_tokens`），並說明強模型下超扣的幅度（E94 定案 5） |
 | 7 | D30、4.2 應用層、8.2 的 M3 | 補上設定檔的做法：`[routing]` 指名兩顆模型，`[models.名稱]` 放各自的思考量、輸出上限、單價；`load_config()` 讀進來就檢查（路由用到的模型要有設定、數字要是大於 0 的整數、關鍵字不能是空白、不能少欄位），有問題丟 `ConfigError`（E95） |
 | 8 | 11.5 截圖規範（推送前的檢查） | 新增：簡報開著時會產生 `~$` 開頭的鎖定檔，已列入 `.gitignore`；推送前照檔名逐一加入，不用 `git add .`（E95） |
+| 9 | 12.5「沒有單價時的錯誤類型與對使用者的回應」、2.2 的回應對照表、D37 | 查不到模型設定時：回 500 `Internal server error`，稽核記 `status: error` 與 `error_type: ModelNotConfiguredError`，不呼叫模型、不扣錢；12.5 該列劃掉（E97 定案 1；實作後補證據編號） |
 
 ---
 
-## 目前進度（2026-10-10 13:13）
+## 目前進度（2026-10-10 14:15）
 
 - 交接檔第 2 節的事項已回覆（E94）
 - M3 開工前五項定案 ✅（E94）
 - 步驟 1（設定檔、讀取與檢查）✅（E95，已推送 `7cb56ed`）
-- **步驟 2（單價改讀設定檔、加入 `gpt-6-sol`、查設定移到呼叫模型之前）✅（E96，已推送 `8907063`）；目前 `137 passed`（其中 45 個是 `integration`）**
-- 下一步：步驟 3（路由函式 `app/router.py`）
+- 步驟 2（單價改讀設定檔、加入 `gpt-6-sol`、查設定移到呼叫模型之前）✅（E96，已推送 `8907063`）
+- **步驟 3（路由函式 `choose_model()`）✅（E97，已推送 `81a87c2`）；目前 `150 passed`（其中 45 個是 `integration`）**
+- 下一步：步驟 4（路由接進 `chat_endpoint`），分四小段：① 路由與設定的領用窗口 ② 查不到模型設定回 500 ③ 輸出上限 ④ 稽核的 `model` 與 `provider_model`。第一段的測試檔（`tests/fakes.py`、`tests/test_chat_routing.py`）已交給本人，尚未開始
 
 ---
 
@@ -605,7 +756,7 @@ app.config.ConfigError: Routing uses a model with no settings: gpt-6-xxx
 
 | 項目 | 目前的建議 | 何時定 |
 |---|---|---|
-| 查不到模型設定時對使用者的回應（決策書 12.5、E87）；錯誤類型已定為 `ModelNotConfiguredError`（E96） | 建議：回 500 與固定訊息，稽核記一筆 `status: error`，不呼叫模型、不扣錢；不選 503（會讓客戶端白白重試，也和資料庫故障混在一起）與不處理（沒有稽核紀錄） | 步驟 4 之前 |
+| ~~查不到模型設定時對使用者的回應（決策書 12.5、E87、E96）~~ | ✅ 10/10 定案：回 500、固定訊息、寫稽核（E97）；步驟 4 實作 | — |
 | 輸出上限的數字 | 暫定 `gpt-6-luna` 1,000、`gpt-6-sol` 2,000；用真實回應試過再調 | 步驟 6 |
 | 輸出 token 數是否已包含思考 token（E87） | 用 `gpt-6-sol` 的一次真實回應實證 | 步驟 6 |
 | 兩種 429 怎麼分辨；兩顆都限流時 `Retry-After` 的值；SDK 重試與降級的疊加 | 做到時先看 SDK 實際丟出的錯誤再定 | 步驟 5 |
