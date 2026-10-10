@@ -406,6 +406,176 @@ FAILED …::test_load_config_rejects_missing_setting - KeyError: 'output_price'
 
 ---
 
+## E96. 步驟 2：單價改讀設定檔，查設定移到呼叫模型之前（2026-10-10 12:40～13:10）
+
+**依據：** E94 定案 3（成本用哪個名稱查單價、什麼時候查）；E94「讀程式時看到的兩件事」第 1 項；決策書 D30（沒有單價的模型拒絕呼叫）、D45（用程式指定的名稱查單價）；E87（M2 的最小成本函式）；E95（設定檔）。
+
+**範圍：** `app/pricing.py` 不再自己留一份價目表，改從設定拿單價，並加入 `gpt-6-sol`；`main.py` 啟動時讀設定檔，查模型設定的動作移到呼叫模型之前。**路由還沒有做：** `main.py` 的模型仍是常數 `MODEL`（`gpt-6-luna`）。
+
+### 做法：查設定和算錢拆成兩個函式
+
+| 函式 | 做什麼 | 什麼時候 |
+|---|---|---|
+| `find_model_config(models, model)` | 用名稱查這顆模型的設定（含單價）；查不到丟 `ModelNotConfiguredError` | 呼叫模型**之前** |
+| `cost_micro_usd(settings, input_tokens, output_tokens)` | 照查到的設定算錢，不再自己查 | 模型回答之後 |
+
+M2 的 `cost_micro_usd(model, …)` 是「用名稱查單價、接著算」，而且排在模型回答之後，查不到時錢已經花了。拆開之後，算錢那一步手上已經有設定，**模型回答之後不會再因為查不到單價而出錯**；這是由函式的形狀保證的，不是靠呼叫順序記得排對。
+
+**生活比喻：** 搭計程車，上車前先確認這台車有費率表，沒有就不上車；下車時照表算，不會到了目的地才發現沒有表。
+
+**錯誤類型定案（決策書 12.5、E87 的待決）：** 專用的 `ModelNotConfiguredError`，取代 M2 通用的 `ValueError`。查不到時**對使用者回什麼**還沒有定（見待決）。
+
+### 本人撰寫（`app/pricing.py`，`8907063` 的版本，整份）
+
+```python
+from app.config import ModelConfig
+
+# 一百萬：單價是以「每一百萬個 token」報價的
+MILLION = 1_000_000
+
+
+# 要用一顆沒有設定（也就沒有單價）的模型時丟這個錯誤
+class ModelNotConfiguredError(Exception):
+    """The model has no settings, so its price is unknown."""
+
+
+# 呼叫模型之前先查它的設定：查不到就不該呼叫，「不知道多少錢」不能當成「不用錢」
+def find_model_config(models: dict[str, ModelConfig], model: str) -> ModelConfig:
+    """Return the settings for the model, or raise when it has none."""
+    if model not in models:
+        raise ModelNotConfiguredError(f"No settings for model: {model}")
+    return models[model]
+
+
+# 金額全程用整數算，避免小數誤差；額度就是靠這個數字扣的
+def cost_micro_usd(settings: ModelConfig, input_tokens: int, output_tokens: int) -> int:
+    """Return the cost of one call in micro-USD, rounded up to a whole number."""
+    total = input_tokens * settings.input_price + output_tokens * settings.output_price
+    result = total // MILLION
+    if total % MILLION != 0:
+        result = result + 1
+    return result
+```
+
+`app/main.py` 改三處：
+
+```python
+from app.config import CONFIG_PATH, load_config
+from app.pricing import cost_micro_usd, find_model_config
+```
+
+```python
+# 啟動時就把設定讀進來並檢查：設定有問題，Gateway 直接起不來
+CONFIG = load_config(CONFIG_PATH)
+```
+
+```python
+    # 呼叫模型之前先查到這顆模型的設定（含單價）：查不到就不呼叫
+    settings = find_model_config(CONFIG.models, MODEL)
+    …
+    cost = cost_micro_usd(settings, result.input_tokens, result.output_tokens)
+```
+
+查設定的那一行排在「對當月已用量加 0」之後、呼叫模型之前。
+
+### 測試（Claude 整份提供，`tests/test_pricing.py`，8 個取代 M2 的 4 個；測試數 133 → 137）
+
+| 測試 | 檢查 | 在守什麼 |
+|---|---|---|
+| `test_cost_uses_input_and_output_prices` | Luna，2,000,000 / 1,000,000 → `700_000` | 兩個單價各用在對的地方；沒有零頭不能多收（沿用 E87） |
+| `test_cost_rounds_up_to_whole_micro_usd` | Luna，13 / 11 → `7` | D30 的例子（沿用 E87） |
+| `test_cost_charges_at_least_one_for_tiny_usage` | Luna，1 / 0 → `1` | 再小也要收 1（沿用 E87） |
+| `test_cost_uses_the_prices_of_the_given_model` | Sol，13 / 11 → `136` | 用的是交進來的那顆模型的單價 |
+| `test_find_model_config_returns_the_named_model` | 查 Sol 拿到 Sol、查 Luna 拿到 Luna | 拿到的是指定的那一顆 |
+| `test_find_model_config_rejects_model_without_settings` | 查 `gpt-6-astra` → `ModelNotConfiguredError`，訊息含模型名稱 | 沒有設定不能當成 0 元 |
+| `test_shipped_config_gives_decision_book_costs` | 正式設定檔：查設定、算成本，Luna `7`、Sol `136` | 從設定檔到金額整條路 |
+| `test_pricing_module_keeps_no_price_table_of_its_own` | `app.pricing` 沒有 `PRICES` | 單價只有一個來源 |
+
+**136 的算法：** 13 × 2 + 11 × 10 = 136 micro-USD（Sol 每個輸入 token 2、輸出 10 micro-USD）。同樣的 token 數，Luna 是 6.8、進位成 7；兩顆的單價剛好差 20 倍。
+
+### 破壞實驗（本人執行，四個；每個做完立刻改回）
+
+| # | 改了什麼 | 結果 | 失敗訊息 |
+|---|---|---|---|
+| A | `settings.input_price` 與 `settings.output_price` 對調 | `4 failed, 4 passed` | `assert 1100000 == 700000`、`assert 8 == 7`、`assert 152 == 136`、`assert 8 == 7` |
+| B | `find_model_config` 固定交回 `"gpt-6-luna"` 這個名稱 | `2 failed, 6 passed` | `assert 'gpt-6-luna' == ModelConfig(reasoning_effort='low', …)`、`AttributeError: 'str' object has no attribute 'input_price'` |
+| C | `main.py` 查設定時把 `MODEL` 改成 `"gpt-6-sol"` | `5 failed, 132 passed` | `assert 236 == (100 + 7)`、`assert 136 == 7`（三個）、`assert 429 == 200` |
+| D | `config.toml` 的 `strong_model` 改成 `"gpt-6-xxx"`，再匯入 `app.main` | 匯入失敗 | 見下方 |
+
+**判讀：**
+
+- **實驗 C：** 呼叫的是 Luna、查的卻是 Sol 的單價，一次呼叫從 7 變成 136。紅的五個都在 `tests/test_chat_charge.py`：已用量多扣（100 變成 236）、稽核記的成本不對、額度 14 的人第二次就被擋下（`429 == 200`）。**呼叫的模型和計費的模型要是同一顆**，這正是 E94 定案 3 在守的事；步驟 4 接上路由與降級之後，這兩個名稱會來自同一個變數
+- **實驗 A：** 極小用量那個測試沒有紅（1 個 token 用哪個單價都不到 1 micro-USD），與 E87 的觀察相同
+- **實驗 B：** 交回去的不是設定物件。第二個失敗的 `AttributeError` 就是 M2 那種「查到的東西不能拿來算錢」的樣子
+
+**實驗 D：設定有問題時 Gateway 起不來（E94 定案 1 第一次真的發生）**
+
+```
+PS C:\Users\<user>\llm-gateway> uv run python -c "import app.main"
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "C:\Users\<user>\llm-gateway\app\main.py", line 27, in <module>
+    CONFIG = load_config(CONFIG_PATH)
+  File "C:\Users\<user>\llm-gateway\app\config.py", line 99, in load_config
+    check_config(config)
+  File "C:\Users\<user>\llm-gateway\app\config.py", line 59, in check_config
+    raise ConfigError(f"Routing uses a model with no settings: {model}")
+app.config.ConfigError: Routing uses a model with no settings: gpt-6-xxx
+```
+
+- `main.py` 第 27 行在模組一被讀進來時就執行；uvicorn 啟動時做的第一件事就是讀進 `app.main`，所以設定有問題時服務不會開始收請求
+- 訊息說出是哪一顆模型沒有設定
+- 還原後 `git status` 沒有 `app/config.toml`，確認已改回
+
+### 挫折：`return ModelConfig(models)`
+
+`find_model_config` 的最後一行第一版寫成 `return ModelConfig(models)`。
+
+- **原因：** `ModelConfig(…)`（圓括號）是「做一個新的設定物件」，而且只給了一格，另外三格沒給；這裡要的是從字典裡把已經有的那一個拿出來，`models[model]`（中括號）
+- **生活比喻：** 要的是把標籤寫著 `gpt-6-sol` 的資料夾從抽屜抽出來，不是拿整個抽屜去做一份新的
+- Claude 在試跑環境重現這個寫法：只跑 `tests/test_pricing.py` 是 `2 failed, 6 passed`，訊息為 `TypeError: ModelConfig.__init__() missing 3 required positional arguments: 'max_completion_tokens', 'input_price', and 'output_price'`；跑全部是 `21 failed, 116 passed`（每個走到查設定那一行的請求都失敗）
+- 改正後 `137 passed`
+- 與 E91 的兩次括號問題同類（該不該加括號、用哪一種括號）：圓括號是「做」或「呼叫」，中括號是「拿」
+
+### 這一步的順序與規劃不同（Claude 的問題，照實記錄）
+
+規劃的順序是「存新測試 → 看它紅 → 只改 `pricing.py` → 跑全部看到 17 個紅 → 改 `main.py`」。實際上兩個檔都先改好了，新的測試檔後來才存：
+
+- 第一次執行時 `tests/test_pricing.py` 還是 M2 的舊檔，得到 `4 failed`，都是 `AttributeError: 'str' object has no attribute 'input_price'`（舊測試還在把模型名稱交給已經改成收設定物件的函式）
+- **原因：** Claude 把「順序」放在訊息的最後面，填空的程式放在前面；照著前面的內容改完，才會讀到順序
+- **後果：** 新的 8 個測試沒有看過「功能還沒寫」時的紅；改以上面四個破壞實驗確認它們會為了預期的原因而紅
+- **之後的做法：** 每一步的訊息把「順序」放在最前面，填空與提示放在後面
+
+### 限制（誠實記錄）
+
+- **查不到模型設定時，目前沒有處理：** `find_model_config` 丟出的錯誤會直接變成框架預設的 500，這個請求不會留下稽核紀錄。正常情況下走不到（常數 `MODEL` 在設定檔裡），對使用者回什麼、要不要寫稽核，還沒有定案
+- **「查不到就不呼叫模型」這條路沒有測試。** 設定是在 `main.py` 讀進來時就固定的，測試換不掉它，所以沒辦法在測試裡給一份缺模型的設定；要等設定也做成領用窗口
+- **設定檔裡的 `reasoning_effort` 與 `max_completion_tokens` 還沒有被用到：** 呼叫模型時用的仍是常數 `REASONING_EFFORT`，輸出上限還沒有帶給 OpenAI
+- 模型仍是常數 `MODEL`；`gpt-6-sol` 的單價目前只有測試在用
+- 匯入 `app.main` 就會讀正式的設定檔，所以每個匯入它的測試檔都依賴正式設定檔是合法的；設定檔寫壞時，這些測試檔會全部停在收集階段
+- 實驗 D 是匯入模組，不是真的用 uvicorn 啟動；容器裡的行為也還沒有驗證
+- 新的 8 個測試沒有先看過功能還沒寫時的紅（見上）；`test_pricing_module_keeps_no_price_table_of_its_own` 與 `test_find_model_config_rejects_model_without_settings` 兩個測試，本人沒有看過它們變紅，只有 Claude 的試跑環境做過（留著舊的 `PRICES`：1 個失敗；查不到時不報錯：1 個失敗）
+- 沿用 E87：token 數是負數或不是整數時的行為沒有定義；輸出 token 是否已含思考 token 要到步驟 6 才實證
+
+### 面試可用的說法
+
+- 「上一關算成本的函式是『用模型名稱查單價，接著算』，而且排在模型回答之後。這一關我把它拆成兩步：呼叫模型之前先查到這顆模型的設定，查不到就不呼叫；回答之後拿手上的設定直接算。這樣一來，花了錢之後才發現沒有單價這種事，從函式的形狀上就不會發生。」
+- 「我做過一個實驗：呼叫的是便宜模型，查價時卻拿強模型的設定。五個測試變紅，一次呼叫從 7 變成 136，額度很小的使用者第二次就被擋掉。呼叫的模型和計費的模型一定要是同一顆。」
+- 「設定檔寫錯時，我的 Gateway 是起不來的。我把路由指到一顆不存在的模型試過，一匯入主程式就報錯，訊息直接說是哪一顆模型沒有設定。」
+
+---
+
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `8907063` | 10/10 13:09 | `feat: read prices from the config file and look up the model before calling it` |
+| `6c1c7b0` | 13:10 | `docs: record M3 step 1 evidence`（`7cb56ed..6c1c7b0`） |
+
+推送後由 Claude 讀取公開 repo 核對：`app/main.py`、`tests/test_pricing.py` 與參考版本相同，`app/pricing.py` 只差結尾的換行；在試跑環境執行 `6c1c7b0`：`137 passed`（碰資料庫的測試以替身伺服器代替 DynamoDB Local）。
+
+---
+
 ## 決策書 v2.9 待改項目
 
 | # | v2.8 的位置 | 要改什麼 |
@@ -413,7 +583,7 @@ FAILED …::test_load_config_rejects_missing_setting - KeyError: 'output_price'
 | 1 | D34、PART 9「開發機」 | 修訂為：金鑰、`.env` 與真實呼叫只在個人電腦（E94） |
 | 2 | D30、D8、12.5「沒有單價時的錯誤類型…」、D22（repo 結構） | 設定檔定案：TOML，`app/config.toml`，由 `app/config.py` 在啟動時讀取；路由會用到的模型缺設定就拒絕啟動。repo 結構加上 `app/config.toml`、`app/config.py`、`app/router.py`（E94 定案 1、2） |
 | 3 | D8、8.2 的 M3 | 路由函式吃遮罩後的文字，回傳模型、思考量與理由（E94 定案 2） |
-| 4 | D45、D30、2.2 流程圖 [4] | 成本以實際拿到回答的那次請求所指定的名稱查單價；查單價的時機移到呼叫模型之前（E94 定案 3） |
+| 4 | D45、D30、2.2 流程圖 [4]、12.5「沒有單價時的錯誤類型…」 | 成本以實際拿到回答的那次請求所指定的名稱查單價；查單價的時機移到呼叫模型之前（E94 定案 3）。實作：`find_model_config()` 在呼叫前查設定，查不到丟 `ModelNotConfiguredError`；`cost_micro_usd()` 改收設定物件；`app/pricing.py` 不再有 `PRICES`；`main.py` 啟動時讀設定檔（E96） |
 | 5 | 3.2 的 `audit` 表、D10 | 稽核新增 `route_reason`、`routed_model`、`provider_model`、`fallback`、`fallback_reason`；`model` 改為記指定的名稱（E94 定案 3、4） |
 | 6 | 7.10、7.9「預扣」、12.5「預扣」那一列、3.4 | 預扣 M3 不做，留到 M5；M3 新增每顆模型的輸出上限（`max_completion_tokens`），並說明強模型下超扣的幅度（E94 定案 5） |
 | 7 | D30、4.2 應用層、8.2 的 M3 | 補上設定檔的做法：`[routing]` 指名兩顆模型，`[models.名稱]` 放各自的思考量、輸出上限、單價；`load_config()` 讀進來就檢查（路由用到的模型要有設定、數字要是大於 0 的整數、關鍵字不能是空白、不能少欄位），有問題丟 `ConfigError`（E95） |
@@ -421,12 +591,13 @@ FAILED …::test_load_config_rejects_missing_setting - KeyError: 'output_price'
 
 ---
 
-## 目前進度（2026-10-10 12:39）
+## 目前進度（2026-10-10 13:13）
 
 - 交接檔第 2 節的事項已回覆（E94）
 - M3 開工前五項定案 ✅（E94）
-- **步驟 1（設定檔、讀取與檢查）✅（E95，已推送 `7cb56ed`）；目前 `133 passed`（其中 45 個是 `integration`）**
-- 下一步：步驟 2（單價改讀設定檔、加入 `gpt-6-sol`、查設定移到呼叫模型之前）
+- 步驟 1（設定檔、讀取與檢查）✅（E95，已推送 `7cb56ed`）
+- **步驟 2（單價改讀設定檔、加入 `gpt-6-sol`、查設定移到呼叫模型之前）✅（E96，已推送 `8907063`）；目前 `137 passed`（其中 45 個是 `integration`）**
+- 下一步：步驟 3（路由函式 `app/router.py`）
 
 ---
 
@@ -434,7 +605,7 @@ FAILED …::test_load_config_rejects_missing_setting - KeyError: 'output_price'
 
 | 項目 | 目前的建議 | 何時定 |
 |---|---|---|
-| 沒有單價時的錯誤類型與對使用者的回應（決策書 12.5、E87） | 專用的錯誤類型；回應在接線時定 | 步驟 2、4 |
+| 查不到模型設定時對使用者的回應（決策書 12.5、E87）；錯誤類型已定為 `ModelNotConfiguredError`（E96） | 建議：回 500 與固定訊息，稽核記一筆 `status: error`，不呼叫模型、不扣錢；不選 503（會讓客戶端白白重試，也和資料庫故障混在一起）與不處理（沒有稽核紀錄） | 步驟 4 之前 |
 | 輸出上限的數字 | 暫定 `gpt-6-luna` 1,000、`gpt-6-sol` 2,000；用真實回應試過再調 | 步驟 6 |
 | 輸出 token 數是否已包含思考 token（E87） | 用 `gpt-6-sol` 的一次真實回應實證 | 步驟 6 |
 | 兩種 429 怎麼分辨；兩顆都限流時 `Retry-After` 的值；SDK 重試與降級的疊加 | 做到時先看 SDK 實際丟出的錯誤再定 | 步驟 5 |
