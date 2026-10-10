@@ -14,13 +14,17 @@ from pydantic import BaseModel, Field
 from app.audit import append_audit, hash_prompt, make_summary, mask, detect_pii_types
 from app.auth import extract_bearer_token, find_user_id, hash_api_key
 from app.db import make_dynamodb_client
-from app.pricing import cost_micro_usd
+from app.config import CONFIG_PATH, load_config
+from app.pricing import cost_micro_usd, find_model_config
 from app.providers.openai_client import chat
 from app.quota import add_usage, is_over_quota, period_of, read_limit, read_used, seconds_until_next_period
 
 # M1 固定用便宜模型、不思考；M3 才會依內容選模型
 MODEL = "gpt-6-luna"
 REASONING_EFFORT = "none"
+
+# 啟動時就把設定讀進來並檢查：設定有問題，Gateway 直接起不來
+CONFIG = load_config(CONFIG_PATH)
 
 # OpenAI 連線設定：重試和逾時都調小，避免重複花錢、卡住連線（D10）
 OPENAI_MAX_RETRIES = 1
@@ -159,7 +163,10 @@ def chat_endpoint(
         add_usage(dynamodb, user_id, period, 0)
     except (BotoCoreError, ClientError):
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
-    
+
+    # 呼叫模型之前先查到這顆模型的設定（含單價）：查不到就不呼叫
+    settings = find_model_config(CONFIG.models, MODEL)
+
     # 試著呼叫模型；OpenAI 出錯就記一筆失敗，回 502
     try:
         result = chat(client, MODEL, [{"role": "user", "content": masked}], REASONING_EFFORT)
@@ -177,7 +184,7 @@ def chat_endpoint(
     record["status"] = "ok"
 
     # 把這次的成本加到當月已用量；這時模型已經回答了，扣失敗也照樣把回答交出去，並記下沒扣到
-    cost = cost_micro_usd(MODEL, result.input_tokens, result.output_tokens)
+    cost = cost_micro_usd(settings, result.input_tokens, result.output_tokens)
     record["cost_micro_usd"] = cost
     try:
         add_usage(dynamodb, user_id, period, cost)
