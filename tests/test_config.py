@@ -1,6 +1,8 @@
-"""Tests for reading the gateway settings from a TOML file."""
+"""Tests for reading and checking the gateway settings from a TOML file."""
 
-from app.config import CONFIG_PATH, ModelConfig, RoutingConfig, load_config
+import pytest
+
+from app.config import CONFIG_PATH, ConfigError, ModelConfig, RoutingConfig, load_config
 
 # 測試用的設定：每個數字都故意不一樣，欄位拿反時答案才會不同
 SAMPLE = """
@@ -90,3 +92,88 @@ def test_shipped_config_sets_models_and_reasoning_effort():
     assert config.routing.strong_model == "gpt-6-sol"
     assert config.models["gpt-6-luna"].reasoning_effort == "none"
     assert config.models["gpt-6-sol"].reasoning_effort == "low"
+
+
+# ---- 以下是「讀進來就檢查」：設定有問題要拒絕，而且訊息要說出是哪一項 ----
+# 每個測試都用 match 對訊息：確認它是為了這一項被擋下，不是碰巧被別的檢查擋掉
+
+
+# 路由指到一顆沒有設定的強模型：等於會選到不知道多少錢的模型，要拒絕
+def test_load_config_rejects_strong_model_without_settings(tmp_path):
+    text = SAMPLE.replace('strong_model = "big"', 'strong_model = "huge"')
+    path = write_config(tmp_path, text)
+
+    with pytest.raises(ConfigError, match="huge"):
+        load_config(path)
+
+
+# 便宜模型也一樣要有設定；只檢查強模型的話，這個測試會抓到
+def test_load_config_rejects_cheap_model_without_settings(tmp_path):
+    text = SAMPLE.replace('cheap_model = "small"', 'cheap_model = "tiny"')
+    path = write_config(tmp_path, text)
+
+    with pytest.raises(ConfigError, match="tiny"):
+        load_config(path)
+
+
+# 單價寫成小數（把 micro-USD 寫成美元）：全程整數的計算會壞掉，要拒絕
+def test_load_config_rejects_price_written_as_decimal(tmp_path):
+    text = SAMPLE.replace("input_price = 444", "input_price = 0.1")
+    path = write_config(tmp_path, text)
+
+    with pytest.raises(ConfigError, match="big.input_price"):
+        load_config(path)
+
+
+# 單價是 0 等於這顆模型免費，額度永遠扣不到，要拒絕
+def test_load_config_rejects_zero_price(tmp_path):
+    text = SAMPLE.replace("output_price = 222", "output_price = 0")
+    path = write_config(tmp_path, text)
+
+    with pytest.raises(ConfigError, match="small.output_price"):
+        load_config(path)
+
+
+# 輸出上限是 0：模型一個字都不能回
+def test_load_config_rejects_zero_output_cap(tmp_path):
+    text = SAMPLE.replace("max_completion_tokens = 666", "max_completion_tokens = 0")
+    path = write_config(tmp_path, text)
+
+    with pytest.raises(ConfigError, match="big.max_completion_tokens"):
+        load_config(path)
+
+
+# 字數門檻是 0：每一句話都「達到門檻」，全部送去強模型
+def test_load_config_rejects_zero_min_chars(tmp_path):
+    text = SAMPLE.replace("min_chars = 44", "min_chars = 0")
+    path = write_config(tmp_path, text)
+
+    with pytest.raises(ConfigError, match="routing.min_chars"):
+        load_config(path)
+
+
+# 空字串出現在任何句子裡：混進關鍵字清單，所有請求都會被送去強模型
+def test_load_config_rejects_empty_keyword(tmp_path):
+    text = SAMPLE.replace('keywords = ["分析", "debug"]', 'keywords = ["分析", ""]')
+    path = write_config(tmp_path, text)
+
+    with pytest.raises(ConfigError, match="keywords"):
+        load_config(path)
+
+
+# 只有空格的關鍵字也一樣：幾乎每一句英文都有空格
+def test_load_config_rejects_blank_keyword(tmp_path):
+    text = SAMPLE.replace('keywords = ["分析", "debug"]', 'keywords = ["分析", " "]')
+    path = write_config(tmp_path, text)
+
+    with pytest.raises(ConfigError, match="keywords"):
+        load_config(path)
+
+
+# 少了一個欄位：要當成設定錯誤，並說出少的是哪一個
+def test_load_config_rejects_missing_setting(tmp_path):
+    text = SAMPLE.replace("output_price = 555\n", "")
+    path = write_config(tmp_path, text)
+
+    with pytest.raises(ConfigError, match="output_price"):
+        load_config(path)
