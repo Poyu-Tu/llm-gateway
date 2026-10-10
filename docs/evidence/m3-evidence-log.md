@@ -117,6 +117,295 @@
 
 ---
 
+## E95. 步驟 1：設定檔 `app/config.toml`，讀進來並檢查（2026-10-10 11:15～12:34）
+
+**依據：** E94 定案 1；決策書 D8（規則、模型 ID、單價、思考量都放設定檔）、D28（兩顆模型與思考量）、D30（單價放 repo；沒有單價的模型拒絕）；E23（價格表缺模型時預算安靜失效）、E24（單價少一個 0 就差 10 倍）。
+
+**範圍：** 把設定檔讀成物件，並在讀進來的當下檢查。**Gateway 還沒有用到它**：`main.py` 這一步沒有動，單價仍是 `app/pricing.py` 裡的字典常數，接線在步驟 2。
+
+**生活比喻：** 價目表印成一張貼在牆上，不寫死在收銀機裡；開店前店長先把價目表看過一遍，有一格空白或寫錯就不開門。
+
+### 設定檔的結構
+
+```toml
+[routing]
+cheap_model = "gpt-6-luna"
+strong_model = "gpt-6-sol"
+min_chars = 300
+keywords = ["分析", "比較", "評估", "設計", "架構", "程式碼", "除錯", "code", "debug"]
+
+[models.gpt-6-luna]
+reasoning_effort = "none"
+max_completion_tokens = 1000
+input_price = 100_000
+output_price = 500_000
+
+[models.gpt-6-sol]
+reasoning_effort = "low"
+max_completion_tokens = 2000
+input_price = 2_000_000
+output_price = 10_000_000
+```
+
+- **路由規則與模型設定分成兩區：** `[routing]` 只寫「用哪兩顆」，每顆模型的設定放在 `[models.名稱]`。這樣「路由指到一顆沒有設定的模型」才是一種檢查得出來的狀態；成本也可以直接用模型名稱查
+- 單價的單位沿用 E87：每一百萬個 token 多少 micro-USD，全程整數
+- **`max_completion_tokens` 的兩個數字是暫定的**（E94 定案 5），步驟 6 用真實回應試過再調
+- 讀進來之後是字典裡再放字典，與 M2 的 `PRICES` 同一種形狀
+
+### 做法：分兩段，先存測試、看它紅，再寫功能
+
+| 段 | 內容 | 結果 |
+|---|---|---|
+| 前半 1 | 存 `tests/test_config.py`（5 個）與 `app/config.toml` | `1 error during collection`（`app/config.py` 還不存在） |
+| 前半 2 | 寫 `load_config()`（填空版，7 格） | `5 failed, 119 passed`（挫折 1）→ `124 passed` |
+| 前半 3 | 三個破壞實驗 | 見下表；還原後 `5 passed` |
+| 後半 1 | 存新的 `tests/test_config.py`（多 9 個） | `1 error during collection`（`ConfigError` 還不存在） |
+| 後半 2 | 寫 `ConfigError`、`require_positive_int()`、`check_config()`，`load_config()` 加上 `try` 與檢查（填空版，9 格） | `3 failed, 130 passed`（挫折 2、3）→ `133 passed` |
+| 後半 3 | 四個破壞實驗 | 見下表；還原後 `14 passed` |
+
+### 新觀念
+
+| 觀念 | 白話 | 生活比喻 |
+|---|---|---|
+| TOML 的 `[models.gpt-6-luna]` | 讀進來是字典裡再放字典 | 文件櫃：`models` 是抽屜，`gpt-6-luna` 是裡面的一個資料夾 |
+| `Path(__file__).parent` | 這個程式檔自己所在的資料夾 | 食譜上寫「醬料在這本食譜旁邊」，書架搬到別的房間也找得到 |
+| `open(path, "rb")` | 以二進位讀取；`tomllib` 規定要這樣，由它自己照 UTF-8 解讀 | — |
+| `字典.items()` | 一次交出「名稱、內容」兩樣，`for` 用兩個名字接 | 翻資料夾：每翻一個，同時看到標籤和裡面的文件 |
+| `class ConfigError(Exception)` | 自己取名字的錯誤 | 退貨單上蓋「設定問題」的章，一看就知道不是程式壞了 |
+| `type(value) is not int` | 這個值不是整數（`0.1` 是小數） | 投幣機只收硬幣，紙鈔直接退 |
+| `文字.strip()` | 去掉頭尾的空白 | 把信封兩端多出來的空白邊裁掉 |
+| `pytest.raises(錯誤, match="…")` | 除了要報錯，訊息還要含這幾個字 | 警報響了還要看面板亮的是哪一區 |
+
+**為什麼用 `"rb"`：** Windows 的預設文字編碼不是 UTF-8，設定檔裡有中文的關鍵字與註解；交給 `tomllib` 自己解讀，結果就不受作業系統影響。
+
+### 本人撰寫（`app/config.py`，`7cb56ed` 的版本；三個資料類別從略）
+
+```python
+# 設定檔有問題時丟這個錯誤：一看就知道是設定的問題，不是程式壞了
+class ConfigError(Exception):
+    """The config file is missing a setting or holds a value that cannot be used."""
+
+
+# 單價、上限、門檻都要是大於 0 的整數：寫成小數或 0，成本會算錯，甚至變成免費
+def require_positive_int(value, name: str) -> None:
+    """Raise ConfigError unless the value is a whole number above zero."""
+    if type(value) is not int or value <= 0:
+        raise ConfigError(f"{name} must be a whole number above zero")
+
+
+# 讀進來就檢查：設定有問題寧可起不來，也不要帶著錯的設定開始收錢
+def check_config(config: GatewayConfig) -> None:
+    """Raise ConfigError when the settings cannot be used safely."""
+    routing = config.routing
+
+    # 路由會選到的兩顆模型都要有設定，否則會選到一顆不知道多少錢的模型
+    for model in [routing.cheap_model, routing.strong_model]:
+        if model not in config.models:
+            raise ConfigError(f"Routing uses a model with no settings: {model}")
+
+    require_positive_int(routing.min_chars, "routing.min_chars")
+    for name, model in config.models.items():
+        require_positive_int(model.max_completion_tokens, f"{name}.max_completion_tokens")
+        require_positive_int(model.input_price, f"{name}.input_price")
+        require_positive_int(model.output_price, f"{name}.output_price")
+
+    # 空白的關鍵字「出現在」每一句話裡：混進清單，所有請求都會被送去強模型
+    for keyword in routing.keywords:
+        if keyword.strip() == "":
+            raise ConfigError("routing.keywords must not contain a blank keyword")
+
+
+# 把設定檔讀成上面三種物件
+def load_config(path: Path) -> GatewayConfig:
+    """Read the TOML file at path and return the settings."""
+    with open(path, "rb") as file:
+        data = tomllib.load(file)
+
+    try:
+        routing = RoutingConfig(
+            cheap_model=data["routing"]["cheap_model"],
+            strong_model=data["routing"]["strong_model"],
+            min_chars=data["routing"]["min_chars"],
+            keywords=data["routing"]["keywords"],
+        )
+
+        models = {}
+        for name, fields in data["models"].items():
+            models[name] = ModelConfig(
+                reasoning_effort=fields["reasoning_effort"],
+                max_completion_tokens=fields["max_completion_tokens"],
+                input_price=fields["input_price"],
+                output_price=fields["output_price"],
+            )
+    except KeyError as exc:
+        raise ConfigError(f"Missing setting: {exc}")
+
+    config = GatewayConfig(routing=routing, models=models)
+    check_config(config)
+
+    return  config
+```
+
+**檢查寫在 `load_config()` 裡面：** 拿得到設定的人，拿到的一定是檢查過的；不靠每個呼叫的地方記得再檢查一次。與 M2 把驗證寫成相依（E90）是同一個想法。
+
+**為什麼要擋空白的關鍵字：** Python 認為空字串出現在任何字串裡（`"" in "hello"` 是 `True`）。它混進清單的話，所有請求都會被判定為「含關鍵字」而送去強模型，成本是 20 倍，而且沒有任何錯誤。
+
+### 測試（Claude 整份提供，`tests/test_config.py`，14 個；測試數 119 → 133）
+
+用一份測試專用的設定（每個數字都不同：44、111、222、333、444、555、666），欄位拿反時答案才會不同；另外兩個測試讀正式的設定檔。
+
+| 測試 | 檢查 | 在守什麼 |
+|---|---|---|
+| `test_load_config_reads_routing_rules` | 路由規則的四個欄位 | 欄位各自放對位置；關鍵字含中文，確認是照 UTF-8 讀的 |
+| `test_load_config_reads_model_fields` | 一顆模型的四個欄位 | 輸入與輸出單價不能拿反 |
+| `test_load_config_reads_every_model` | 兩顆都讀到，各拿各的設定 | 不能全部變成同一顆 |
+| `test_shipped_config_has_decision_book_prices` | 正式設定檔的四個單價等於決策書的數字 | 設定檔少打一個 0，要有另一個地方對得出來 |
+| `test_shipped_config_sets_models_and_reasoning_effort` | 正式設定檔的兩顆模型名稱與思考量 | 沒設思考量時 OpenAI 會用預設值，暗中多花錢（D28） |
+| `…_rejects_strong_model_without_settings` | 路由的強模型沒有設定 → `ConfigError`，訊息含模型名稱 | 不會選到不知道多少錢的模型 |
+| `…_rejects_cheap_model_without_settings` | 便宜模型沒有設定 | 兩顆都要檢查，不能只查一顆 |
+| `…_rejects_price_written_as_decimal` | 單價寫成 `0.1` | 把 micro-USD 寫成美元 |
+| `…_rejects_zero_price` | 單價是 0 | 單價 0 等於這顆模型免費 |
+| `…_rejects_zero_output_cap` | 輸出上限是 0 | 模型一個字都不能回 |
+| `…_rejects_zero_min_chars` | 字數門檻是 0 | 每一句話都達到門檻，全部送去強模型 |
+| `…_rejects_empty_keyword` | 關鍵字清單裡有空字串 | 所有請求都會命中 |
+| `…_rejects_blank_keyword` | 關鍵字只有空格 | 幾乎每一句英文都有空格 |
+| `…_rejects_missing_setting` | 少了一個欄位 | 當成設定錯誤，並說出少的是哪一個 |
+
+（後九個的名稱開頭皆為 `test_load_config`。）
+
+**單價在測試裡再寫一次是故意的。** 設定檔少打一個 0，程式不會報錯；測試裡獨立寫著決策書的數字，兩邊對不起來才抓得到。代價：之後改價要同時改設定檔與這個測試。
+
+**九個「要拒絕」的測試都用 `match` 對訊息。** 只檢查「有報錯」的話，設定被別的檢查碰巧擋下也會通過（M2 結案報告第 4 節的同一件事）。
+
+### 破壞實驗（本人執行，共七個；每個做完立刻改回）
+
+| # | 改了什麼 | 結果 | 失敗訊息 |
+|---|---|---|---|
+| 前半 A | `input_price` 與 `output_price` 等號右邊對調 | `3 failed, 2 passed` | `ModelConfig(r...put_price=111) == ModelConfig(r...put_price=222)`、`assert 555 == 444`、`assert 500000 == 100000` |
+| 前半 B | `strong_model` 那一行改成拿 `cheap_model` | `2 failed, 3 passed` | `RoutingConfig…` 不相等、`assert 'gpt-6-luna' == 'gpt-6-sol'` |
+| 前半 C | `config.toml` 裡 Sol 的 `input_price` 改成 `200_000` | `1 failed, 4 passed` | `assert 200000 == 2000000` |
+| 後半 A | `value <= 0` 改成 `value < 0` | `3 failed, 11 passed` | 單價 0、輸出上限 0、字數門檻 0，都是 `DID NOT RAISE ConfigError` |
+| 後半 B | 拿掉 `type(value) is not int or` | `1 failed, 13 passed` | 單價寫成小數：`DID NOT RAISE ConfigError` |
+| 後半 C | `for model in […]` 只留強模型 | `1 failed, 13 passed` | 便宜模型沒有設定：`DID NOT RAISE ConfigError` |
+| 後半 D | 拿掉 `.strip()` | `1 failed, 13 passed` | 只有空格的關鍵字：`DID NOT RAISE ConfigError` |
+
+**判讀：**
+
+- **前半 C：** 設定檔少一個 0，五個測試只紅一個，就是把單價再寫一次的那一個。少了它，強模型會被便宜 10 倍地計費，其餘測試全部通過
+- **前半 A：** 兩個單價拿反時，Luna 的輸入會以輸出的單價（5 倍）計費。測試資料的兩個單價不同才看得出來（E86、E87 學到的做法）
+- **後半 A：** `<` 與 `<=` 只差在 0。寫成 `<` 時，單價 0 的模型會通過檢查，等於免費
+- **後半 B：** `0.1` 大於 0，只檢查大小的話會通過；之後 `cost_micro_usd()` 的整數除法與取餘數就會出現小數
+- **後半 D：** 空字串與只有空格是兩個不同的測試；拿掉 `.strip()` 只有後者變紅
+
+### 挫折 1：`tomllib.loads(file)`，多一個 `s`
+
+```
+app\config.py:43: in load_config
+    data = tomllib.loads(file)
+…
+    def loads(s: str, /, *, parse_float: ParseFloat = float) -> dict[str, Any]:
+        """Parse TOML from a string."""
+>       src = s.replace("\r\n", "\n")
+E       AttributeError: '_io.BufferedReader' object has no attribute 'replace'
+5 failed, 119 passed
+```
+
+- **原因：** `tomllib.load()` 收開好的檔案，`tomllib.loads()` 收一段文字（`s` 是 string）。交出去的是檔案，卻呼叫了收文字的那一個
+- **怎麼讀：** 最下面 `E` 那行說「這個東西是一個開著的檔案，它沒有 `replace`」；往上第一個落在自己檔案的是 `app\config.py:43`。中間的 `def loads(s: str, …)` 與它的說明也寫著它要的是文字
+- **生活比喻：** `load` 是把整份文件交給櫃檯，`loads` 是把內容念給櫃檯聽
+- 七格填對六格，改掉一個字母後 `124 passed`
+- 五個測試全紅、訊息相同、都停在同一行，那一行之後的程式還沒有被走到（E88 學到的），所以這次的紅不算看過斷言失敗；斷言的紅由前半的三個破壞實驗補上
+- `json` 模組也是同樣的命名（`json.load`、`json.loads`）
+
+### 挫折 2：三行檢查的都是同一個欄位
+
+```python
+require_postive_int(model.max_completion_tokens, f"{name}.max_completion_tokens")
+require_postive_int(model.max_completion_tokens, f"{name}.input_price")
+require_postive_int(model.max_completion_tokens, f"{name}.output_price")
+```
+
+```
+FAILED …::test_load_config_rejects_price_written_as_decimal - Failed: DID NOT RAISE ConfigError
+FAILED …::test_load_config_rejects_zero_price - Failed: DID NOT RAISE ConfigError
+```
+
+- **原因：** 第二、三行是照第一行改的，只改了後面的名字，沒改前面實際拿去檢查的值。輸出上限被檢查了三次，兩個單價一次都沒檢查
+- **這個錯不會自己露出來：** 程式不會當掉，正式的設定檔也照樣讀得進來；只有「單價寫成小數」與「單價是 0」這兩個測試會紅
+- **生活比喻：** 保全巡三個房間，簽到表上三間都打勾，實際上三次都走進同一間
+- 與 E89 挫折 4（三段 `create_table` 照第一段改，`api_keys` 留著 `user_id`）同類：照上一行改的時候，每一格都要換
+
+### 挫折 3：`except` 接錯了錯誤種類
+
+```
+FAILED …::test_load_config_rejects_missing_setting - KeyError: 'output_price'
+```
+
+- **原因：** 寫成 `except AttributeError`。少欄位時字典丟的是 `KeyError`；`except` 只接指定的那一種，接錯就等於沒接
+- **兩種錯誤的差別：** 跟字典要一個它沒有的欄位（中括號）是 `KeyError`；跟物件要一個它沒有的屬性或功能（點）是 `AttributeError`。挫折 1 是後者，這裡是前者
+- 失敗訊息本身就寫出實際丟出來的是哪一種
+
+改正挫折 2、3 之後 `133 passed`。這兩次也等於多做了兩個破壞實驗：單價沒被檢查時紅兩個、`except` 接錯時紅一個，訊息都直接指到原因。
+
+### 測試抓不到、讀程式才看到的
+
+| # | 內容 | 為什麼沒有自己露出來 | 處理 |
+|---|---|---|---|
+| 1 | 函式名稱打成 `require_postive_int`（少一個 `i`） | 定義與四個呼叫的地方少的是同一個字母，程式照跑；測試沒有直接用到這個名稱 | 推送前改為 `require_positive_int` |
+| 2 | `git status` 出現 `docs/slides/~$llm-gateway-slides-v1.1.pptx` | 簡報開著時 PowerPoint 產生的鎖定檔，`git add .` 會把它一起加進去 | 這次照檔名逐一加入；`.gitignore` 加上 `~$*`（`648e90b`） |
+
+- 第 2 項：這種鎖定檔通常帶有 Office 的使用者名稱，repo 是公開的。推送後以 `git ls-tree` 確認遠端沒有任何 `~$` 開頭的檔
+- **學到的：** 測試是綠的，不代表名稱沒打錯；公開 repo 的名稱與 commit 訊息一樣，推上去之前要讀一遍（E87 挫折 1 的同一件事）
+
+### Claude 在試跑環境做過、本人沒有重做的實驗
+
+測試檔交出去之前，在公開 repo 的副本上以參考寫法試跑並破壞過（Linux、Python 3.12；碰資料庫的測試以替身伺服器代替 DynamoDB Local）：
+
+| 改了什麼 | 結果 |
+|---|---|
+| 以文字模式開檔（`"r"`） | 全部失敗：`TypeError: File must be opened in binary mode` |
+| 設定檔開頭加上 BOM | `tomllib.TOMLDecodeError: Invalid statement (at line 1, column 1)` |
+| 設定檔的換行改成 CRLF | 全部通過 |
+| 每顆模型都拿同一顆的思考量 | 「每顆模型」那個測試失敗：`assert 'none' == 'low'` |
+| 正式設定檔的思考量改掉 | 「模型名稱與思考量」那個測試失敗 |
+| 拿掉 `check_config(config)` 這一行 | 8 個失敗（九個「要拒絕」的測試裡，除了少欄位的那一個） |
+| `keyword.strip() == ""` 少了括號 | 2 個失敗（空字串、只有空格）；程式不會報錯，只是永遠不成立 |
+
+推送後在同一個環境執行 `7cb56ed`：`133 passed`。
+
+### 限制（誠實記錄）
+
+- **Gateway 還沒有用到這份設定。** `load_config()` 目前只有測試在呼叫；「設定有問題就拒絕啟動」要到步驟 2 把它接進 `main.py` 才成立
+- **容器裡讀不讀得到 `app/config.toml` 還沒有驗證。** 依據只有 `Dockerfile` 的 `COPY app ./app` 與 `.dockerignore` 的白名單；接線後實際建一次映像才算數
+- **有兩個「要拒絕」的測試，本人沒有看過它們為了預期的原因而紅：** 強模型沒有設定、關鍵字是空字串。只有 Claude 的試跑環境看過（上表「拿掉 `check_config`」那一項）
+- 沒有檢查的事：`reasoning_effort` 的值是否合法；便宜模型與強模型是不是同一顆；`[models]` 底下多出來、沒被路由用到的模型；設定檔裡多出來的欄位（打錯字的欄位會因為「少了正確的那一個」而被擋下，單純多出來的不會）
+- 關鍵字若不是文字（例如寫成數字），`.strip()` 會丟 `AttributeError`，不是 `ConfigError`；TOML 語法錯誤丟的是 `tomllib.TOMLDecodeError`。兩種都會讓讀取失敗，只是錯誤類型不是 `ConfigError`
+- 單價寫成 `true` 這類布林值，照 `type(value) is not int` 會被擋下，但沒有測試
+- 輸出上限的兩個數字是暫定的；`min_chars` 與關鍵字清單照 D8，步驟 7 才調整，所以正式設定檔的這三項沒有測試固定它們
+- 設定檔的單價是手動抄的，OpenAI 改價時不會自動更新（E87 的同一項限制）；測試固定的是「等於決策書的數字」，不是「等於 OpenAI 現在的價格」
+- BOM 與文字模式的行為只在 Linux 的試跑環境看過
+
+### 面試可用的說法
+
+- 「單價和路由規則我放在 repo 裡的一個設定檔，啟動時讀進來就檢查：路由指到的模型沒有設定、單價寫成小數或 0、關鍵字清單裡混進空字串，都直接拒絕。空字串那一項是因為它出現在任何句子裡，混進去的話所有請求都會被送去貴 20 倍的模型，而且不會有任何錯誤。」
+- 「正式設定檔的單價，我在測試裡又寫了一次。我做過實驗：把設定檔的單價少打一個 0，其他測試全部通過，只有這一個會紅。價格資料打錯不會讓程式當掉，要靠另一個獨立的地方對帳。」
+- 「檢查函式我一開始把三行寫成檢查同一個欄位，只有後面的名字不同。程式照跑、正式設定也讀得進來，是『單價是 0』和『單價寫成小數』這兩個測試把它抓出來的。所以每個『要拒絕』的測試我都對訊息內容，確認它是為了那一項被擋下。」
+
+---
+
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `648e90b` | 10/10 11:57 | `chore: ignore Office lock files` |
+| `d0b866d` | 11:59 | `feat: add the gateway config file and its loader` |
+| `633890f` | 11:59 | `docs: start the M3 evidence log`（`55e5d82..633890f`） |
+| `7cb56ed` | 12:34 | `feat: check the gateway config when it is loaded`（`633890f..7cb56ed`） |
+
+推送後由 Claude 讀取公開 repo 核對：`tests/test_config.py`、`app/config.toml` 與交付的版本相同（測試檔只差結尾的換行）；變更的檔案只有 `.gitignore`、`app/config.py`、`app/config.toml`、`tests/test_config.py`、`docs/evidence/m3-evidence-log.md`。
+
+---
+
 ## 決策書 v2.9 待改項目
 
 | # | v2.8 的位置 | 要改什麼 |
@@ -127,14 +416,17 @@
 | 4 | D45、D30、2.2 流程圖 [4] | 成本以實際拿到回答的那次請求所指定的名稱查單價；查單價的時機移到呼叫模型之前（E94 定案 3） |
 | 5 | 3.2 的 `audit` 表、D10 | 稽核新增 `route_reason`、`routed_model`、`provider_model`、`fallback`、`fallback_reason`；`model` 改為記指定的名稱（E94 定案 3、4） |
 | 6 | 7.10、7.9「預扣」、12.5「預扣」那一列、3.4 | 預扣 M3 不做，留到 M5；M3 新增每顆模型的輸出上限（`max_completion_tokens`），並說明強模型下超扣的幅度（E94 定案 5） |
+| 7 | D30、4.2 應用層、8.2 的 M3 | 補上設定檔的做法：`[routing]` 指名兩顆模型，`[models.名稱]` 放各自的思考量、輸出上限、單價；`load_config()` 讀進來就檢查（路由用到的模型要有設定、數字要是大於 0 的整數、關鍵字不能是空白、不能少欄位），有問題丟 `ConfigError`（E95） |
+| 8 | 11.5 截圖規範（推送前的檢查） | 新增：簡報開著時會產生 `~$` 開頭的鎖定檔，已列入 `.gitignore`；推送前照檔名逐一加入，不用 `git add .`（E95） |
 
 ---
 
-## 目前進度（2026-10-10 11:15）
+## 目前進度（2026-10-10 12:39）
 
 - 交接檔第 2 節的事項已回覆（E94）
 - M3 開工前五項定案 ✅（E94）
-- 下一步：步驟 1（設定檔與載入）
+- **步驟 1（設定檔、讀取與檢查）✅（E95，已推送 `7cb56ed`）；目前 `133 passed`（其中 45 個是 `integration`）**
+- 下一步：步驟 2（單價改讀設定檔、加入 `gpt-6-sol`、查設定移到呼叫模型之前）
 
 ---
 
