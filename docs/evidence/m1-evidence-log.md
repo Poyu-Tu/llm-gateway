@@ -364,15 +364,15 @@ code --profile llm-gateway .
 - 教訓：設定改完要**看得到效果**才算完成，不是打勾就算數。跟設防火牆規則一樣，要實際測一次被擋，而不是看規則存在就好
 
 **信任範圍確認（補沒截到的信任詢問畫面）：**
-- 「工作區：管理工作區信任」頁面顯示「您信任此資料夾」，工作執行、偵錯工具、工作區設定、延伸模組全部啟用（`m1-workspace-trust-enabled.png`）
+- 「工作區：管理工作區信任」頁面顯示「您信任此資料夾」，工作執行、偵錯工具、工作區設定、延伸模組全部啟用（`m1-workspace-trust-enabled.png`（截圖未存檔，見 M2 紀錄 E79））
 - 信任清單中，本專題的項目是 `C:\Users\<使用者>\llm-gateway` 本身，**不是整個使用者資料夾**。清單依路徑排序，使用者資料夾本身若在清單中會排在最前面；實際第一筆是另一個子資料夾，代表使用者資料夾本身沒有被信任（`m1-workspace-trust-list.png`）
-- 清單中原本還有十多個過去專案的資料夾（多數在 D 槽）。工作區信任是整台電腦共用的清單，不分設定檔；`m1-workspace-trust-list.png` 只保留前兩列，其餘裁掉
+- 清單中原本還有十多個過去專案的資料夾（多數在 D 槽）。工作區信任是整台電腦共用的清單，不分設定檔；`m1-workspace-trust-list.png`（截圖未存檔，見 M2 紀錄 E79） 只保留前兩列，其餘裁掉
 - **本人主動清理（21:58）：** 移除所有過去專案的信任，清單只剩 `C:\Users\<使用者>\llm-gateway` 一筆（`m1-workspace-trust-cleaned.png`）。之後打開那些舊專案會回到受限模式，需要時再逐一信任
 - 意義：信任清單等於「哪些資料夾裡的程式可以自動執行」的授權清單。只留正在用的，是最小權限；長期累積、沒人回頭檢查的授權清單，跟沒清理的防火牆規則、離職員工沒停用的帳號是同一類問題
 
 **附帶觀察：** 重新載入後，終端機分頁的 `powershell` 旁出現黃色 ⚠。通常代表擴充套件（例如 Python）變更了終端機的環境變數，要開新的終端機才會套用。處理：關閉舊終端機、開新的（待確認）
 
-**截圖：** `m1-git-status-not-repo.png`、`m1-vscode-ai-hidden.png`（終端機中的使用者資料夾名稱已遮蔽）、`m1-workspace-trust-enabled.png`（無需遮蔽）、`m1-workspace-trust-list.png`（只保留前兩列，使用者資料夾名稱與無關路徑已遮蔽）、`m1-workspace-trust-cleaned.png`（使用者資料夾名稱已遮蔽）
+**截圖：** `m1-git-status-not-repo.png`、`m1-vscode-ai-hidden.png`（終端機中的使用者資料夾名稱已遮蔽）、`m1-workspace-trust-enabled.png`（截圖未存檔，見 M2 紀錄 E79）（無需遮蔽）、`m1-workspace-trust-list.png`（截圖未存檔，見 M2 紀錄 E79）（只保留前兩列，使用者資料夾名稱與無關路徑已遮蔽）、`m1-workspace-trust-cleaned.png`（使用者資料夾名稱已遮蔽）
 
 ---
 

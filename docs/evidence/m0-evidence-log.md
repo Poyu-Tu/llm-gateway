@@ -572,14 +572,14 @@ Fargate 記憶體便宜、vCPU 貴，只多約 18%。真正的成本差異是 Li
 **過程中的發現：**
 - **自動加值預設開啟：** 設定畫面預設「儲值 $10、餘額低於 $5 自動補到 $10」，不改的話等於沒有上限
 - **金鑰預設「永不過期」：** OpenAI 自己在畫面上警告長期金鑰外洩的風險，並建議改用「工作負載身分聯盟」取得短期憑證（`m0-openai-key-expiry-warning.png`）。跟 E13 同類：**預設值是為了方便，不是為了安全**
-- **服務帳號在建立時沒有權限選項：** 建立後才能從列表的編輯按鈕改成 Restricted；改之前列表顯示 `Inherited`（沿用服務帳號全部權限），改之後顯示 `Restricted`（`m0-openai-key-list-inherited.png` → `m0-openai-key-list-restricted.png`）
+- **服務帳號在建立時沒有權限選項：** 建立後才能從列表的編輯按鈕改成 Restricted；改之前列表顯示 `Inherited`（沿用服務帳號全部權限），改之後顯示 `Restricted`（`m0-openai-key-list-inherited.png`（截圖未存檔，見 M2 紀錄 E79） → `m0-openai-key-list-restricted.png`）
 - **權限分三級：** None（不能用）／Request（可以呼叫）／Write（可以呼叫，也能讓 OpenAI 存資料，例如 Responses）
 - **權限變更要幾分鐘才生效**（畫面提示）
 - 花費上限的警告框明寫：超過回 429、攔截非即時、最後可能略超過
 
 **新線索（M4 前評估）：** 工作負載身分聯盟（Workload Identity Federation）。若支援以 AWS IAM 角色換取 OpenAI 短期憑證，Fargate 就不需要 OpenAI API Key，決策書 4.5「多了一把長期金鑰」的風險可直接消除
 
-**截圖：** `m0-openai-prepaid-no-autoreload.png`、`m0-openai-project-created.png`、`s21-part1-allowed-models.png`、`s21-part2-spend-hard-limit.png`、`m0-openai-key-expiry-warning.png`、`m0-openai-key-create-settings.png`、`m0-openai-key-list-inherited.png`、`m0-openai-key-permissions.png`、`m0-openai-key-list-restricted.png`（金鑰列表遮蔽 Tracking ID、金鑰末 4 碼、建立者 user ID）
+**截圖：** `m0-openai-prepaid-no-autoreload.png`、`m0-openai-project-created.png`、`s21-part1-allowed-models.png`、`s21-part2-spend-hard-limit.png`、`m0-openai-key-expiry-warning.png`、`m0-openai-key-create-settings.png`、`m0-openai-key-list-inherited.png`（截圖未存檔，見 M2 紀錄 E79）、`m0-openai-key-permissions.png`、`m0-openai-key-list-restricted.png`（金鑰列表遮蔽 Tracking ID、金鑰末 4 碼、建立者 user ID）
 
 ---
 
