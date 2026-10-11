@@ -725,6 +725,190 @@ def choose_model(text: str, routing: RoutingConfig) -> RouteDecision:
 
 ---
 
+## E98. 步驟 4：路由接進對話入口（2026-10-11 21:27～23:37）
+
+**依據：** E94 定案 3（計費用實際呼叫的那顆模型、呼叫前查設定）、定案 4（稽核欄位）、定案 5（輸出上限）；E97 定案 1（查不到模型設定回 500）、定案 2（路由只回模型與理由）；決策書 D8、D9、D28、D37、D45。對應驗收 S05、S06。
+
+**範圍：** Gateway 現在依遮罩後的內容選模型，用那顆模型自己的思考量、輸出上限與單價。分四小段，一段一筆 commit。**降級還沒有做**（步驟 5）；**全部用假的模型驗證**，真實呼叫在步驟 6、9。
+
+### 四小段與結果
+
+| 段 | 內容 | 先看到的紅 | 完成後 | commit |
+|---|---|---|---|---|
+| ① | 設定做成領用窗口 `get_config()`；`choose_model()` 接進 `chat_endpoint`；稽核加 `route_reason`、`routed_model`；刪掉常數 `MODEL`、`REASONING_EFFORT` | `ImportError: cannot import name 'get_config' from 'app.main'`，`1 error during collection` | `159 passed` | `90c7281` |
+| ② | 查不到模型設定：回 500、寫稽核、不呼叫模型、不扣錢（E97 定案 1） | `3 failed, 10 passed`：`ModelNotConfiguredError: No settings for model: ghost` | `163 passed` | `82517e2` |
+| ③ | 輸出上限 `max_completion_tokens` 帶給 OpenAI | `7 failed, 159 passed` → 只改 `chat()` 之後 `30 failed, 136 passed` | `166 passed` | `641d004` |
+| ④ | 稽核的 `model` 改記指定的名稱，另加 `provider_model`；回給使用者的也是指定的名稱 | `3 failed, 167 passed` | `170 passed` | `fda869a` |
+
+測試數 150 → 170（其中 45 個是 `integration`）。
+
+### 請求的順序（步驟 4 之後）
+
+驗證（401／503）→ 讀額度（503）→ 遮罩、準備稽核 → 判斷超額（429，寫稽核）→ 加 0（503）→ **選模型、把理由記進稽核** → **查這顆模型的設定（500，寫稽核）** → 呼叫模型，帶思考量與輸出上限（502，寫稽核）→ 記 `model`、`provider_model` 與用量 → 用查到的設定算成本、加到已用量 → 寫稽核 → 回傳。
+
+- 路由排在「加 0」之後：被額度擋下、或資料庫寫不進去的請求不會走到路由
+- 查設定排在呼叫模型之前；算成本用的是同一個 `settings`，所以**呼叫的模型和計費的模型一定是同一顆**
+
+### 稽核紀錄的新欄位
+
+| 欄位 | 記什麼 | 哪些紀錄有 |
+|---|---|---|
+| `route_reason` | 為什麼選這顆：`length`、`keyword`、`default` | 走到路由的請求：成功、查不到設定（500）、模型失敗（502） |
+| `routed_model` | 路由選的模型 | 同上 |
+| `model` | **我們指定、也拿來計費的名稱**（M2 記的是供應商回報的名稱） | 成功的紀錄 |
+| `provider_model` | 供應商回報的名稱，可能帶日期尾碼 | 成功的紀錄；兩個名稱相同時也有這一欄 |
+
+- 被額度擋下的紀錄（`quota_exceeded`）沒有這四欄：它在路由之前就結束了
+- 目前 `routed_model` 與 `model` 一定相同；步驟 5 做了降級之後才會不同
+- **生活比喻：** 訂單上寫的是「雙人房」（指定的、照這個收費），入住單上寫的是「512 號房」（實際給的那一間）；兩個都留著，帳才對得起來
+
+### 本人撰寫（`app/main.py`，`fda869a` 的版本，節錄）
+
+```python
+# 領用窗口：模型、單價與路由規則（測試時會換成測試用的設定）
+def get_config() -> GatewayConfig:
+    return CONFIG
+```
+
+```python
+    # 依遮罩後的內容選模型，理由記進稽核；再查到這顆模型的設定（含單價）：查不到就不呼叫
+    decision = choose_model(masked, config.routing)
+    record["route_reason"] = decision.reason
+    record["routed_model"] = decision.model
+    # 查不到設定是我們自己的設定問題：記一筆失敗、回 500，不呼叫模型、不扣錢
+    try:
+        settings = find_model_config(config.models, decision.model)
+    except ModelNotConfiguredError as exc:
+        record["status"] = "error"
+        record["error_type"] = type(exc).__name__
+        append_audit(record, audit_path)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    # 試著呼叫模型；OpenAI 出錯就記一筆失敗，回 502
+    try:
+        result = chat(
+            client,
+            decision.model,
+            [{"role": "user", "content": masked}],
+            settings.reasoning_effort,
+            settings.max_completion_tokens,
+        )
+    except OpenAIError as exc:
+        record["status"] = "error"
+        record["error_type"] = type(exc).__name__
+        append_audit(record, audit_path)
+        raise HTTPException(status_code=502, detail="Upstream model error")
+
+    # 成功：補上模型和用量，再寫入
+    # model 記我們指定、也拿來計費的名稱；provider_model 記 OpenAI 回報的名稱，兩者可能不同
+    record["model"] = decision.model
+    record["provider_model"] = result.model
+```
+
+回傳給使用者的 `model` 也改為 `decision.model`。`app/providers/openai_client.py` 的 `chat()` 多收一格 `max_completion_tokens`，並交給 `client.chat.completions.create()`。
+
+**設定為什麼也做成領用窗口：** 和資料庫、時間一樣，測試才換得掉。`chat_endpoint` 裡一律用領到的 `config`（小寫），只有 `get_config()` 交出模組讀好的 `CONFIG`（大寫）。
+
+**查不到設定的 500 與模型失敗的 502 是同一個形狀：** 請求確實進來了，所以先記一筆失敗的稽核，再回固定的訊息；稽核只記錯誤的類別名稱（D37）。差別在出事的是誰：500 是自己的設定，502 是上游。
+
+### 測試（Claude 整份提供）
+
+**`tests/fakes.py`：** 假的模型回報的名稱預設改為「請求指定的那一顆」（原本固定回 `gpt-6-luna`）；要模擬回報的名稱不同時另外給 `reported_model`；另外把每一次收到的請求都記在 `requests`（步驟 5 的降級會用到）。
+
+**`tests/test_chat_routing.py`（新檔，19 個）：** 用一份測試專用的設定，模型叫 `small` 與 `big`、門檻 18 個字、關鍵字 `debug`、輸出上限 100 與 200；主程式若偷用寫死的名稱或正式設定，馬上會被抓到。碰資料庫的地方用 `FakeDynamoDB`，不需要 Docker。
+
+| 組 | 測試數 | 檢查 |
+|---|---|---|
+| 選到哪一顆 | 3 | 短句 → `small`、思考量 `none`；含關鍵字 → `big`、`low`；20 個字 → `big` |
+| 稽核的理由 | 2 | `default`／`small`；`keyword` 與 `length` 分得出來 |
+| 用遮罩後的內容路由 | 1 | `Call 0912345678 now` 原文 19 個字（達到門檻），遮罩後 16 個字 → 仍是 `small` |
+| 成本 | 2 | 假的模型回報 13 / 11 個 token：`big` 是 136、`small` 是 7；稽核與實際扣的金額都要對 |
+| 輸出上限 | 2 | `small` 帶 100、`big` 帶 200 |
+| 兩個模型名稱 | 4 | 回報 `small-2026-09-01` 時：稽核 `model` 是 `small`、`provider_model` 是回報的；回給使用者的是 `small`；成本照常是 7；兩個名稱相同時 `provider_model` 也在 |
+| 查不到設定 | 4 | 500 與固定訊息、回應裡沒有模型名稱；模型沒被呼叫、只有事前的「加 0」；稽核有 `status: error`、`error_type`、`routed_model`、`route_reason`；同一份壞設定下走便宜模型的請求照常 200 |
+| 不留常數 | 1 | `app.main` 沒有 `MODEL`、`REASONING_EFFORT` |
+
+- **「查不到設定」怎麼做出來：** 正式的設定檔過不了 `load_config()` 的檢查，所以測試直接組一份壞掉的設定（強模型叫 `ghost`、沒有它的設定），從領用窗口換進去
+- 「沒呼叫模型、沒扣錢」那個測試先確認狀態碼是 500，再檢查兩件「沒發生」的事（M2 結案報告第 4 節）
+- 這個檔的每個測試跑完都會把換掉的領用窗口還原，避免測試用的設定影響到別的測試檔
+
+**`tests/test_openai_client.py`：** 既有 4 個測試的呼叫補上第五格，新增 1 個確認輸出上限有送出去；共 5 個。
+
+### 破壞實驗（本人執行，十個；每個做完立刻改回）
+
+| 段 | # | 改了什麼 | 結果 | 失敗訊息 |
+|---|---|---|---|---|
+| ① | A | 路由改吃原文（`request.message`） | `1 failed, 8 passed` | `assert 'big' == 'small'` |
+| ① | B | 查設定時固定拿便宜模型 | `2 failed, 7 passed` | `assert 'none' == 'low'`、`assert 7 == 136` |
+| ① | C | 選模型時用大寫的 `CONFIG` | `8 failed, 1 passed` | `ModelNotConfiguredError: No settings for model: gpt-6-luna`（5 個）與 `…gpt-6-sol`（3 個） |
+| ② | A | `500` 改成 `503` | `3 failed, 10 passed` | `assert 503 == 500` |
+| ② | B | 那條路不寫稽核 | `1 failed, 12 passed` | `FileNotFoundError`（稽核檔沒有被建立） |
+| ② | C | 訊息改成錯誤的內容（`str(exc)`） | `1 failed, 12 passed` | `{'detail': 'N...model: ghost'} == {'detail': 'I...server error'}` |
+| ③ | A | `main.py` 的輸出上限寫死成 `100` | `1 failed, 165 passed` | `assert 100 == 200` |
+| ③ | B | `chat()` 不把上限交給 OpenAI | `3 failed, 163 passed` | `KeyError: 'max_completion_tokens'` |
+| ④ | A | 稽核的 `model` 改回記回報的名稱 | `1 failed, 169 passed` | `assert 'small-2026-09-01' == 'small'` |
+| ④ | B | 回給使用者的 `model` 改回回報的名稱 | `1 failed, 169 passed` | `assert 'small-2026-09-01' == 'small'` |
+
+**判讀：**
+
+- **①A：** 原文有 10 碼手機時比遮罩後長 3 個字；用原文路由，這一句會被送去貴 20 倍的模型，但模型實際收到的內容並沒有那麼長
+- **①B：** 呼叫的是強模型，卻用便宜模型的思考量與單價：一次少收 129 micro-USD（136 變成 7），而且沒有任何錯誤。這就是 E96 實驗 C 的另一個方向
+- **①C：** 用了模組的正式設定，測試換進去的設定完全沒有作用。在正式環境看不出這個錯（兩者是同一份），只有測試抓得到
+- **②B：** 使用者照樣收到 500，從外面看不出少了一筆紀錄
+- **②C：** 回應裡出現 `No settings for model: ghost`，把內部的模型名稱告訴了外面的人
+- **③A：** 兩顆模型的上限不同才看得出來（E86、E87 的做法）
+- **④A、④B：** 兩個測試各守一個地方，改哪一邊就是哪一個紅
+
+### 挫折與說明不清楚的地方（照實記錄）
+
+| # | 發生什麼 | 原因 | 之後的做法 |
+|---|---|---|---|
+| 1 | 第 ① 段第一次執行 `2 failed, 157 passed`：`KeyError: 'routed_model'` | 欄位名稱打成 `route_model`，少一個 `d`。程式有寫入，只是寫進另一個名字的欄位；請求照樣成功 | 與 E85 的 `"PHON"` 同類：字串打錯不會讓程式當掉，要有測試去讀那一欄 |
+| 2 | 第 ① 段的「第 5 處」本人表示不清楚 | Claude 只給了要換上去的新程式，沒有把「原本長什麼樣子、要刪哪兩行」放在一起 | 要換掉既有的程式時，給改之前與改之後的對照，並標出刪哪幾行 |
+| 3 | 第 ② 段寫「對照 502 那一段」，本人問那一段在哪裡 | Claude 提到既有的程式卻沒有指出位置 | 提到既有的程式時附上行號範圍與那一段的原文（與 E83「給程式片段時連同位置一起給」是同一件事） |
+
+第 1 項也等於多做了一個破壞實驗：欄位名稱打錯時紅兩個，訊息直接說出是哪一欄。
+
+### Claude 另外核對的事
+
+- 專案鎖定的 OpenAI SDK（`openai` 3.19.2）的 `chat.completions.create` 有 `max_completion_tokens` 這個參數（以程式讀取函式的參數清單確認）。**只確認了參數存在**，模型實際怎麼反應要等真實呼叫
+- 每一段推送後都讀取公開 repo 核對：四個測試檔與交付的版本相同；`app/main.py` 與參考寫法只差空行；在試跑環境執行 `fda869a`：`170 passed`（碰資料庫的測試以替身伺服器代替 DynamoDB Local）
+
+### 限制（誠實記錄）
+
+- **降級還沒有做。** 強模型被限流時，目前和其他 OpenAI 錯誤一樣回 502；稽核的 `fallback`、`fallback_reason` 兩欄也還沒有（步驟 5）
+- **全部是假的模型。** 真的 OpenAI 收到路由後的請求（`gpt-6-sol`、思考量 `low`、帶輸出上限）會怎麼回，還沒有驗證；步驟 6 做第一次真實呼叫
+- **輸出上限的數字是暫定的**（Luna 1,000、Sol 2,000）。思考 token 也算在上限裡，設太低回答會被截斷；**回答被截斷時目前看不出來**（沒有記錄供應商回報的結束原因），步驟 6 看過真實回應再決定要不要記
+- **強模型下的超扣還沒有實測**（E94 定案 5 的試算是一次約 5,600 micro-USD）；有了輸出上限之後，一次最多花多少算得出來，但數字要等上限定案
+- 500 那條路在正常情況下走不到（啟動時就擋掉了），只有測試換進壞掉的設定時才會發生
+- 被額度擋下的紀錄沒有路由的欄位；驗證失敗與資料庫故障的請求仍然不寫稽核（沿用 E90、E91）
+- 稽核 `model` 的意思變了：M2 的舊紀錄記的是回報的名稱，這一步之後記的是指定的名稱。10/9 的真實紀錄兩者實際相同（都是 `gpt-6-luna`）
+- 設定在啟動時讀一次；改了 `app/config.toml` 要重新啟動 Gateway 才會生效
+- 容器裡讀不讀得到設定檔仍未驗證（E95 的同一項限制）
+- 既有的 `tests/test_chat.py` 等測試檔仍用正式的設定檔（短句都會被路由到 `gpt-6-luna`）；設定檔的門檻或關鍵字改動時，這些測試可能受影響
+- **有些斷言本人沒有看過它們為了預期的原因而紅：** `test_chat_sends_simple_message_to_the_cheap_model`（只在實驗 ①C 因為查不到設定而紅）、`test_chat_sends_long_message_to_the_strong_model`、`test_chat_charges_the_cheap_price_for_a_simple_message`、`test_chat_charges_normally_when_the_provider_reports_another_name`、`test_chat_still_serves_the_cheap_model_when_only_the_strong_one_is_missing`、`test_main_keeps_no_hard_coded_model`（最後一個在 Claude 的試跑環境看過：留著常數時紅）。另外「查不到設定時沒呼叫模型、沒扣錢」那個測試只看過它的狀態碼斷言變紅，後面兩個「沒發生」的斷言沒有；要讓它們紅，得把查設定排到呼叫模型之後，那是結構的改寫
+
+### 面試可用的說法
+
+- 「路由我是用遮罩後的內容判斷的。我有一個測試：一句含手機號碼的話，原文剛好達到長度門檻，遮罩後少 3 個字就不到。我把程式改成用原文路由，它會被送去貴 20 倍的模型，而模型實際收到的內容並沒有那麼長。」
+- 「呼叫的模型和計費的模型，我讓它們來自同一個變數。我做過實驗，呼叫強模型但拿便宜模型的設定去算，一次少收一百多 micro-USD，程式完全不報錯，只有測試會紅。」
+- 「稽核裡我分兩欄記模型：一欄是我指定、也拿來計費的名稱，一欄是供應商回報的名稱。供應商回報的可能帶日期尾碼，代表它換版了；計費照指定的算，換版則是重跑測試集的訊號。」
+- 「設定檔我做成可以在測試時換掉的相依。所以我能在測試裡給一份『路由指到不存在的模型』的壞設定，確認 Gateway 回 500、有留稽核、沒有呼叫模型也沒有扣錢。這種狀態在正式環境啟動時就被擋掉了，不靠測試根本做不出來。」
+
+---
+
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `7458a72` | 10/10 14:13 | `docs: record M3 step 3 evidence`（`6eaba32..7458a72`） |
+| `90c7281` | 10/11 22:13 | `feat: route each request to the cheap or the strong model` |
+| `82517e2` | 22:44 | `feat: return 500 and audit when the routed model has no settings` |
+| `641d004` | 23:14 | `feat: send the output cap of the routed model to the provider` |
+| `fda869a` | 23:37 | `feat: audit the requested model and the provider-reported model separately` |
+
+---
+
 ## 決策書 v2.9 待改項目
 
 | # | v2.8 的位置 | 要改什麼 |
@@ -733,22 +917,24 @@ def choose_model(text: str, routing: RoutingConfig) -> RouteDecision:
 | 2 | D30、D8、12.5「沒有單價時的錯誤類型…」、D22（repo 結構） | 設定檔定案：TOML，`app/config.toml`，由 `app/config.py` 在啟動時讀取；路由會用到的模型缺設定就拒絕啟動。repo 結構加上 `app/config.toml`、`app/config.py`、`app/router.py`（E94 定案 1、2） |
 | 3 | D8、8.2 的 M3 | 路由函式 `choose_model()`（`app/router.py`）吃遮罩後的文字與路由規則，回傳模型與理由（`length`、`keyword`、`default`）；思考量由模型設定提供。先看字數、再看關鍵字；關鍵字不分大小寫（E94 定案 2、E97） |
 | 4 | D45、D30、2.2 流程圖 [4]、12.5「沒有單價時的錯誤類型…」 | 成本以實際拿到回答的那次請求所指定的名稱查單價；查單價的時機移到呼叫模型之前（E94 定案 3）。實作：`find_model_config()` 在呼叫前查設定，查不到丟 `ModelNotConfiguredError`；`cost_micro_usd()` 改收設定物件；`app/pricing.py` 不再有 `PRICES`；`main.py` 啟動時讀設定檔（E96） |
-| 5 | 3.2 的 `audit` 表、D10 | 稽核新增 `route_reason`、`routed_model`、`provider_model`、`fallback`、`fallback_reason`；`model` 改為記指定的名稱（E94 定案 3、4） |
-| 6 | 7.10、7.9「預扣」、12.5「預扣」那一列、3.4 | 預扣 M3 不做，留到 M5；M3 新增每顆模型的輸出上限（`max_completion_tokens`），並說明強模型下超扣的幅度（E94 定案 5） |
+| 5 | 3.2 的 `audit` 表、D10、D38 | 稽核新增 `route_reason`、`routed_model`、`provider_model`（E98，已實作）與 `fallback`、`fallback_reason`（步驟 5）；`model` 改為記指定並計費的名稱；回給使用者的 `model` 也改為指定的名稱（E94 定案 3、4；E98） |
+| 6 | 7.10、7.9「預扣」、12.5「預扣」那一列、3.4 | 預扣 M3 不做，留到 M5；M3 新增每顆模型的輸出上限（`max_completion_tokens`），並說明強模型下超扣的幅度（E94 定案 5）；`chat()` 已把上限帶給 OpenAI，數字仍是暫定（E98） |
 | 7 | D30、4.2 應用層、8.2 的 M3 | 補上設定檔的做法：`[routing]` 指名兩顆模型，`[models.名稱]` 放各自的思考量、輸出上限、單價；`load_config()` 讀進來就檢查（路由用到的模型要有設定、數字要是大於 0 的整數、關鍵字不能是空白、不能少欄位），有問題丟 `ConfigError`（E95） |
 | 8 | 11.5 截圖規範（推送前的檢查） | 新增：簡報開著時會產生 `~$` 開頭的鎖定檔，已列入 `.gitignore`；推送前照檔名逐一加入，不用 `git add .`（E95） |
-| 9 | 12.5「沒有單價時的錯誤類型與對使用者的回應」、2.2 的回應對照表、D37 | 查不到模型設定時：回 500 `Internal server error`，稽核記 `status: error` 與 `error_type: ModelNotConfiguredError`，不呼叫模型、不扣錢；12.5 該列劃掉（E97 定案 1；實作後補證據編號） |
+| 9 | 12.5「沒有單價時的錯誤類型與對使用者的回應」、2.2 的回應對照表、D37 | 查不到模型設定時：回 500 `Internal server error`，稽核記 `status: error` 與 `error_type: ModelNotConfiguredError`，不呼叫模型、不扣錢；12.5 該列劃掉（E97 定案 1；E98 已實作） |
+| 10 | 2.2 流程圖 [4] 與「M2 實作後的順序」、4.2 應用層、D22（repo 結構） | 補上步驟 4 之後的順序：加 0 → 選模型並記理由 → 查模型設定（500）→ 呼叫模型（帶思考量與輸出上限）；設定是領用窗口 `get_config()`；repo 結構加上 `tests/test_chat_routing.py`（E98） |
 
 ---
 
-## 目前進度（2026-10-10 14:15）
+## 目前進度（2026-10-11 23:40）
 
 - 交接檔第 2 節的事項已回覆（E94）
 - M3 開工前五項定案 ✅（E94）
 - 步驟 1（設定檔、讀取與檢查）✅（E95，已推送 `7cb56ed`）
 - 步驟 2（單價改讀設定檔、加入 `gpt-6-sol`、查設定移到呼叫模型之前）✅（E96，已推送 `8907063`）
-- **步驟 3（路由函式 `choose_model()`）✅（E97，已推送 `81a87c2`）；目前 `150 passed`（其中 45 個是 `integration`）**
-- 下一步：步驟 4（路由接進 `chat_endpoint`），分四小段：① 路由與設定的領用窗口 ② 查不到模型設定回 500 ③ 輸出上限 ④ 稽核的 `model` 與 `provider_model`。第一段的測試檔（`tests/fakes.py`、`tests/test_chat_routing.py`）已交給本人，尚未開始
+- 步驟 3（路由函式 `choose_model()`）✅（E97，已推送 `81a87c2`）
+- **步驟 4（路由接進對話入口：領用窗口、500、輸出上限、兩個模型名稱）✅（E98，已推送 `fda869a`）；目前 `170 passed`（其中 45 個是 `integration`）**
+- 下一步：步驟 5（降級：強模型被限流 → 便宜模型一次；便宜模型也限流 → 503 並附 `Retry-After`；供應商預算用完 → 不降級、503）
 
 ---
 
