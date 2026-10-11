@@ -14,14 +14,11 @@ from pydantic import BaseModel, Field
 from app.audit import append_audit, hash_prompt, make_summary, mask, detect_pii_types
 from app.auth import extract_bearer_token, find_user_id, hash_api_key
 from app.db import make_dynamodb_client
-from app.config import CONFIG_PATH, load_config
+from app.config import CONFIG_PATH, GatewayConfig, load_config
+from app.router import choose_model
 from app.pricing import cost_micro_usd, find_model_config
 from app.providers.openai_client import chat
 from app.quota import add_usage, is_over_quota, period_of, read_limit, read_used, seconds_until_next_period
-
-# M1 固定用便宜模型、不思考；M3 才會依內容選模型
-MODEL = "gpt-6-luna"
-REASONING_EFFORT = "none"
 
 # 啟動時就把設定讀進來並檢查：設定有問題，Gateway 直接起不來
 CONFIG = load_config(CONFIG_PATH)
@@ -54,6 +51,10 @@ def get_hmac_key() -> bytes:
 def get_audit_path() -> Path:
     return Path("data/audit.jsonl")
 
+
+# 領用窗口：模型、單價與路由規則（測試時會換成測試用的設定）
+def get_config() -> GatewayConfig:
+    return CONFIG
 
 # 領用窗口：資料庫連線（測試時會換成考場的）
 def get_dynamodb() -> BaseClient:
@@ -131,6 +132,7 @@ def chat_endpoint(
     quota: tuple[int, int] = Depends(get_quota),
     now: datetime = Depends(get_now),
     dynamodb: BaseClient = Depends(get_dynamodb),
+    config: GatewayConfig = Depends(get_config),
 ):
     """Send the masked message to the model and write an audit record."""
     request_id = str(uuid.uuid4())
@@ -164,12 +166,15 @@ def chat_endpoint(
     except (BotoCoreError, ClientError):
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
 
-    # 呼叫模型之前先查到這顆模型的設定（含單價）：查不到就不呼叫
-    settings = find_model_config(CONFIG.models, MODEL)
+    # 依遮罩後的內容選模型，理由記進稽核；再查到這顆模型的設定（含單價）：查不到就不呼叫
+    decision = choose_model(masked, config.routing)
+    record["route_reason"] = decision.reason
+    record["routed_model"] = decision.model
+    settings = find_model_config(config.models, decision.model)
 
     # 試著呼叫模型；OpenAI 出錯就記一筆失敗，回 502
     try:
-        result = chat(client, MODEL, [{"role": "user", "content": masked}], REASONING_EFFORT)
+        result = chat(client, decision.model, [{"role": "user", "content": masked}], settings.reasoning_effort)
     except OpenAIError as exc:
         record["status"] = "error"
         record["error_type"] = type(exc).__name__
