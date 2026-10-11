@@ -146,6 +146,68 @@ def test_chat_charges_the_cheap_price_for_a_simple_message(tmp_path):
     assert charged == "7"
 
 
+# ---- 以下是「路由選到的模型沒有設定」：正常情況下啟動時就擋掉了，這是防萬一的路 ----
+
+# 壞掉的設定：路由的強模型叫 ghost，但 models 裡沒有它
+# 這份設定是直接組出來的，沒有經過 load_config 的檢查，所以做得出這種「不該存在」的狀態
+BROKEN_CONFIG = GatewayConfig(
+    routing=RoutingConfig(cheap_model="small", strong_model="ghost", min_chars=18, keywords=["debug"]),
+    models={
+        "small": ModelConfig(reasoning_effort="none", max_completion_tokens=100, input_price=100_000, output_price=500_000),
+    },
+)
+
+
+# 查不到模型設定：回 500 與固定的訊息，而且訊息不能透露是哪一顆模型
+def test_chat_returns_500_when_the_routed_model_has_no_settings(tmp_path):
+    client, _, _, _ = make_routing_test_client(tmp_path, BROKEN_CONFIG)
+
+    response = client.post("/v1/chat", json={"message": "Please debug it"})
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Internal server error"}
+    assert "ghost" not in response.text
+
+
+# 查不到就不呼叫模型，也不扣錢：資料庫只收到事前那一次「加 0」
+def test_chat_spends_nothing_when_the_routed_model_has_no_settings(tmp_path):
+    client, completions, _, database = make_routing_test_client(tmp_path, BROKEN_CONFIG)
+
+    response = client.post("/v1/chat", json={"message": "Please debug it"})
+
+    # 先確認請求真的是被這條路擋下的，下面兩個「沒發生」才有意義
+    assert response.status_code == 500
+    assert completions.last_request is None
+    amounts = [update["ExpressionAttributeValues"][":amount"]["N"] for update in database.updates]
+    assert amounts == ["0"]
+
+
+# 這個請求要留下稽核紀錄：查得到是誰、路由選了什麼、失敗的類別
+def test_chat_audits_the_request_when_the_routed_model_has_no_settings(tmp_path):
+    client, _, audit_path, _ = make_routing_test_client(tmp_path, BROKEN_CONFIG)
+
+    response = client.post("/v1/chat", json={"message": "Please debug it"})
+
+    assert response.status_code == 500
+    record = read_audit(audit_path)
+    assert record["user_id"] == "alice"
+    assert record["status"] == "error"
+    assert record["error_type"] == "ModelNotConfiguredError"
+    assert record["routed_model"] == "ghost"
+    assert record["route_reason"] == "keyword"
+    assert "cost_micro_usd" not in record
+
+
+# 同一份壞掉的設定，走便宜模型的請求不受影響：只擋該擋的
+def test_chat_still_serves_the_cheap_model_when_only_the_strong_one_is_missing(tmp_path):
+    client, completions, _, _ = make_routing_test_client(tmp_path, BROKEN_CONFIG)
+
+    response = client.post("/v1/chat", json={"message": "Say hi"})
+
+    assert response.status_code == 200
+    assert completions.last_request["model"] == "small"
+
+
 # 模型和思考量只能來自設定：主程式不能再留寫死的常數，否則改設定檔時會有兩個地方要改
 def test_main_keeps_no_hard_coded_model():
     assert not hasattr(app.main, "MODEL")

@@ -16,7 +16,7 @@ from app.auth import extract_bearer_token, find_user_id, hash_api_key
 from app.db import make_dynamodb_client
 from app.config import CONFIG_PATH, GatewayConfig, load_config
 from app.router import choose_model
-from app.pricing import cost_micro_usd, find_model_config
+from app.pricing import ModelNotConfiguredError, cost_micro_usd, find_model_config
 from app.providers.openai_client import chat
 from app.quota import add_usage, is_over_quota, period_of, read_limit, read_used, seconds_until_next_period
 
@@ -170,8 +170,15 @@ def chat_endpoint(
     decision = choose_model(masked, config.routing)
     record["route_reason"] = decision.reason
     record["routed_model"] = decision.model
-    settings = find_model_config(config.models, decision.model)
-
+    # 查不到設定是我們自己的設定問題：記一筆失敗、回 500，不呼叫模型、不扣錢
+    try:
+        settings = find_model_config(config.models, decision.model)
+    except ModelNotConfiguredError as exc:
+        record["status"] = "error"
+        record["error_type"] = type(exc).__name__
+        append_audit(record, audit_path)
+        raise HTTPException(status_code=500, detail="Internal server error")
+        
     # 試著呼叫模型；OpenAI 出錯就記一筆失敗，回 502
     try:
         result = chat(client, decision.model, [{"role": "user", "content": masked}], settings.reasoning_effort)
