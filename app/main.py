@@ -195,7 +195,9 @@ def chat_endpoint(
         raise HTTPException(status_code=502, detail="Upstream model error")
 
     # 成功：補上模型和用量，再寫入
-    record["model"] = result.model
+    # model 記我們指定、也拿來計費的名稱；provider_model 記 OpenAI 回報的名稱，兩者可能不同
+    record["model"] = decision.model
+    record["provider_model"] = result.model
     record["input_tokens"] = result.input_tokens
     record["output_tokens"] = result.output_tokens
     record["reasoning_tokens"] = result.reasoning_tokens
@@ -214,5 +216,5 @@ def chat_endpoint(
     return {
         "request_id": request_id,
         "reply": result.text,
-        "model": result.model,
+        "model": decision.model,
     }

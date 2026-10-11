@@ -31,9 +31,9 @@ def restore_dependencies():
 
 
 # 把領用窗口換成假的，設定換成上面那一份；回傳：測試用戶端、筆記本、稽核檔位置、假的資料庫
-def make_routing_test_client(tmp_path, config=TEST_CONFIG):
+def make_routing_test_client(tmp_path, config=TEST_CONFIG, reported_model=None):
     """Swap the real dependencies for fakes and return what tests need."""
-    fake_client, completions = make_fake_client()
+    fake_client, completions = make_fake_client(reported_model=reported_model)
     audit_path = tmp_path / "audit.jsonl"
     database = FakeDynamoDB()
     gateway.dependency_overrides[get_client] = lambda: fake_client
@@ -162,6 +162,49 @@ def test_chat_sends_the_output_cap_of_the_strong_model(tmp_path):
     client.post("/v1/chat", json={"message": "Please debug it"})
 
     assert completions.last_request["max_completion_tokens"] == 200
+
+
+# ---- 以下是「指定的模型名稱」和「供應商回報的名稱」：兩個都要記，而且不能混用 ----
+
+# 供應商回報的名稱可能帶日期尾碼：稽核的 model 記我們指定的，provider_model 記回報的
+def test_chat_audit_keeps_the_requested_and_the_reported_model_apart(tmp_path):
+    client, _, audit_path, _ = make_routing_test_client(tmp_path, reported_model="small-2026-09-01")
+
+    client.post("/v1/chat", json={"message": "Say hi"})
+
+    record = read_audit(audit_path)
+    assert record["model"] == "small"
+    assert record["provider_model"] == "small-2026-09-01"
+
+
+# 回給使用者的也是我們指定的名稱，不是供應商內部的版本名稱
+def test_chat_response_names_the_requested_model(tmp_path):
+    client, _, _, _ = make_routing_test_client(tmp_path, reported_model="small-2026-09-01")
+
+    response = client.post("/v1/chat", json={"message": "Say hi"})
+
+    assert response.json()["model"] == "small"
+
+
+# 回報的名稱查不到單價也沒關係：計費用的是呼叫前就查好的設定（13 / 11 個 token，便宜模型是 7）
+def test_chat_charges_normally_when_the_provider_reports_another_name(tmp_path):
+    client, _, audit_path, _ = make_routing_test_client(tmp_path, reported_model="small-2026-09-01")
+
+    response = client.post("/v1/chat", json={"message": "Say hi"})
+
+    assert response.status_code == 200
+    assert read_audit(audit_path)["cost_micro_usd"] == 7
+
+
+# 兩個名稱相同時，provider_model 這一欄也要在：「沒有這一欄」和「兩者相同」要分得出來
+def test_chat_audit_records_provider_model_even_when_names_match(tmp_path):
+    client, _, audit_path, _ = make_routing_test_client(tmp_path)
+
+    client.post("/v1/chat", json={"message": "Please debug it"})
+
+    record = read_audit(audit_path)
+    assert record["model"] == "big"
+    assert record["provider_model"] == "big"
 
 
 # ---- 以下是「路由選到的模型沒有設定」：正常情況下啟動時就擋掉了，這是防萬一的路 ----
