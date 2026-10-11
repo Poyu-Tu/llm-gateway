@@ -146,6 +146,24 @@ def test_chat_charges_the_cheap_price_for_a_simple_message(tmp_path):
     assert charged == "7"
 
 
+# 輸出上限跟著模型走：便宜模型帶便宜模型的上限（測試設定是 100）
+def test_chat_sends_the_output_cap_of_the_cheap_model(tmp_path):
+    client, completions, _, _ = make_routing_test_client(tmp_path)
+
+    client.post("/v1/chat", json={"message": "Say hi"})
+
+    assert completions.last_request["max_completion_tokens"] == 100
+
+
+# 強模型帶強模型自己的上限（測試設定是 200）；兩個數字不同，拿錯顆時才看得出來
+def test_chat_sends_the_output_cap_of_the_strong_model(tmp_path):
+    client, completions, _, _ = make_routing_test_client(tmp_path)
+
+    client.post("/v1/chat", json={"message": "Please debug it"})
+
+    assert completions.last_request["max_completion_tokens"] == 200
+
+
 # ---- 以下是「路由選到的模型沒有設定」：正常情況下啟動時就擋掉了，這是防萬一的路 ----
 
 # 壞掉的設定：路由的強模型叫 ghost，但 models 裡沒有它

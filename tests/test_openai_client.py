@@ -8,7 +8,7 @@ from tests.fakes import make_fake_client
 def test_chat_maps_response_fields():
     client, _ = make_fake_client()
 
-    result = chat(client, "gpt-6-luna", [{"role": "user", "content": "Say hi"}], "none")
+    result = chat(client, "gpt-6-luna", [{"role": "user", "content": "Say hi"}], "none", 500)
 
     assert result == ChatResult(
         text="Hi there",
@@ -24,17 +24,26 @@ def test_chat_sends_model_and_reasoning_effort():
     """The first test cannot catch a missing parameter, so check the request too."""
     client, completions = make_fake_client()
 
-    chat(client, "gpt-6-luna", [{"role": "user", "content": "Say hi"}], "none")
+    chat(client, "gpt-6-luna", [{"role": "user", "content": "Say hi"}], "none", 500)
 
     assert completions.last_request["model"] == "gpt-6-luna"
     assert completions.last_request["reasoning_effort"] == "none"
+
+
+# 送出的請求要帶上輸出上限：沒有帶的話，一次呼叫能花多少就沒有上限
+def test_chat_sends_the_output_cap():
+    client, completions = make_fake_client()
+
+    chat(client, "gpt-6-luna", [{"role": "user", "content": "Say hi"}], "none", 500)
+
+    assert completions.last_request["max_completion_tokens"] == 500
 
 
 # 模型沒有回答內容（None）時，text 要是空字串，程式不能出錯
 def test_chat_returns_empty_text_when_content_is_none():
     client, _ = make_fake_client(content=None)
 
-    result = chat(client, "gpt-6-luna", [{"role": "user", "content": "Say hi"}], "none")
+    result = chat(client, "gpt-6-luna", [{"role": "user", "content": "Say hi"}], "none", 500)
 
     assert result.text == ""
 
@@ -43,6 +52,6 @@ def test_chat_returns_empty_text_when_content_is_none():
 def test_chat_counts_zero_reasoning_tokens_without_details():
     client, _ = make_fake_client(has_details=False)
 
-    result = chat(client, "gpt-6-luna", [{"role": "user", "content": "Say hi"}], "none")
+    result = chat(client, "gpt-6-luna", [{"role": "user", "content": "Say hi"}], "none", 500)
 
     assert result.reasoning_tokens == 0

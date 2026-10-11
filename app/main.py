@@ -181,7 +181,13 @@ def chat_endpoint(
         
     # 試著呼叫模型；OpenAI 出錯就記一筆失敗，回 502
     try:
-        result = chat(client, decision.model, [{"role": "user", "content": masked}], settings.reasoning_effort)
+        result = chat(
+            client,
+            decision.model,
+            [{"role": "user", "content": masked}],
+            settings.reasoning_effort,
+            settings.max_completion_tokens,
+        )
     except OpenAIError as exc:
         record["status"] = "error"
         record["error_type"] = type(exc).__name__
