@@ -56,6 +56,7 @@ def get_audit_path() -> Path:
 def get_config() -> GatewayConfig:
     return CONFIG
 
+
 # 領用窗口：資料庫連線（測試時會換成考場的）
 def get_dynamodb() -> BaseClient:
     return make_dynamodb_client()

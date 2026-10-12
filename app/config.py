@@ -98,4 +98,4 @@ def load_config(path: Path) -> GatewayConfig:
     config = GatewayConfig(routing=routing, models=models)
     check_config(config)
 
-    return  config
+    return config
