@@ -985,6 +985,386 @@ def get_config() -> GatewayConfig:
 
 ---
 
+## E100. 步驟 5：降級（2026-10-12 09:07～16:27）
+
+**依據：** 交接檔 `m3-step5-handoff.md` 第 4 節；決策書 D10（強模型被限流 → 便宜模型一次；便宜模型也限流 → 503 附 `Retry-After`；SDK 重試次數設小，避免和降級疊加）、D32（供應商預算用完不降級、回 503）、D37（上游失敗記稽核、只記錯誤類別）；E94 定案 3（成本用實際拿到回答的那次指定的名稱）、定案 4（稽核欄位）；M2 結案報告第 4 節（檢查「某件事沒發生」之前，先確認請求走到了該被擋的地方）。對應驗收 S07。
+
+**範圍：** 強模型被限流時改用便宜模型一次；兩顆都被限流回 503 並附 `Retry-After`；供應商預算用完不降級、回 503、不附 `Retry-After`；其他供應商錯誤維持 502；回傳、稽核的 `model` 與成本都改用實際回答的那顆模型；稽核新增 `fallback`、`fallback_reason`、`error_code`。**全部用假的模型驗證**，沒有呼叫 OpenAI，也沒有遇到真的 429。
+
+**起點：** repo 最新 commit `52018c3`（10/12 09:07）；`170 passed`。交接檔第 2 節的回覆：簡報 v1.2 用 PowerPoint 桌面版看過，排版沒有問題；`app/config.py` 多一個空白、`app/main.py` 少一個空行已修（`16e50d6`）；和老師討論示範影片排在 10/12 晚上，結果另記。Claude 依旁白稿 v1.2 的「示範畫面怎麼接」整理了五個要問的問題：6 分鐘是否為硬上限、示範用插在簡報頁中間的短錄影是否可以、主影片用終端機畫面是否足夠、降級只能用模擬是否可以當驗收、「省下 X%」能否用估算。
+
+**生活比喻：** 餐廳客滿（限流）就帶客人去隔壁分店；客人的儲值卡沒錢了（預算用完），換哪一家都刷不過，就不帶去了，請他先處理儲值。
+
+### 開工前的查證：`openai` 3.19.2 遇到 429 會怎樣（Claude 執行）
+
+在試跑環境用專案鎖定的 SDK，對一個本機假伺服器打 7 種 429，數伺服器實際收到幾次請求。**假伺服器回的內容是 Claude 依官方文件寫的，不是真的 OpenAI 回應。**
+
+| # | 假伺服器回的 429 | 用戶端設定 | 實際請求次數 | 花費時間 |
+|---|---|---|---|---|
+| A | 限流（`rate_limit_exceeded`），沒有 `retry-after` | `max_retries=1` | 2 | 0.51 秒 |
+| B | 限流，`retry-after: 2` | `max_retries=1` | 2 | 2.02 秒 |
+| C | `insufficient_quota` | `max_retries=1` | 2 | 0.41 秒 |
+| D | `project_spend_limit_exceeded` | `max_retries=1` | 2 | 0.43 秒 |
+| E | 限流，`retry-after: 2` | `with_options(max_retries=0)` | 1 | 0.00 秒 |
+| F | 限流，`x-should-retry: false` | `max_retries=1` | 1 | 0.00 秒 |
+| G | 限流，`retry-after: 300` | `max_retries=1` | 1 | 0.00 秒 |
+
+- 兩種 429 丟的都是 `openai.RateLimitError`（`APIStatusError` → `APIError` → `OpenAIError` 的子類別）；`exc.code`、`exc.type` 取自回應內容裡 `error` 那一層；回應不是 JSON 時兩個都是 `None`
+- `exc.response.headers` 拿得到供應商的標頭
+- **SDK 對 429 會重試，連預算用完也照樣重試**（C、D）；`retry-after` 不超過 120 秒就照等（B），超過就不重試（G，SDK 原始碼的 `MAX_RETRY_AFTER_DELAY = 120`）。`timeout=30` 是每一次請求的逾時，**管不到重試前的等待**
+- `client.with_options(max_retries=0)` 交回一條只改了重試次數的新連線，原本那條不變；`create()` 本身沒有 `max_retries` 參數
+- 測試裡造得出同樣的例外：`RateLimitError(訊息, response=httpx2.Response(429, …), body={"code": …, "type": …})`
+
+**官方文件（10/12 以工具讀取）：** 預算類的 429 代碼有 `credit_balance_exhausted`、`project_spend_limit_exceeded`、`organization_spend_limit_exceeded`、`organization_usage_limit_exceeded`；`insufficient_quota` 是可能同時出現的「類型」；限流另有 `slow_down`（類型 `rate_limit_error`），一般的限流沒有列固定代碼。**更正交接檔：** 交接檔寫「預算用完的代碼是 `insufficient_quota`」，依文件它主要是類型。來源：[Error codes](https://developers.openai.com/api/docs/guides/error-codes)、[Troubleshooting 429 errors](https://help.openai.com/en/articles/6614457-troubleshooting-api-rate-limits-and-429-errors)。
+
+### 定案（10/12 09:19 本人決定，三項全數照建議）
+
+| # | 決定 | 定案 | 不選的選項與理由 | 弱點 |
+|---|---|---|---|---|
+| 1 | 兩種 429 怎麼分辨 | **排除法**：代碼是 `insufficient_quota` 或上面四個預算代碼之一、或類型是 `insufficient_quota` → 預算用完；其餘的 429 一律當限流。稽核另記供應商的代碼（`error_code`） | 只認得限流代碼才降級：官方沒有給限流固定代碼，認不得就不降級，備援安靜失效。比對錯誤訊息文字：措辭會改，也可能夾帶帳號資訊（D37） | 之後新增的預算代碼會被當成限流：多打一次便宜模型（會被拒、不花錢），最後回帶 `Retry-After` 的 503，誤導使用者「等一下就好」 |
+| 2 | 兩顆都限流時 `Retry-After` 的值 | **照抄供應商的整數秒**：1～120 照抄；超過 120 回 120；沒有、看不懂、小於 1 回 30。預算用完的 503 不附 | 固定 30 秒：供應商說了要等多久，卻回一個自己編的數字 | 120 是借用 SDK 的界線，不是量出來的；HTTP 日期與 `retry-after-ms` 不解析，一律回 30 |
+| 3 | SDK 重試和降級疊在一起 | **強模型那次 `with_options(max_retries=0)`，便宜模型保留 1 次**：「有備胎的那次不重撥」；最壞從 4 次呼叫降到 3 次 | 維持現狀：最多 4 次，兩顆各可能在 SDK 裡等 120 秒。兩次都不重試：一開始就走便宜模型的請求佔多數，它們遇到連線抖動也失去重試，等於推翻 M1 的設定（D10） | 強模型的 5xx、連線錯誤也不再重試，直接 502；便宜模型那次仍可能在 SDK 裡等最多 120 秒 |
+
+- **定案 2 的修訂：** 開工前寫的是「超出範圍用 30」；第 ② 段交付測試前，Claude 改為「超過 120 回 120」，理由是供應商說 300 秒時，轉告 120 比轉告 30 接近實情；本人沒有反對
+- **做的過程中再定的三件事（Claude 提出，本人照用）：**
+  - 放在新檔 `app/fallback.py`，函式 `chat_with_fallback()`，結果物件 `CallOutcome`
+  - **錯誤以結果交回，不往外丟**：降級過、最後還是失敗的請求，稽核仍要記得「降級過」；例外往外丟，這個資訊會跟著不見
+  - `error_code` 對所有供應商回應的錯誤（`APIError`）都記，不只 429：決策書 8.2 的 M3 列有「記錄原始錯誤碼（如 `model_not_found`）」
+- 兩種 503 對外的訊息相同（`Service temporarily unavailable`），不透露是哪一種；分辨靠稽核的 `error_code`
+
+### 做法：五小段，一段一筆 commit
+
+| 段 | 內容 | 先看到的紅 | 完成後 | commit |
+|---|---|---|---|---|
+| — | 交接檔第 2 節的排版 | — | `170 passed` | `16e50d6` |
+| ① 前半 | `tests/fakes.py` 能依模型丟錯誤、數呼叫、記重試設定；`app/fallback.py` 的 `call_once()`、`chat_with_fallback()` | `1 error during collection`（`No module named 'app.fallback'`） | `183 passed` | `b8b548b` |
+| ① 後半 | 接進 `chat_endpoint`；回傳、稽核的 `model` 與成本改用實際回答的模型 | 本人第一次執行是 `37 failed, 152 passed`（挫折 3，不是預期的紅） | `189 passed` | `bb43a9f` |
+| ② | 兩顆都限流 → 503 附 `Retry-After`；`retry_after_seconds()` | 只寫函式時 `4 failed, 196 passed`（四個 `assert 502 == 503`） | `200 passed` | `4505674` |
+| ③ | 預算用完 → 不降級、503 不附 `Retry-After`；`is_budget_exhausted()` | Claude 試跑：`ImportError`，接著 `3 failed, 207 passed` | `210 passed` | `f64fcde` |
+| ④ | 稽核 `fallback`、`fallback_reason`、`error_code` | Claude 試跑：`5 failed, 213 passed`（`KeyError`） | `218 passed` | `c8e6570` |
+
+### 一個請求現在可能的結局
+
+| 情況 | Gateway 呼叫模型 | 回應 | 稽核 |
+|---|---|---|---|
+| 強模型成功 | 強 1 次（SDK 不重試） | 200，`model` 是強模型 | `ok`、`fallback: false` |
+| 強模型被限流、便宜模型回答 | 強 1、便宜 1 | 200，`model` 是便宜模型，照便宜模型的單價收錢 | `ok`、`fallback: true`、`fallback_reason: RateLimitError`、`routed_model` 強、`model` 便宜 |
+| 兩顆都被限流 | 強 1、便宜 1 | 503，`Retry-After` 照便宜模型那次的標頭 | `error`、`RateLimitError`、`error_code`、`fallback: true` |
+| 供應商預算用完 | 1 次（不降級）；降級後才遇到則 2 次 | 503，不附 `Retry-After` | `error`、`error_code`（例如 `project_spend_limit_exceeded`） |
+| 其他供應商錯誤 | 1 次（強模型不降級） | 502 | `error`、`error_type`、`error_code`（有代碼時） |
+| 路由選便宜模型、被限流 | 便宜 1 | 503，附 `Retry-After` | `error`、`fallback: false` |
+
+- 表中的次數是 Gateway 呼叫 `chat()` 的次數；便宜模型那一次 SDK 保留 1 次重試，所以最壞情況實際送出 3 個 HTTP 請求
+- 被額度擋下（429）、查不到模型設定（500）的請求沒有走到呼叫模型，紀錄裡沒有 `fallback`
+
+### 新觀念
+
+| 觀念 | 白話 | 生活比喻 |
+|---|---|---|
+| `isinstance(東西, 類別)` | 這個東西是不是這一類（子類別也算） | 垃圾分類：寶特瓶也算塑膠類 |
+| `client.with_options(max_retries=0)` | 交回一條只改了這個設定的新連線，原本那條不變 | 影印時只把這一份改成單面，機器的預設沒動 |
+| 錯誤當成結果交回 | 成功、失敗都包成 `CallOutcome` | 外送員送不到時，帶著寫了原因的單子回店裡 |
+| 回應的標頭 | 內容之外的一張張「名字: 值」 | 包裹外面貼的標籤 |
+| `int()` 看不懂時丟 `ValueError` | 種類對（是文字），內容看不懂；`int(None)` 則是 `TypeError` | 照片上的手寫時間看不清楚就不猜 |
+| OpenAI 錯誤的層級 | `OpenAIError` ⊃ `APIError`（才有 `.code`）⊃ `RateLimitError`、`NotFoundError` | 塑膠類 ⊃ 寶特瓶 |
+
+### 本人撰寫（`app/fallback.py`，`c8e6570` 的版本，整份）
+
+```python
+"""Call the model, and fall back to the cheap model when the strong one is rate limited."""
+
+from dataclasses import dataclass
+
+from openai import OpenAIError, RateLimitError
+
+from app.config import GatewayConfig, ModelConfig
+from app.pricing import find_model_config
+from app.providers.openai_client import ChatResult, chat
+
+
+# 呼叫模型的結果：成功或失敗都用這個交回去，稽核才知道最後用的是哪一顆、有沒有降級過
+@dataclass(frozen=True)
+class CallOutcome:
+    """What happened when we called the model."""
+    result: ChatResult | None
+    error: OpenAIError | None
+    model: str
+    settings: ModelConfig
+    fallback: bool
+    fallback_reason: str | None
+
+
+# 呼叫一次模型：成功就帶著回答交回去，OpenAI 出錯就帶著那個錯誤交回去（不往外丟）
+def call_once(client, messages: list[dict], model: str, settings: ModelConfig, fallback: bool, fallback_reason: str | None) -> CallOutcome:
+    """Call the model once and return the answer or the error."""
+    try:
+        result = chat(client, model, messages, settings.reasoning_effort, settings.max_completion_tokens)
+    except OpenAIError as exc:
+        return CallOutcome(
+            result=None,
+            error=exc,
+            model=model,
+            settings=settings,
+            fallback=fallback,
+            fallback_reason=fallback_reason,
+        )
+    return CallOutcome(
+        result=result,
+        error=None,
+        model=model,
+        settings=settings,
+        fallback=fallback,
+        fallback_reason=fallback_reason,
+    )
+
+
+# 供應商「預算用完」的代碼：換成便宜模型刷的還是同一張卡，降級沒用，而且要有人去處理
+BUDGET_ERROR_CODES = [
+    "insufficient_quota",
+    "credit_balance_exhausted",
+    "project_spend_limit_exceeded",
+    "organization_spend_limit_exceeded",
+    "organization_usage_limit_exceeded",
+]
+
+
+# 這個 429 是不是「預算用完」：看代碼，也看類型；兩邊都對不上的，一律當成限流（排除法）
+def is_budget_exhausted(error: RateLimitError) -> bool:
+    """Return True when the 429 means the provider's budget or credit has run out."""
+    if error.code in BUDGET_ERROR_CODES:
+        return True
+    if error.type == "insufficient_quota":
+        return True
+    return False
+
+
+# 強模型被限流就改用便宜模型一次；便宜模型後面沒有備胎，照平常的方式呼叫
+def chat_with_fallback(client, messages: list[dict], model: str, settings: ModelConfig, config: GatewayConfig) -> CallOutcome:
+    """Call the routed model; when the strong model is rate limited, try the cheap model once."""
+    cheap_model = config.routing.cheap_model
+
+    # 路由選的就是便宜模型：沒有備胎，保留 SDK 自己的那一次重試
+    if model == cheap_model:
+        return call_once(client, messages, model, settings, False, None)
+
+    # 強模型後面有備胎：這一次不讓 SDK 重試，被限流就直接換人
+    no_retry_client = client.with_options(max_retries=0)
+    first = call_once(no_retry_client, messages, model, settings, False, None)
+
+    # 成功，或是限流以外的錯誤：都不降級，直接交回去
+    if not isinstance(first.error, RateLimitError):
+        return first
+    # 供應商的預算用完：降級也一樣會被拒，不降級，直接交回去
+    if is_budget_exhausted(first.error):
+        return first
+
+    # 強模型被限流：查到便宜模型自己的設定，用它再呼叫一次
+    cheap_settings = find_model_config(config.models, cheap_model)
+    reason = type(first.error).__name__
+    return call_once(client, messages, cheap_model, cheap_settings, True, reason)
+
+
+# 兩顆都被限流時，告訴使用者大約多久後再試：沒有標頭或看不懂時用這個
+DEFAULT_RETRY_AFTER_SECONDS = 30
+# 供應商說要等再久，最多也只轉告這麼久（和 SDK 自己願意等的上限相同）
+MAX_RETRY_AFTER_SECONDS = 120
+
+
+# 照抄供應商說的等待秒數，但不照單全收：只收整數秒，太大就壓到上限，沒有或看不懂就用預設值
+def retry_after_seconds(error: RateLimitError) -> int:
+    """Return how many seconds the caller should wait, based on the provider's Retry-After header."""
+    value = error.response.headers.get("retry-after")
+    if value is None:
+        return DEFAULT_RETRY_AFTER_SECONDS
+
+    try:
+        seconds = int(value)
+    except ValueError:
+        return DEFAULT_RETRY_AFTER_SECONDS
+
+    if seconds < 1:
+        return DEFAULT_RETRY_AFTER_SECONDS
+    if seconds > MAX_RETRY_AFTER_SECONDS:
+        return MAX_RETRY_AFTER_SECONDS
+    return seconds
+```
+
+**`app/main.py` 的呼叫模型那一段（節錄）：**
+
+```python
+    # 呼叫模型：強模型被限流時改用便宜模型一次；不論成功失敗，都交回一個結果（不往外丟錯誤）
+    outcome = chat_with_fallback(
+        client,
+        [{"role": "user", "content": masked}],
+        decision.model,
+        settings,
+        config,
+    )
+
+    # 稽核：有沒有降級；降級了才記原因（成功、失敗都記，所以寫在判斷成敗之前）
+    record["fallback"] = outcome.fallback
+    if outcome.fallback:
+        record["fallback_reason"] = outcome.fallback_reason
+
+    # 沒拿到回答：記一筆失敗
+    if outcome.error is not None:
+        record["status"] = "error"
+        record["error_type"] = type(outcome.error).__name__
+        # 供應商有回應的錯誤才有代碼（例如 rate_limit_exceeded、project_spend_limit_exceeded）：
+        # 只記這個短代碼、不記錯誤訊息，事後才分得出是哪一種問題
+        if isinstance(outcome.error, APIError):
+            record["error_code"] = outcome.error.code
+        append_audit(record, audit_path)
+        # 供應商回 429（限流或預算用完）：回 503
+        if isinstance(outcome.error, RateLimitError):
+            # 供應商的預算用完：多久會恢復無從得知，要有人處理，所以不附 Retry-After
+            if is_budget_exhausted(outcome.error):
+                raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+            # 限流（降級後的便宜模型，或路由一開始就選便宜模型）：告訴對方大約多久後再試
+            raise HTTPException(
+                status_code=503,
+                detail="Service temporarily unavailable",
+                headers={"Retry-After": str(retry_after_seconds(outcome.error))},
+            )
+        raise HTTPException(status_code=502, detail="Upstream model error")
+
+    # 成功：補上模型和用量，再寫入
+    # model 記實際回答、也拿來計費的那一顆（降級後是便宜模型）；provider_model 記 OpenAI 回報的名稱
+    result = outcome.result
+    record["model"] = outcome.model
+```
+
+算成本那一行改為 `cost_micro_usd(outcome.settings, …)`，回給使用者的 `model` 改為 `outcome.model`；`main.py` 不再直接呼叫 `chat()`，也不再自己接 `OpenAIError`。
+
+- **`append_audit()` 排在兩種 `raise` 之前：** 503 與 502 兩條路都要留稽核，寫在前面只要寫一次
+- **預算用完的判斷排在限流的 `raise` 之前：** `raise` 一執行後面就不跑了，順序反過來的話預算用完永遠輪不到
+- **`record["fallback"]` 寫在判斷成敗之前：** 失敗的紀錄也要看得出降級過
+
+### 測試（Claude 整份提供；測試數 170 → 218）
+
+**`tests/fakes.py`：** 假的模型可以用 `errors` 指定「哪一顆模型丟哪個錯誤」；`models_called()` 依序列出每次請求的模型；`retry_settings` 記下每一次是用哪一種重試設定送出的（`None` 是連線原本的設定，`0` 是這一次不重試）；假連線 `FakeClient` 有和真的一樣只收具名參數的 `with_options()`；`make_rate_limit_error(code, error_type, retry_after)` 造出和 SDK 一樣的 429。既有的 170 個測試換上新的 `fakes.py` 後照樣通過。
+
+**`tests/test_fallback.py`（26 個，直接測函式）：**
+
+| 組 | 測試數 | 檢查 |
+|---|---|---|
+| 路由選便宜模型 | 3 | 只呼叫一次、保留 SDK 重試；被限流時不降級、交回錯誤 |
+| 路由選強模型、正常 | 2 | 只呼叫強模型一次；那一次的重試設定是 0 |
+| 強模型被限流 | 5 | 便宜模型回答；兩顆各呼叫一次、先強後便宜；便宜模型用自己的思考量與輸出上限（測試設定 `none`／100 對 `low`／200）；送出的內容相同；降級那次保留重試 |
+| 其他錯誤 | 3 | 強模型遇到非 429 不降級；兩顆都限流交回便宜模型那個錯誤；降級後便宜模型出別的錯也交回，降級過不能不見 |
+| `retry_after_seconds()` | 7 | 7 → 7；1 → 1；120 → 120；121、86400 → 120；沒有標頭 → 30；0、-5 → 30；`soon`、`1.5`、HTTP 日期 → 30 |
+| `is_budget_exhausted()` | 5 | 五個預算代碼逐一認得；類型 `insufficient_quota` 配沒見過的代碼也算；一般限流、`slow_down`、沒有代碼也沒有類型都不算 |
+| 預算用完不降級 | 1 | 強模型遇到預算用完：交回原錯誤、沒有呼叫便宜模型 |
+
+**`tests/test_chat_fallback.py`（22 個，經過對話入口，沿用 `test_chat_routing.py` 的 `TEST_CONFIG`）：**
+
+| 組 | 測試數 | 檢查 |
+|---|---|---|
+| 接線 | 6 | 強模型那次不重試、便宜模型保留重試；降級後回答與回應的 `model` 是便宜模型；照便宜模型收 7 而不是 136；稽核 `routed_model` 強、`model` 便宜；降級後便宜模型出別的錯回 502、不扣錢 |
+| 兩顆都限流 | 4 | 503、固定訊息、`Retry-After` 照便宜模型那次（強模型給 50、便宜模型給 7，回 7）；沒有標頭時 30；路由選便宜模型被限流也是 503；留稽核、不扣錢 |
+| 預算用完 | 4 | 強模型、便宜模型、降級後才遇到，三種都是 503 且沒有 `Retry-After`；留稽核、不扣錢 |
+| 稽核欄位 | 8 | 正常與降級時的 `fallback`、`fallback_reason`；兩顆都限流、預算用完、404 `model_not_found` 的 `error_code`；`OpenAIError("boom")` 沒有 `error_code`；被額度擋下、查不到模型設定的紀錄沒有 `fallback` |
+
+- 「沒扣錢」「沒呼叫」這類測試都先確認狀態碼與呼叫順序，再檢查沒發生的事（M2 結案報告第 4 節）
+- 404 的假錯誤在測試檔裡用 `httpx2` 與 `NotFoundError` 組出來，`fakes.py` 沒有為它另加道具
+
+### 破壞實驗（本人執行，20 個；每個做完立刻改回；結果與 Claude 事先給的預期全部相同）
+
+| 段 | # | 改了什麼 | 結果 | 失敗訊息 |
+|---|---|---|---|---|
+| ① 前半 | A | 強模型那次不用 `with_options`，直接用原本的連線 | `2 failed, 11 passed` | `assert [None] == [0]`、`assert [None, None] == [0, None]` |
+| ① 前半 | B | 降級那次用強模型的 `settings` | `1 failed, 12 passed` | `assert 'low' == 'none'` |
+| ① 前半 | C | 降級條件從 `RateLimitError` 改成 `OpenAIError` | `1 failed, 12 passed` | `assert None is OpenAIError('boom')` |
+| ① 前半 | D | 降級那次的 `True` 改成 `False` | `3 failed, 10 passed` | 三個都是 `assert False is True` |
+| ① 後半 | A | 算成本用 `settings` | `1 failed, 188 passed` | `assert 136 == 7` |
+| ① 後半 | B | 稽核 `model` 用 `decision.model` | `1 failed, 188 passed` | `assert 'big' == 'small'` |
+| ① 後半 | C | 回傳 `model` 用 `decision.model` | `1 failed, 188 passed` | `assert 'big' == 'small'` |
+| ① 後半 | D | 錯誤分支不寫稽核 | `3 failed, 186 passed` | 三個 `FileNotFoundError`（其中兩個在既有的 `tests/test_chat.py`） |
+| ② | A | 超過上限時回預設值 | `1 failed, 199 passed` | `assert 30 == 120` |
+| ② | B | `except ValueError` 改成 `except TypeError` | `1 failed, 199 passed` | `ValueError: invalid literal for int() with base 10: 'soon'` |
+| ② | C | 拿掉 `headers=` | `3 failed, 197 passed` | 三個 `KeyError: 'retry-after'` |
+| ② | D | 503 那段搬到 `append_audit()` 前面 | `1 failed, 199 passed` | `FileNotFoundError` |
+| ③ | A | 拿掉「預算用完就不降級」 | `3 failed, 207 passed` | 兩個 `assert 200 == 503`、一個 `assert None is RateLimitError('fake 429')` |
+| ③ | B | 拿掉類型的判斷 | `1 failed, 209 passed` | `assert False is True` |
+| ③ | C | 清單的 `project_spend_limit_exceeded` 少打 `ed` | `1 failed, 209 passed` | 訊息直接印出 `project_spend_limit_exceeded` |
+| ③ | D | `main.py` 拿掉預算用完的分支 | `3 failed, 207 passed` | 三個 `assert 'retry-after' not in Headers(...)` |
+| ④ | A | `fallback` 只在成功時記 | `3 failed, 215 passed` | 三個 `KeyError: 'fallback'` |
+| ④ | B | 一律記 `fallback_reason` | `2 failed, 216 passed` | `assert 'fallback_reason' not in {...}` |
+| ④ | C | 代碼只對 `RateLimitError` 記 | `1 failed, 217 passed` | `KeyError: 'error_code'` |
+| ④ | D | 記代碼的兩行搬到 `append_audit()` 後面 | `3 failed, 215 passed` | 三個 `KeyError: 'error_code'` |
+
+**判讀：**
+
+- **① 前半 A：** 強模型被限流時，SDK 會先自己等、再試一次強模型，才輪到降級
+- **① 前半 C：** 任何錯誤都降級時，連線斷掉、模型名稱打錯也會去叫便宜模型，原本該回 502 的問題被蓋掉
+- **① 後半 A：** 便宜模型回答、照強模型的單價收錢（7 變 136），程式不報錯；呼叫的模型和計費的模型要是同一顆（E96 實驗 C 的同一件事）
+- **② D、④ D：** 使用者照樣收到 503，但稽核少了那一筆或少了那一欄，從外面看不出來
+- **③ A：** 預算用完時去叫便宜模型，而便宜模型在假的環境裡剛好沒錯，使用者拿到 200；從外面看起來一切正常，其實供應商帳單已經出問題
+- **③ C：** 代碼打錯一個字不會報錯，那一種預算用完會被當成限流，使用者被告知「30 秒後再試」
+- **④ A：** 降級過、最後還是失敗的請求，稽核裡看不出曾經降級，這正是「錯誤以結果交回」要避免的狀況
+
+**Claude 在試跑環境做過、本人沒有重做的實驗：**
+
+| 改了什麼 | 結果 |
+|---|---|
+| 降級那次又叫一次強模型 | `4 failed`（`AttributeError: 'NoneType' object has no attribute 'text'` 等） |
+| 拿掉「路由選便宜模型就直接呼叫」那一段 | `2 failed`（`assert [0] == [None]` 等：便宜模型被當成有備胎） |
+| `call_once()` 只接 `RateLimitError` | `2 failed` |
+| 降級那次也用不重試的連線 | `1 failed`（`assert [0, 0] == [0, None]`） |
+| `retry_after_seconds()` 的下限寫成 `< 0` | `1 failed`（`assert 0 == 30`） |
+| 下限寫成 `< DEFAULT_RETRY_AFTER_SECONDS` | `4 failed, 196 passed`（7 秒、1 秒都被換成 30） |
+| `is_budget_exhausted()` 最後一行改成 `return True` | `18 failed`（三個「不是預算」的測試，以及所有靠降級的測試） |
+
+### 挫折與說明不清楚的地方
+
+| # | 發生什麼 | 原因 | 之後的做法 |
+|---|---|---|---|
+| 1 | `client.with_options(cheap_model=0)` | 具名參數的「名字」是要改的那個設定（`max_retries`），不是模型名稱的變數。Claude 以這個寫法試跑：`10 failed`，`with_options() got an unexpected keyword argument 'cheap_model'` | 提示寫明 `名字=值` 的名字指的是什麼 |
+| 2 | 最後一行寫成 `return call_once()`，本人表示寫到這裡沒有想法 | 6 個參數各要交什麼、順序為何 | Claude 給完整的一行與逐格對照表。只改第 1 處就跑的話是 `7 failed`，`call_once() missing 6 required positional arguments`，後面依序列出 6 個名字 |
+| 3 | 第一次跑 ① 後半：`37 failed, 152 passed`，全部是 `cost_micro_usd() takes 3 positional arguments but 4 were given` | `outcome.settings`（點，「outcome 的 settings」）寫成 `outcome, settings.max_completion_tokens`（逗號，兩樣東西），多交一格。37 個測試同一個訊息，代表卡在同一行 | Claude 以本人的 `main.py` 重現 37 個紅；只改這一行後 `189 passed`。與 E95 的 `tomllib.loads` 是同一種讀法 |
+| 4 | 第 ② 段本人問了三次：供應商回應裡標頭的名字在哪、第 3 格是什麼意思、下限是不是填 `DEFAULT_RETRY_AFTER_SECONDS` | 提示只寫「那個標頭的名字」，沒說在哪裡看得到；第 3 格的提示引用了 E 編號，違反「用檔名與函式名」的約定；「比較用的界線」和「替換用的值」沒有分開講 | Claude 用「包裹外的標籤」解釋標頭，並指出 `tests/fakes.py` 寫標籤的那一行與 `app/main.py` 回 429 時貼同一張標籤的那一行；`ValueError` 用 `uv run python -c "int('soon')"` 自己驗證；下限填 30 的後果由 Claude 試跑給出（上表） |
+| 5 | 定案 2 的規格中途改了一次（超過 120：用 30 → 回 120） | Claude 開工前的寫法沒有想清楚 | 在交付第 ② 段測試前說明理由並請本人確認 |
+| 6 | Claude 的試跑環境有兩次出現 43 個 `errors`（例如 `127 passed, 43 errors`） | 替身資料庫的伺服器在對話之間停掉，與 repo 無關 | 每次核對前先確認替身伺服器在跑 |
+
+### 限制（誠實記錄）
+
+- **全部是假的模型，沒有遇過真的 429。** 兩種 429 的代碼取自官方文件（10/12 讀）；SDK 的行為是用本機假伺服器量的，回應內容由 Claude 撰寫。真的 OpenAI 回 429 時有沒有 `retry-after`、`x-should-retry`，以及預算用完時實際的代碼與類型，都還沒有驗證
+- **「最壞 3 次 HTTP 請求」是推論：** 假的模型站在 SDK 的重試之上，Gateway 層的測試只驗證「強模型那次用了 `max_retries=0`、便宜模型那次沒有」；SDK 實際送幾次，依據是 SDK 原始碼與上面的假伺服器實測
+- **便宜模型那次仍可能在 SDK 裡等最多 120 秒**（供應商給 `retry-after` 時），加上兩次各 30 秒的逾時，一個請求可能拖到兩分鐘以上。M4 上雲後 ALB 的閒置逾時預設是 60 秒，連線可能先被切斷，而 Gateway 仍在背後呼叫模型、扣錢。M4 前要決定
+- **強模型的 5xx、連線錯誤不再有 SDK 的重試**，直接回 502（定案 3 的代價）
+- **決策書 D32 寫「回 503 並告警」，M3 只有稽核的 `error_code`，沒有告警**
+- **新的預算代碼會被當成限流**（定案 1 的代價）；`Retry-After` 只認整數秒
+- **降級時便宜模型查不到設定沒有處理：** `find_model_config()` 會丟 `ModelNotConfiguredError`，變成框架預設的 500、沒有稽核。正常情況下啟動時已檢查過兩顆模型，走不到
+- `error_code` 可能是 `None`（供應商回應不是 JSON 時），稽核會記成 `null`
+- 兩種 503 對外的訊息相同，只能從稽核分辨（設計如此）
+- **「先看紅」本人只回報了 ② 的 `4 failed, 196 passed`；** ① 前半、③、④ 的先紅只有 Claude 的試跑看過，① 後半本人第一次看到的是挫折 3 的紅。每一段的破壞實驗本人都做了
+- **本人與 Claude 都沒有看過變紅的測試：** `test_cheap_route_calls_the_cheap_model_once`、`test_strong_route_answers_without_fallback`、`test_fallback_sends_the_same_messages`、`test_chat_keeps_the_sdk_retry_for_the_cheap_model`、`test_retry_after_accepts_the_maximum`、`test_retry_after_uses_the_default_without_a_header`、`test_chat_audits_no_code_when_the_error_has_none`、`test_chat_audits_no_fallback_when_the_quota_is_used_up`、`test_chat_audits_no_fallback_when_the_routed_model_has_no_settings`
+- 降級的驗收（S07）還沒有錄影；真實驗收在步驟 9，降級仍會用模擬的方式呈現
+
+### 面試可用的說法
+
+- 「OpenAI 的限流和預算用完都是 429，而且是同一個例外類別。我用錯誤代碼分辨，而且是反過來只認預算的代碼，因為官方沒有給限流固定代碼。認錯的代價是多打一次會被拒的呼叫，不花錢；如果反過來只認限流，認不得的時候備援會安靜失效。」
+- 「動手前我先量了 SDK 遇到 429 的行為：它會照供應商的 retry-after 在請求裡等最多 120 秒，連預算用完也照樣重試，而且我設的 30 秒逾時管不到這段等待。所以強模型那一次我關掉 SDK 的重試，讓降級本身當作重試。」
+- 「降級的函式不往外丟錯誤，而是把結果包起來交回，裡面記著有沒有降級。我做過實驗，把記錄降級的那幾行搬到成功的分支，三個測試馬上紅，因為降級過、最後還是失敗的請求在稽核裡看不出來了。」
+- 「Retry-After 我照抄供應商的值，但不照單全收：只收 1 到 120 秒的整數，其餘用預設值。上游給的資料，對我來說也是不可信的輸入。」
+
+---
+
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `16e50d6` | 10/12 09:39 | `style: tidy blank lines` |
+| `b8b548b` | 10:39 | `feat: add the model call that falls back to the cheap model when rate limited` |
+| `bb43a9f` | 11:05 | `feat: answer from the cheap model when the strong one is rate limited` |
+| `4505674` | 12:16 | `feat: return 503 with Retry-After when both models are rate limited` |
+| `f64fcde` | 14:27 | `feat: do not fall back when the provider budget is exhausted` |
+| `c8e6570` | 16:27 | `feat: audit fallback and the provider error code` |
+
+每一段推送後由 Claude 讀取公開 repo 核對：測試檔與交付的版本相同；`app/fallback.py`、`app/main.py` 與參考寫法只差空行、結尾換行與一行註解（`f64fcde` 的註解錯字於 `c8e6570` 修正）；在試跑環境執行 `c8e6570`：`218 passed`（不需資料庫的 173 個，加上以替身伺服器代替 DynamoDB Local 的 45 個 `integration`）。
+
+---
+
 ## 決策書 v2.9 待改項目
 
 | # | v2.8 的位置 | 要改什麼 |
@@ -992,27 +1372,32 @@ def get_config() -> GatewayConfig:
 | 1 | D34、PART 9「開發機」 | 修訂為：金鑰、`.env` 與真實呼叫只在個人電腦（E94） |
 | 2 | D30、D8、12.5「沒有單價時的錯誤類型…」、D22（repo 結構） | 設定檔定案：TOML，`app/config.toml`，由 `app/config.py` 在啟動時讀取；路由會用到的模型缺設定就拒絕啟動。repo 結構加上 `app/config.toml`、`app/config.py`、`app/router.py`（E94 定案 1、2） |
 | 3 | D8、8.2 的 M3 | 路由函式 `choose_model()`（`app/router.py`）吃遮罩後的文字與路由規則，回傳模型與理由（`length`、`keyword`、`default`）；思考量由模型設定提供。先看字數、再看關鍵字；關鍵字不分大小寫（E94 定案 2、E97） |
-| 4 | D45、D30、2.2 流程圖 [4]、12.5「沒有單價時的錯誤類型…」 | 成本以實際拿到回答的那次請求所指定的名稱查單價；查單價的時機移到呼叫模型之前（E94 定案 3）。實作：`find_model_config()` 在呼叫前查設定，查不到丟 `ModelNotConfiguredError`；`cost_micro_usd()` 改收設定物件；`app/pricing.py` 不再有 `PRICES`；`main.py` 啟動時讀設定檔（E96） |
-| 5 | 3.2 的 `audit` 表、D10、D38 | 稽核新增 `route_reason`、`routed_model`、`provider_model`（E98，已實作）與 `fallback`、`fallback_reason`（步驟 5）；`model` 改為記指定並計費的名稱；回給使用者的 `model` 也改為指定的名稱（E94 定案 3、4；E98） |
+| 4 | D45、D30、2.2 流程圖 [4]、12.5「沒有單價時的錯誤類型…」 | 成本以實際拿到回答的那次請求所指定的名稱查單價；查單價的時機移到呼叫模型之前（E94 定案 3）。實作：`find_model_config()` 在呼叫前查設定，查不到丟 `ModelNotConfiguredError`；`cost_micro_usd()` 改收設定物件；`app/pricing.py` 不再有 `PRICES`；`main.py` 啟動時讀設定檔（E96）。降級後照便宜模型的設定計費（E100） |
+| 5 | 3.2 的 `audit` 表、D10、D38 | 稽核新增 `route_reason`、`routed_model`、`provider_model`（E98）與 `fallback`、`fallback_reason`、`error_code`（E100），皆已實作；`model` 改為記實際回答並計費的名稱（降級後是便宜模型）；回給使用者的 `model` 也是這個名稱（E94 定案 3、4；E98；E100）。`fallback` 只出現在走到呼叫模型的紀錄；`error_code` 只記供應商回應的錯誤（`APIError`）的短代碼，不記訊息 |
 | 6 | 7.10、7.9「預扣」、12.5「預扣」那一列、3.4 | 預扣 M3 不做，留到 M5；M3 新增每顆模型的輸出上限（`max_completion_tokens`），並說明強模型下超扣的幅度（E94 定案 5）；`chat()` 已把上限帶給 OpenAI，數字仍是暫定（E98） |
 | 7 | D30、4.2 應用層、8.2 的 M3 | 補上設定檔的做法：`[routing]` 指名兩顆模型，`[models.名稱]` 放各自的思考量、輸出上限、單價；`load_config()` 讀進來就檢查（路由用到的模型要有設定、數字要是大於 0 的整數、關鍵字不能是空白、不能少欄位），有問題丟 `ConfigError`（E95） |
 | 8 | 11.5 截圖規範（推送前的檢查） | 新增：簡報開著時會產生 `~$` 開頭的鎖定檔，已列入 `.gitignore`；推送前照檔名逐一加入，不用 `git add .`（E95） |
 | 9 | 12.5「沒有單價時的錯誤類型與對使用者的回應」、2.2 的回應對照表、D37 | 查不到模型設定時：回 500 `Internal server error`，稽核記 `status: error` 與 `error_type: ModelNotConfiguredError`，不呼叫模型、不扣錢；12.5 該列劃掉（E97 定案 1；E98 已實作） |
 | 10 | 2.2 流程圖 [4] 與「M2 實作後的順序」、4.2 應用層、D22（repo 結構） | 補上步驟 4 之後的順序：加 0 → 選模型並記理由 → 查模型設定（500）→ 呼叫模型（帶思考量與輸出上限）；設定是領用窗口 `get_config()`；repo 結構加上 `tests/test_chat_routing.py`（E98） |
 | 11 | PART 11（11.1 簡報結構、11.6 版號）、8.3 第 7 項 | 簡報 v1.2 的頁序：封面 → 一頁講完 → 想解決的問題 → 解決前後 → 解法提綱 → 技術實踐 → 技術細節 20 頁 → 附錄；影片分鏡的記號只留在附錄；狀態標籤改用讀者看得懂的字。旁白稿 v1.2 補上新增兩頁的旁白與「示範畫面怎麼接」（片段對照表）；11.1 的時間預算改為主影片旁白約 4.3 分鐘（E99） |
+| 12 | D10、D32、2.2 的回應對照表、PART 9「供應商 429」、8.2 的 M3 | 降級的實作定案（E100）：強模型被限流 → 便宜模型一次；兩顆都被限流 → 503 附 `Retry-After`（照抄供應商 1～120 的整數秒、超過回 120、其餘 30）；供應商預算用完 → 不降級、503 不附 `Retry-After`；其他供應商錯誤 → 502；兩種 503 的訊息相同。兩種 429 用排除法分辨：代碼是 `insufficient_quota`、`credit_balance_exhausted`、`project_spend_limit_exceeded`、`organization_spend_limit_exceeded`、`organization_usage_limit_exceeded` 之一，或類型是 `insufficient_quota` → 預算用完，其餘當限流。`app/fallback.py` 的 `chat_with_fallback()` 不論成敗都以 `CallOutcome` 交回，不往外丟錯誤 |
+| 13 | D10、3.4（SDK 重試與逾時） | 強模型那次 `with_options(max_retries=0)`，便宜模型保留 SDK 的 1 次重試；最壞從 4 次 HTTP 請求降為 3 次。補上 SDK 的實測（假伺服器）：對 429 會重試，連預算用完也重試；照 `retry-after` 等，最多 120 秒；每次 30 秒的逾時不含重試前的等待（E100） |
+| 14 | 12.5（新增兩列） | ① 便宜模型那次 SDK 可能等最多 120 秒、加上兩次各 30 秒的逾時，與 ALB 預設 60 秒閒置逾時的衝突：M4 前決定（關掉便宜模型的重試，或調整 ALB 逾時）。② D32 的「告警」：M3 只有稽核的 `error_code`，告警機制在 M4～M6 決定（E100） |
+| 15 | D22（repo 結構） | `app/` 加上 `fallback.py`（降級、兩種 429 的分辨、`Retry-After`）；`tests/` 加上 `test_fallback.py`、`test_chat_fallback.py`（E100） |
 
 ---
 
 ## 目前進度（2026-10-12）
 
-- 交接檔第 2 節的事項已回覆（E94）
+- 交接檔第 2 節的事項已回覆（E94、E100）
 - M3 開工前五項定案 ✅（E94）
 - 步驟 1（設定檔、讀取與檢查）✅（E95，已推送 `7cb56ed`）
 - 步驟 2（單價改讀設定檔、加入 `gpt-6-sol`、查設定移到呼叫模型之前）✅（E96，已推送 `8907063`）
 - 步驟 3（路由函式 `choose_model()`）✅（E97，已推送 `81a87c2`）
-- **步驟 4（路由接進對話入口：領用窗口、500、輸出上限、兩個模型名稱）✅（E98，已推送 `fda869a`）；目前 `170 passed`（其中 45 個是 `integration`）**
+- 步驟 4（路由接進對話入口：領用窗口、500、輸出上限、兩個模型名稱）✅（E98，已推送 `fda869a`）
 - 簡報 v1.2（照老師建議的結構重排，34 頁）與旁白稿 v1.2 ✅（E99）
-- 下一步：步驟 5（降級：強模型被限流 → 便宜模型一次；便宜模型也限流 → 503 並附 `Retry-After`；供應商預算用完 → 不降級、503）
+- **步驟 5（降級：限流降級一次、兩顆都限流回 503 附 `Retry-After`、預算用完不降級、稽核 `fallback`／`fallback_reason`／`error_code`）✅（E100，已推送 `c8e6570`）；目前 `218 passed`（其中 45 個是 `integration`）**
+- 下一步：步驟 6（`gpt-6-sol` 的一次真實回應：思考 token 是否算在輸出 token 裡、輸出上限的數字；**要金鑰，只在個人電腦做**）
 
 ---
 
@@ -1021,13 +1406,18 @@ def get_config() -> GatewayConfig:
 | 項目 | 目前的建議 | 何時定 |
 |---|---|---|
 | ~~查不到模型設定時對使用者的回應（決策書 12.5、E87、E96）~~ | ✅ 10/10 定案：回 500、固定訊息、寫稽核（E97）；步驟 4 實作 | — |
+| ~~兩種 429 怎麼分辨；兩顆都限流時 `Retry-After` 的值；SDK 重試與降級的疊加~~ | ✅ 10/12 定案並實作（E100） | — |
 | 輸出上限的數字 | 暫定 `gpt-6-luna` 1,000、`gpt-6-sol` 2,000；用真實回應試過再調 | 步驟 6 |
 | 輸出 token 數是否已包含思考 token（E87） | 用 `gpt-6-sol` 的一次真實回應實證 | 步驟 6 |
-| 兩種 429 怎麼分辨；兩顆都限流時 `Retry-After` 的值；SDK 重試與降級的疊加 | 做到時先看 SDK 實際丟出的錯誤再定 | 步驟 5 |
 | 路由門檻的數字（300 字、關鍵字清單）與中英文字數的算法（決策書 12.5） | 用 20 題測試集調整；規則的形式不變 | 步驟 7 |
 | CI 怎麼跑 `integration` 測試；`protect-main` 加「CI 通過才能合併」；CodeQL（E89、M1 報告） | 預設在 CI 起 `dynamodb-test` 容器 | 步驟 8 |
+| 降級（S07）的驗收怎麼呈現（E100） | 真的限流做不出來，用假的模型模擬；畫面上是否標「模擬」，參考和老師討論的結果 | 步驟 9 |
+| 降級時便宜模型查不到設定（E100） | 正常走不到（啟動時已檢查）；要處理的話與 500 那條路合併，留稽核 | M3 結案時決定 |
+| SDK 在便宜模型那次的等待與 ALB 閒置逾時（E100） | 評估關掉便宜模型那次的 SDK 重試，或調整 ALB 逾時；上雲後量一次 | M4 前 |
+| 供應商預算用完的告警（D32、E100） | M3 只記稽核的 `error_code`；告警的做法另定 | M4～M6 |
 | 預扣（7.10） | M3 不做（E94 定案 5） | M5 |
 | M7 是否開工（E79） | 第一個時段的條件：M3 與 CI 在 10/16（五）前完成 | 10/16、10/30、11/1 |
+| 和老師討論示範影片的結果（E100） | 10/12 晚上；結論改到頁序或片段時，改旁白稿與簡報並記進證據 | 10/12 之後 |
 | 簡報計時試講（E84） | 素材到齊前至少試講一次主影片 | 10/18 前 |
 | 主影片超過 6 分鐘時先拿掉什麼（E99） | 旁白稿內的建議順序：主影片的 S03 → 解決前後的旁白 → 現成方案拆解的第一個發現縮成一句 | 計時試講後 |
 | 從 M2 帶過來、M4 前要定的項目（稽核搬進 `audit` 表、`compose.yaml` 加 Gateway、`app/db.py` 連真的 AWS、強一致讀取、停用 Key 的腳本、`/docs` 是否關閉、`m1-gateway` 金鑰 11/2 到期） | 見 `m2-evidence-log.md` 的待決表與決策書 12.5 | M4 前 |
