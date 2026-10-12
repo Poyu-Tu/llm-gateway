@@ -1,0 +1,186 @@
+"""Tests for chat_with_fallback(): which model is called, how many times, and what comes back."""
+
+from openai import OpenAIError
+
+from app.config import GatewayConfig, ModelConfig, RoutingConfig
+from app.fallback import chat_with_fallback
+from tests.fakes import make_fake_client, make_rate_limit_error
+
+# 測試用的設定：兩顆模型的思考量和輸出上限都不同，降級後拿錯設定才看得出來
+CONFIG = GatewayConfig(
+    routing=RoutingConfig(cheap_model="small", strong_model="big", min_chars=18, keywords=["debug"]),
+    models={
+        "small": ModelConfig(reasoning_effort="none", max_completion_tokens=100, input_price=100_000, output_price=500_000),
+        "big": ModelConfig(reasoning_effort="low", max_completion_tokens=200, input_price=2_000_000, output_price=10_000_000),
+    },
+)
+
+MESSAGES = [{"role": "user", "content": "hello"}]
+
+
+# 照路由的結果呼叫：model 是路由選的那一顆，設定也是那一顆自己的
+def call(client, model):
+    """Call chat_with_fallback the way the chat endpoint will."""
+    return chat_with_fallback(client, MESSAGES, model, CONFIG.models[model], CONFIG)
+
+
+# 路由選便宜模型、一切正常：只呼叫一次，沒有降級
+def test_cheap_route_calls_the_cheap_model_once():
+    client, completions = make_fake_client()
+
+    outcome = call(client, "small")
+
+    assert outcome.result.text == "Hi there"
+    assert outcome.error is None
+    assert outcome.model == "small"
+    assert outcome.settings == CONFIG.models["small"]
+    assert outcome.fallback is False
+    assert outcome.fallback_reason is None
+    assert completions.models_called() == ["small"]
+
+
+# 便宜模型後面沒有備胎：保留 SDK 自己的那一次重試（用連線原本的設定）
+def test_cheap_route_keeps_the_sdk_retry():
+    client, completions = make_fake_client()
+
+    call(client, "small")
+
+    assert completions.retry_settings == [None]
+
+
+# 路由選強模型、一切正常：只呼叫強模型一次，沒有降級
+def test_strong_route_answers_without_fallback():
+    client, completions = make_fake_client()
+
+    outcome = call(client, "big")
+
+    assert outcome.result.text == "Hi there"
+    assert outcome.error is None
+    assert outcome.model == "big"
+    assert outcome.settings == CONFIG.models["big"]
+    assert outcome.fallback is False
+    assert outcome.fallback_reason is None
+    assert completions.models_called() == ["big"]
+
+
+# 強模型後面有備胎：這一次不讓 SDK 重試
+def test_strong_route_turns_off_the_sdk_retry():
+    client, completions = make_fake_client()
+
+    call(client, "big")
+
+    assert completions.retry_settings == [0]
+
+
+# S07 的核心：強模型被限流，改由便宜模型回答，並記下降級過與原因
+def test_rate_limited_strong_model_falls_back_to_the_cheap_model():
+    client, completions = make_fake_client(errors={"big": make_rate_limit_error()})
+
+    outcome = call(client, "big")
+
+    assert outcome.result.text == "Hi there"
+    assert outcome.error is None
+    assert outcome.model == "small"
+    assert outcome.fallback is True
+    assert outcome.fallback_reason == "RateLimitError"
+
+
+# 降級時兩顆各呼叫一次，先強後便宜；不會重複呼叫
+def test_fallback_calls_each_model_exactly_once():
+    client, completions = make_fake_client(errors={"big": make_rate_limit_error()})
+
+    call(client, "big")
+
+    assert completions.models_called() == ["big", "small"]
+
+
+# 降級後用的是便宜模型自己的設定：思考量、輸出上限，以及交回去給算成本用的那一份
+def test_fallback_uses_the_settings_of_the_cheap_model():
+    client, completions = make_fake_client(errors={"big": make_rate_limit_error()})
+
+    outcome = call(client, "big")
+
+    assert completions.requests[0]["reasoning_effort"] == "low"
+    assert completions.requests[0]["max_completion_tokens"] == 200
+    assert completions.requests[1]["reasoning_effort"] == "none"
+    assert completions.requests[1]["max_completion_tokens"] == 100
+    assert outcome.settings == CONFIG.models["small"]
+
+
+# 降級後送給便宜模型的內容和原本的一樣
+def test_fallback_sends_the_same_messages():
+    client, completions = make_fake_client(errors={"big": make_rate_limit_error()})
+
+    call(client, "big")
+
+    assert completions.requests[0]["messages"] == MESSAGES
+    assert completions.requests[1]["messages"] == MESSAGES
+
+
+# 強模型那一次不重試；降級後的便宜模型沒有備胎了，保留 SDK 的重試
+def test_fallback_call_keeps_the_sdk_retry():
+    client, completions = make_fake_client(errors={"big": make_rate_limit_error()})
+
+    call(client, "big")
+
+    assert completions.retry_settings == [0, None]
+
+
+# 限流以外的錯誤不降級：把那個錯誤交回去，便宜模型沒有被呼叫
+def test_other_error_on_the_strong_model_does_not_fall_back():
+    boom = OpenAIError("boom")
+    client, completions = make_fake_client(errors={"big": boom})
+
+    outcome = call(client, "big")
+
+    assert outcome.error is boom
+    assert outcome.result is None
+    assert outcome.model == "big"
+    assert outcome.fallback is False
+    assert outcome.fallback_reason is None
+    assert completions.models_called() == ["big"]
+
+
+# 兩顆都被限流：交回便宜模型的那個錯誤，並記下降級過；總共只呼叫兩次
+def test_both_models_rate_limited_returns_the_error_of_the_cheap_model():
+    strong_error = make_rate_limit_error()
+    cheap_error = make_rate_limit_error(retry_after=7)
+    client, completions = make_fake_client(errors={"big": strong_error, "small": cheap_error})
+
+    outcome = call(client, "big")
+
+    assert outcome.error is cheap_error
+    assert outcome.result is None
+    assert outcome.model == "small"
+    assert outcome.fallback is True
+    assert outcome.fallback_reason == "RateLimitError"
+    assert completions.models_called() == ["big", "small"]
+
+
+# 降級後便宜模型出了別的錯：一樣交回那個錯誤，降級過這件事不能不見
+def test_other_error_after_fallback_is_returned():
+    boom = OpenAIError("boom")
+    client, completions = make_fake_client(errors={"big": make_rate_limit_error(), "small": boom})
+
+    outcome = call(client, "big")
+
+    assert outcome.error is boom
+    assert outcome.result is None
+    assert outcome.model == "small"
+    assert outcome.fallback is True
+    assert completions.models_called() == ["big", "small"]
+
+
+# 路由一開始就選便宜模型、它被限流：沒有備胎可換，交回錯誤，只呼叫一次
+def test_rate_limited_cheap_route_does_not_fall_back():
+    cheap_error = make_rate_limit_error()
+    client, completions = make_fake_client(errors={"small": cheap_error})
+
+    outcome = call(client, "small")
+
+    assert outcome.error is cheap_error
+    assert outcome.result is None
+    assert outcome.model == "small"
+    assert outcome.fallback is False
+    assert outcome.fallback_reason is None
+    assert completions.models_called() == ["small"]
