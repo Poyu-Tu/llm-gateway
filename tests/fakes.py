@@ -9,10 +9,11 @@ from openai import RateLimitError
 # 假的 OpenAI：把收到的請求記下來，再回傳假的回應
 # 回報的模型名稱預設就是請求指定的那一顆；要模擬「回報的名稱和指定的不同」時才另外給 reported_model
 # error：每一顆模型都丟這個錯誤；errors：指定「哪一顆模型丟哪個錯誤」，沒列到的模型正常回答
+# finish_reason：回答的結束原因；要模擬「被輸出上限截斷」時給 "length"
 class FakeCompletions:
     """Stands in for client.chat.completions and records the requests."""
 
-    def __init__(self, content="Hi there", has_details=True, error=None, reported_model=None, errors=None):
+    def __init__(self, content="Hi there", has_details=True, error=None, reported_model=None, errors=None, finish_reason="stop"):
         self.last_request = None
         self.requests = []
         # 每一次請求是用哪一種重試設定送出的：None 是連線原本的設定，0 是「這一次不重試」
@@ -24,6 +25,7 @@ class FakeCompletions:
         if errors is None:
             errors = {}
         self.errors = errors
+        self.finish_reason = finish_reason
 
     def create(self, **kwargs):
         return self.answer(kwargs, None)
@@ -43,7 +45,7 @@ class FakeCompletions:
             details = None
         return SimpleNamespace(
             model=self.reported_model or kwargs["model"],
-            choices=[SimpleNamespace(message=SimpleNamespace(content=self.content))],
+            choices=[SimpleNamespace(message=SimpleNamespace(content=self.content), finish_reason=self.finish_reason)],
             usage=SimpleNamespace(
                 prompt_tokens=13,
                 completion_tokens=11,
@@ -87,9 +89,9 @@ class FakeClient:
 
 
 # 建立假連線；同時回傳「連線」和「筆記本」，讓測試能檢查送出了什麼
-def make_fake_client(content="Hi there", has_details=True, error=None, reported_model=None, errors=None):
+def make_fake_client(content="Hi there", has_details=True, error=None, reported_model=None, errors=None, finish_reason="stop"):
     """Return the fake client and its completions, so tests can check the request."""
-    completions = FakeCompletions(content, has_details, error, reported_model, errors)
+    completions = FakeCompletions(content, has_details, error, reported_model, errors, finish_reason)
     client = FakeClient(completions)
     return client, completions
 

@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 
-# 一次對話的結果：只留我們需要的 5 個欄位
+# 一次對話的結果：只留我們需要的 6 個欄位
 @dataclass(frozen=True)
 class ChatResult:
     """The fields we need from one chat call."""
@@ -12,6 +12,8 @@ class ChatResult:
     input_tokens: int
     output_tokens: int
     reasoning_tokens: int
+    # 結束原因："stop" 是正常說完，"length" 是被輸出上限截斷
+    finish_reason: str | None
 
 
 # 呼叫 OpenAI，把回應轉成我們自己的格式；client 由外面傳入，方便測試
@@ -38,4 +40,5 @@ def chat(client, model: str, messages: list[dict], reasoning_effort: str, max_co
         input_tokens=response.usage.prompt_tokens,
         output_tokens=response.usage.completion_tokens,
         reasoning_tokens=reasoning_tokens,
+        finish_reason=response.choices[0].finish_reason,
     )

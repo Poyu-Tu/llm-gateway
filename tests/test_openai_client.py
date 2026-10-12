@@ -4,7 +4,7 @@ from app.providers.openai_client import ChatResult, chat
 from tests.fakes import make_fake_client
 
 
-# 回應的 5 個欄位要正確裝進 ChatResult
+# 回應的 6 個欄位要正確裝進 ChatResult
 def test_chat_maps_response_fields():
     client, _ = make_fake_client()
 
@@ -16,6 +16,7 @@ def test_chat_maps_response_fields():
         input_tokens=13,
         output_tokens=11,
         reasoning_tokens=0,
+        finish_reason="stop",
     )
 
 
@@ -55,3 +56,13 @@ def test_chat_counts_zero_reasoning_tokens_without_details():
     result = chat(client, "gpt-6-luna", [{"role": "user", "content": "Say hi"}], "none", 500)
 
     assert result.reasoning_tokens == 0
+
+
+# 結束原因要照實帶回來：被輸出上限截斷時是 "length"（10/12 實測：強模型被截斷時回答可能整個是空的）
+def test_chat_returns_the_finish_reason():
+    client, _ = make_fake_client(content="", finish_reason="length")
+
+    result = chat(client, "gpt-6-sol", [{"role": "user", "content": "Say hi"}], "low", 16)
+
+    assert result.finish_reason == "length"
+    assert result.text == ""

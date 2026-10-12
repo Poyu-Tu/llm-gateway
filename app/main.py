@@ -224,6 +224,8 @@ def chat_endpoint(
     record["input_tokens"] = result.input_tokens
     record["output_tokens"] = result.output_tokens
     record["reasoning_tokens"] = result.reasoning_tokens
+    # 結束原因：被輸出上限截斷（length）時，回答可能只有一半甚至是空的，但照樣計費
+    record["finish_reason"] = result.finish_reason
     record["status"] = "ok"
 
     # 把這次的成本加到當月已用量；這時模型已經回答了，扣失敗也照樣把回答交出去，並記下沒扣到
