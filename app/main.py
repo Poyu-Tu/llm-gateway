@@ -8,7 +8,7 @@ from pathlib import Path
 from botocore.client import BaseClient
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, FastAPI, Header, HTTPException
-from openai import OpenAI, RateLimitError
+from openai import APIError, OpenAI, RateLimitError
 from pydantic import BaseModel, Field
 
 from app.audit import append_audit, hash_prompt, make_summary, mask, detect_pii_types
@@ -189,14 +189,23 @@ def chat_endpoint(
         config,
     )
 
+    # 稽核：有沒有降級；降級了才記原因（成功、失敗都記，所以寫在判斷成敗之前）
+    record["fallback"] = outcome.fallback
+    if outcome.fallback:
+        record["fallback_reason"] = outcome.fallback_reason
+
     # 沒拿到回答：記一筆失敗
     if outcome.error is not None:
         record["status"] = "error"
         record["error_type"] = type(outcome.error).__name__
+        # 供應商有回應的錯誤才有代碼（例如 rate_limit_exceeded、project_spend_limit_exceeded）：
+        # 只記這個短代碼、不記錯誤訊息，事後才分得出是哪一種問題
+        if isinstance(outcome.error, APIError):
+            record["error_code"] = outcome.error.code
         append_audit(record, audit_path)
         # 供應商回 429（限流或預算用完）：回 503
         if isinstance(outcome.error, RateLimitError):
-            # 供應商的預算用完：多久會恢復無從得知，要有人處理，所以不付 Retry-After
+            # 供應商的預算用完：多久會恢復無從得知，要有人處理，所以不附 Retry-After
             if is_budget_exhausted(outcome.error):
                 raise HTTPException(status_code=503, detail="Service temporarily unavailable")
             # 限流（降級後的便宜模型，或路由一開始就選便宜模型）：告訴對方大約多久後再試

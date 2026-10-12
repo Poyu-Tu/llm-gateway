@@ -1,13 +1,14 @@
 """Tests for fallback on POST /v1/chat: what the caller gets, what is charged, and what the audit log says."""
 
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
-from openai import OpenAIError
+from openai import NotFoundError, OpenAIError
 
 from app.main import app as gateway
 from app.main import get_audit_path, get_client, get_config, get_dynamodb, get_hmac_key, get_quota, get_user_id
 from tests.fakes import FakeDynamoDB, make_fake_client, make_rate_limit_error
-from tests.test_chat_routing import TEST_CONFIG, read_audit
+from tests.test_chat_routing import BROKEN_CONFIG, TEST_CONFIG, read_audit
 
 # 含關鍵字 debug、又不到 18 個字：路由一定選強模型 big
 STRONG_MESSAGE = "Please debug it"
@@ -224,3 +225,113 @@ def test_chat_audits_and_spends_nothing_when_the_provider_budget_is_exhausted(tm
     assert record["status"] == "error"
     assert record["error_type"] == "RateLimitError"
     assert charged_amounts(database) == ["0"]
+
+
+# ---------- 稽核欄位：fallback、fallback_reason、error_code ----------
+
+
+# 供應商說「沒有這顆模型」（404，代碼 model_not_found）：E22 看過的那種設定錯誤
+def make_model_not_found_error():
+    """Return the error the OpenAI SDK raises when the model does not exist."""
+    request = httpx2.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx2.Response(404, request=request)
+    return NotFoundError("fake 404", response=response, body={"code": "model_not_found", "type": "invalid_request_error"})
+
+
+# 沒降級的成功紀錄：fallback 是 false，沒有 fallback_reason 這一欄
+def test_chat_audits_no_fallback_on_a_normal_answer(tmp_path):
+    client, _, audit_path, _ = make_fallback_test_client(tmp_path)
+
+    response = client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    assert response.status_code == 200
+    record = read_audit(audit_path)
+    assert record["fallback"] is False
+    assert "fallback_reason" not in record
+
+
+# 降級後成功的紀錄：fallback 是 true，原因是錯誤的類別名稱
+def test_chat_audits_the_fallback_and_its_reason(tmp_path):
+    client, _, audit_path, _ = make_fallback_test_client(tmp_path, errors={"big": make_rate_limit_error()})
+
+    response = client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    assert response.status_code == 200
+    record = read_audit(audit_path)
+    assert record["fallback"] is True
+    assert record["fallback_reason"] == "RateLimitError"
+
+
+# 兩顆都被限流：失敗的紀錄也要看得出降級過，並記下供應商的代碼
+def test_chat_audits_fallback_and_code_when_both_models_are_rate_limited(tmp_path):
+    errors = {"big": make_rate_limit_error(), "small": make_rate_limit_error()}
+    client, _, audit_path, _ = make_fallback_test_client(tmp_path, errors=errors)
+
+    response = client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    assert response.status_code == 503
+    record = read_audit(audit_path)
+    assert record["fallback"] is True
+    assert record["fallback_reason"] == "RateLimitError"
+    assert record["error_code"] == "rate_limit_exceeded"
+
+
+# 預算用完：沒降級，代碼記下來，事後分得出這不是限流
+def test_chat_audits_the_budget_code_without_fallback(tmp_path):
+    client, _, audit_path, _ = make_fallback_test_client(tmp_path, errors={"big": make_budget_error()})
+
+    response = client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    assert response.status_code == 503
+    record = read_audit(audit_path)
+    assert record["fallback"] is False
+    assert "fallback_reason" not in record
+    assert record["error_code"] == "project_spend_limit_exceeded"
+
+
+# 不是 429 的供應商錯誤也記代碼：模型名稱打錯時，從稽核就看得出是 model_not_found
+def test_chat_audits_the_code_of_other_provider_errors(tmp_path):
+    client, _, audit_path, _ = make_fallback_test_client(tmp_path, errors={"big": make_model_not_found_error()})
+
+    response = client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    assert response.status_code == 502
+    record = read_audit(audit_path)
+    assert record["error_type"] == "NotFoundError"
+    assert record["error_code"] == "model_not_found"
+    assert record["fallback"] is False
+
+
+# 沒有代碼的錯誤（不是供應商回應的錯誤）：不留 error_code 這一欄
+def test_chat_audits_no_code_when_the_error_has_none(tmp_path):
+    client, _, audit_path, _ = make_fallback_test_client(tmp_path, errors={"big": OpenAIError("boom")})
+
+    response = client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    assert response.status_code == 502
+    assert "error_code" not in read_audit(audit_path)
+
+
+# 被額度擋下的請求沒有走到呼叫模型，紀錄裡沒有 fallback
+def test_chat_audits_no_fallback_when_the_quota_is_used_up(tmp_path):
+    client, completions, audit_path, _ = make_fallback_test_client(tmp_path)
+    gateway.dependency_overrides[get_quota] = lambda: (100, 100)
+
+    response = client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    # 先確認請求真的是被額度擋下的
+    assert response.status_code == 429
+    assert completions.models_called() == []
+    assert "fallback" not in read_audit(audit_path)
+
+
+# 路由選到的模型查不到設定（500）：同樣沒有走到呼叫模型，紀錄裡沒有 fallback
+def test_chat_audits_no_fallback_when_the_routed_model_has_no_settings(tmp_path):
+    client, completions, audit_path, _ = make_fallback_test_client(tmp_path)
+    gateway.dependency_overrides[get_config] = lambda: BROKEN_CONFIG
+
+    response = client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    assert response.status_code == 500
+    assert completions.models_called() == []
+    assert "fallback" not in read_audit(audit_path)
