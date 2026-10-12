@@ -1,0 +1,32 @@
+# M3 步驟 6：兩顆模型的真實回應用量（2026-10-12 19:42，Windows PowerShell）
+# 工具：scripts/probe_usage.py（不讓 SDK 重試；不印金鑰與請求編號）；金鑰以 uv run --env-file .env 載入，未出現在指令列
+# 第 1、3 次用設定檔的輸出上限（gpt-6-sol 2,000、gpt-6-luna 1,000）；第 2、4 次故意把上限壓到 16
+# 成本以 app/pricing.py 的 cost_micro_usd() 計算（gpt-6-sol 每 token 輸入 2、輸出 10 micro-USD；gpt-6-luna 0.1、0.5）
+
+(llm-gateway) PS C:\Users\<user>\llm-gateway> uv run --env-file .env python -m scripts.probe_usage
+[1] gpt-6-sol | 思考 low | 上限 2000
+    回報的模型: gpt-6-sol
+    finish_reason: stop
+    prompt_tokens: 24 | completion_tokens: 229 | reasoning_tokens: 0
+    看得到的回答: 306 字 | 開頭: | 特性 | TCP | UDP | |---|---|---| | 連線方式 
+    依我們的單價: 2338 micro-USD
+[2] gpt-6-sol | 思考 low | 上限 16
+    回報的模型: gpt-6-sol
+    finish_reason: length
+    prompt_tokens: 24 | completion_tokens: 16 | reasoning_tokens: 16
+    看得到的回答: 0 字 | 開頭: 
+    依我們的單價: 208 micro-USD
+[3] gpt-6-luna | 思考 none | 上限 1000
+    回報的模型: gpt-6-luna
+    finish_reason: stop
+    prompt_tokens: 22 | completion_tokens: 103 | reasoning_tokens: 0
+    看得到的回答: 100 字 | 開頭: 台灣夜市是熱鬧又充滿人情味的生活風景，從傍晚開始聚集攤販與人潮。遊客可以品嚐蚵仔
+    依我們的單價: 54 micro-USD
+[4] gpt-6-luna | 思考 none | 上限 16
+    回報的模型: gpt-6-luna
+    finish_reason: length
+    prompt_tokens: 22 | completion_tokens: 16 | reasoning_tokens: 0
+    看得到的回答: 15 字 | 開頭: 台灣夜市是融合美食、購物與娛樂
+    依我們的單價: 11 micro-USD
+合計: 2611 micro-USD
+(llm-gateway) PS C:\Users\<user>\llm-gateway>
