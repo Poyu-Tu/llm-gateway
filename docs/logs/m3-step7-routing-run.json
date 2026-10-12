@@ -1,0 +1,578 @@
+{
+  "settings": {
+    "gpt-6-luna": {
+      "reasoning_effort": "none",
+      "max_completion_tokens": 1000,
+      "input_price": 100000,
+      "output_price": 500000
+    },
+    "gpt-6-sol": {
+      "reasoning_effort": "low",
+      "max_completion_tokens": 2000,
+      "input_price": 2000000,
+      "output_price": 10000000
+    }
+  },
+  "questions": [
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 24,
+          "output_tokens": 17,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 11,
+          "text": "The meeting has been postponed until 2 p.m. next Wednesday."
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 24,
+          "output_tokens": 17,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 218,
+          "text": "The meeting has been postponed until next Wednesday at 2 p.m."
+        }
+      },
+      "id": "s01",
+      "expected": "cheap",
+      "masked": "請把「會議延到下週三下午兩點」翻成英文。",
+      "chars": 20,
+      "routed_model": "gpt-6-luna",
+      "route_reason": "default"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 32,
+          "output_tokens": 38,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 23,
+          "text": "可以改成：「想請問報表目前的進度如何呢？我們尚未收到，方便請您確認預計何時提供嗎？謝謝。」"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 32,
+          "output_tokens": 41,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 474,
+          "text": "可以改成：\n\n「您好，想請問報表目前的進度如何？我們尚未收到，煩請您方便時協助確認並提供，謝謝。」"
+        }
+      },
+      "id": "s02",
+      "expected": "cheap",
+      "masked": "幫我把這句話改得比較有禮貌：「你們的報表又遲交了。」",
+      "chars": 26,
+      "routed_model": "gpt-6-sol",
+      "route_reason": "keyword"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 23,
+          "output_tokens": 147,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 76,
+          "text": "假設文字在 **A 欄**和 **B 欄**，可以在 C2 輸入公式，再往下填滿：\n\n- 直接合併、不加空格：`=A2&B2`\n- 中間加空格：`=A2&\" \"&B2`\n- 中間加逗號：`=A2&\", \"&B2`\n\n也可以用 `TEXTJOIN`，例如用空格分隔：`=TEXTJOIN(\" \",TRUE,A2,B2)`。\n\n如果想把公式結果變成固定文字：複製結果欄，然後選「選擇性貼上」→「值」。"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 23,
+          "output_tokens": 120,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 1246,
+          "text": "假設文字在 **A 欄**和 **B 欄**，在 C2 輸入：\n\n```excel\n=A2&B2\n```\n\n如果中間想加空格，改用：\n\n```excel\n=A2&\" \"&B2\n```\n\n按 Enter 後，把 C2 右下角的小方塊往下拖，就能套用到其他列。\n\n如果想把結果變成固定文字：複製 C 欄 → 右鍵 → **選擇性貼上** → **值**。"
+        }
+      },
+      "id": "s03",
+      "expected": "cheap",
+      "masked": "Excel 要怎麼把兩欄文字合併成一欄？",
+      "chars": 20,
+      "routed_model": "gpt-6-luna",
+      "route_reason": "default"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 34,
+          "output_tokens": 27,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 17,
+          "text": "大家好～提醒一下，請記得在星期五前交週報喔！感謝大家 🙌"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 34,
+          "output_tokens": 48,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 548,
+          "text": "嗨大家～小提醒：週報記得在星期五前交喔！趁記憶還新鮮，花點時間整理一下這週的進度。謝謝大家 🙌"
+        }
+      },
+      "id": "s04",
+      "expected": "cheap",
+      "masked": "幫我寫一則提醒同事星期五前交週報的訊息，語氣輕鬆一點。",
+      "chars": 27,
+      "routed_model": "gpt-6-luna",
+      "route_reason": "default"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 19,
+          "output_tokens": 121,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 63,
+          "text": "**Affect** is usually a **verb** meaning “to influence”:\n\n- The weather can **affect** your mood.\n\n**Effect** is usually a **noun** meaning “a result”:\n\n- The weather had an **effect** on my mood.\n\nA handy reminder: **A**ffect = **A**ction; **E**ffect = **E**nd result.\n\nThere are exceptions: **effect** can be a verb meaning “to bring about” (*effect change*), and **affect** can be a noun in psychology meaning an observable emotional expression."
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 19,
+          "output_tokens": 121,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 1248,
+          "text": "**Affect** is usually a **verb** meaning “to influence”:  \n- *The weather can affect your mood.*\n\n**Effect** is usually a **noun** meaning “a result”:  \n- *The weather had an effect on your mood.*\n\nA quick memory aid: **A**ffect is an **A**ction; **E**ffect is an **E**nd result.\n\nThere are exceptions: *effect* can be a verb meaning “to bring about” (*effect change*), and *affect* can be a noun in psychology meaning an observable emotional expression."
+        }
+      },
+      "id": "s05",
+      "expected": "cheap",
+      "masked": "What is the difference between \"affect\" and \"effect\"?",
+      "chars": 53,
+      "routed_model": "gpt-6-luna",
+      "route_reason": "default"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 21,
+          "output_tokens": 178,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 92,
+          "text": "以下是五個適合部門聚餐的主題：\n\n1. **懷舊童年派對**：穿上童年流行的服裝，搭配復古零食與經典遊戲。\n2. **異國美食之夜**：每桌代表一個國家，品嚐不同料理，也能順便交流文化。\n3. **電影角色變裝趴**：打扮成喜歡的電影角色，安排主題餐點或猜電影遊戲。\n4. **無手機交流晚餐**：暫時放下手機，透過趣味問答或桌遊增加互動。\n5. **感謝與表揚之夜**：分享工作中的暖心故事，互相感謝，也表揚同事的努力。"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 21,
+          "output_tokens": 224,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 2282,
+          "text": "這裡有五個適合部門聚餐的主題：\n\n1. **復古之夜**：穿上懷舊服飾，搭配經典歌曲與復古小遊戲。\n2. **環遊世界美食節**：每桌代表一個國家，品嚐不同地方的料理。\n3. **電影角色派對**：扮成喜歡的電影角色，安排角色猜謎活動。\n4. **夜市同樂會**：用小吃攤位、套圈圈和抽獎，營造熱鬧氣氛。\n5. **年度趣味頒獎典禮**：頒發「最佳神救援」等輕鬆獎項，回顧團隊亮點。\n\n如果希望大家輕鬆參與、又不必特別準備服裝，**夜市同樂會**或**趣味頒獎典禮**會是不錯的選擇。"
+        }
+      },
+      "id": "s06",
+      "expected": "cheap",
+      "masked": "請給我五個部門聚餐的主題建議。",
+      "chars": 15,
+      "routed_model": "gpt-6-luna",
+      "route_reason": "default"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 22,
+          "output_tokens": 106,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 56,
+          "text": "- **404 Not Found（找不到）**：伺服器有收到請求，但找不到指定的網頁或資源。可能是網址輸入錯誤、頁面已移除，或連結失效。\n- **500 Internal Server Error（內部伺服器錯誤）**：伺服器處理請求時發生未預期的問題，通常需要網站管理者檢查伺服器或程式。"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 22,
+          "output_tokens": 84,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 884,
+          "text": "**404 Not Found**：伺服器找不到你要求的資源，常見原因是網址打錯、頁面已搬移或刪除。\n\n**500 Internal Server Error**：伺服器處理請求時發生內部錯誤，但沒有提供更具體的錯誤原因。通常需要由網站管理者檢查。"
+        }
+      },
+      "id": "s07",
+      "expected": "cheap",
+      "masked": "HTTP 狀態碼 404 和 500 各代表什麼？",
+      "chars": 25,
+      "routed_model": "gpt-6-luna",
+      "route_reason": "default"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 29,
+          "output_tokens": 44,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 25,
+          "text": "主旨：會議時間調整\n\n您好，\n\n通知您，會議改到本週五上午十點舉行。造成不便，敬請見諒。\n\n謝謝！"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 29,
+          "output_tokens": 68,
+          "reasoning_tokens": 20,
+          "finish_reason": "stop",
+          "cost_micro_usd": 738,
+          "text": "主旨：會議時間變更\n\n您好：\n\n會議已改至本週五上午 10 點，敬請留意。謝謝！\n\n祝好  \n[你的名字]"
+        }
+      },
+      "id": "s08",
+      "expected": "cheap",
+      "masked": "幫我寫一封短信給 [EMAIL]，通知會議改到週五上午十點。",
+      "chars": 30,
+      "routed_model": "gpt-6-luna",
+      "route_reason": "default"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 74,
+          "output_tokens": 74,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 45,
+          "text": "1. 公司自下個月起改用新的請款系統；舊系統僅供查詢，不能再送單。\n2. 新系統帳號將於月底前寄至各位信箱，首次登入時須更改密碼。\n3. 如有問題，請聯絡財務部。"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 74,
+          "output_tokens": 69,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 838,
+          "text": "1. 下個月起改用新請款系統；舊系統僅供查詢，不能送單。\n2. 新系統帳號會在月底前寄到信箱，首次登入須更改密碼。\n3. 如有問題，請聯繫財務部。"
+        }
+      },
+      "id": "s09",
+      "expected": "cheap",
+      "masked": "請用三點整理這段話的重點：公司下個月起改用新的請款系統，舊系統只能查詢不能送單；新系統的帳號會在月底前寄到各位信箱，第一次登入要改密碼；有問題請找財務部。",
+      "chars": 77,
+      "routed_model": "gpt-6-luna",
+      "route_reason": "default"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 32,
+          "output_tokens": 128,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 68,
+          "text": "雲端運算就是：**不用自己買一台強大的電腦或伺服器，而是透過網路使用別人提供的電腦資源。**\n\n可以把它想成租用倉庫：你不必自己蓋倉庫，只要需要時租用空間，用多少付多少。雲端服務也是如此，可以用來儲存照片、備份檔案，或執行各種網路服務。\n\n例如，把照片放在 Google 相簿或 iCloud，就是使用雲端儲存。"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 32,
+          "output_tokens": 93,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 994,
+          "text": "雲端運算就像**租用網路上的電腦和儲存空間**：你不必自己買設備，只要連上網，就能使用別人提供的資源。\n\n例如，把照片存在 Google 相簿，或用線上文件寫報告，資料和服務主要都在遠端的電腦上，你可以用手機或電腦隨時存取。"
+        }
+      },
+      "id": "s10",
+      "expected": "cheap",
+      "masked": "請簡單說明什麼是雲端運算，讓沒有技術背景的人也聽得懂。",
+      "chars": 27,
+      "routed_model": "gpt-6-luna",
+      "route_reason": "default"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 274,
+          "output_tokens": 189,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 122,
+          "text": "各位同仁：\n\n第四季專案進度會議訂於下週三下午 2 時舉行，時間不變；因原訂的三樓大會議室另有安排，會議地點改為五樓小會議室。\n\n請各專案負責人於會議前一天下班前，更新共用資料夾中的進度表，內容包括完成比例、目前困難及下一階段工作。會議資料將於前一日下午寄出，請事先閱讀。如需投影設備或視訊連線，請提前告知部門助理。\n\n請準時出席；如無法參加，請事先通知部門助理並安排代理人報告。會後備有茶點，有飲食限制者請回覆助理，以利準備。\n\n謝謝配合。"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 274,
+          "output_tokens": 210,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 2648,
+          "text": "**第四季專案進度會議通知**\n\n各位同仁好：\n\n第四季專案進度會議訂於下週三下午 2 時舉行。因原訂的三樓大會議室須供外部訪客使用，會議地點改為**五樓小會議室**，時間不變。\n\n請各專案負責人於會議前一天下班前，將負責項目的完成比例、目前困難及下一階段工作，更新至共用資料夾中的進度表。會議資料將於前一天下午寄出，敬請先行閱覽。\n\n請準時出席；如不克參加，請事先通知部門助理並指定代理人報告。如有飲食限制，或需使用投影設備、視訊連線，也請提前告知助理，以利安排。會後備有簡單茶點。\n\n謝謝配合。"
+        }
+      },
+      "id": "s11",
+      "expected": "cheap",
+      "masked": "各位同仁好，下週三下午兩點原本預定在三樓大會議室舉行的第四季專案進度會議，因為當天會議室臨時被安排給外部訪客使用，所以需要改到五樓的小會議室舉行，時間不變。請各專案負責人在會議前一天下班前，把各自負責項目的進度更新到共用資料夾裡的進度表，內容包括目前完成的比例、遇到的困難，以及下一階段預計要完成的工作。會議當天請準時出席，如果有事不能參加，請事先告知部門助理，並指定一位代理人代為報告。另外，會後會有簡單的茶點，請有飲食限制的同仁回覆助理，方便我們準備。會議資料會在前一天下午寄出，請大家先看過，當天討論會更有效率；如果需要投影設備或視訊連線，也請提前告訴助理。謝謝大家的配合。\n\n請把上面這段公告改寫成更正式、簡潔的版本。",
+      "chars": 313,
+      "routed_model": "gpt-6-sol",
+      "route_reason": "length"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 31,
+          "output_tokens": 5,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 6,
+          "text": "Hello World"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 31,
+          "output_tokens": 22,
+          "reasoning_tokens": 5,
+          "finish_reason": "stop",
+          "cost_micro_usd": 282,
+          "text": "解碼結果：`Hello World`"
+        }
+      },
+      "id": "s12",
+      "expected": "cheap",
+      "masked": "請幫我把這段 base64 decode 成文字：SGVsbG8gV29ybGQ=",
+      "chars": 41,
+      "routed_model": "gpt-6-sol",
+      "route_reason": "keyword"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 22,
+          "output_tokens": 117,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 61,
+          "text": "看地區和語境：\n\n- **台灣**：通常寫「**帳號**」，例如「登入帳號」「銀行帳號」。\n- **中國大陸**：通常寫「**賬號**」；「賬」是大陸規範字形。\n- **香港、澳門**：多數也用「帳號」，但實際用法可能因機構而異。\n\n如果沒有特定地區要求，面向台灣讀者用「帳號」最自然。"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 22,
+          "output_tokens": 78,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 824,
+          "text": "看地區：\n\n- **台灣**通常寫「帳號」，例如「登入帳號」「銀行帳號」。\n- **中國大陸**通常寫「账号」（繁體作「賬號」）。\n\n如果是寫給台灣讀者，用「帳號」最自然；寫給中國大陸讀者，用「账号」。"
+        }
+      },
+      "id": "s13",
+      "expected": "cheap",
+      "masked": "「帳號」和「賬號」哪個比較常用？",
+      "chars": 16,
+      "routed_model": "gpt-6-sol",
+      "route_reason": "keyword"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 40,
+          "output_tokens": 836,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 422,
+          "text": "公司把客服改成 AI 聊天機器人，確實能降低等待時間、處理大量重複問題，但若只著眼於省人力，可能帶來以下風險：\n\n## 主要風險\n\n1. **回答錯誤或誤導客戶**  \n   AI 可能把不確定的內容說得很肯定，尤其涉及退款、保固、帳務、合約或安全問題時，可能造成客訴、損失甚至法律責任。\n\n2. **複雜問題處理不當**  \n   客戶的問題常帶有情緒、例外情況或多重背景。機器人若反覆答非所問、無法理解上下文，會讓客戶更挫折。\n\n3. **人工轉接失靈**  \n   若沒有清楚、快速的真人服務管道，客戶可能被困在自動回覆中；即使轉接成功，若對話紀錄沒有一併交給客服，也會讓客戶重複說明。\n\n4. **個資與資安風險**  \n   對話可能包含姓名、聯絡方式、訂單或付款資訊。資料蒐集、保存、模型供應商存取及跨境傳輸都需妥善管理。\n\n5. **品牌信任與服務體驗受損**  \n   客戶若感覺公司只想省成本、拒絕真人協助，可能降低信任與忠誠度，尤其對高價值或急迫問題影響更大。\n\n6. **偏誤、語言與無障礙問題**  \n   AI 可能對不同用語、方言、口音或特殊需求的客戶服務不一致，造成不公平或部分客戶無法順利使用。\n\n7. **隱性成本與營運依賴**  \n   除了模型費用，還有整合、監控、維護、資料治理和人工接手成本。若系統故障或供應商服務中斷，也可能讓客服全面停擺。\n\n## 導入前先做的三件事\n\n### 1. 盤點服務情境，劃定 AI 的工作範圍\n先整理常見問題、處理量、失敗案例及高風險情境。明確規定哪些問題可由 AI 回覆，哪些必須轉真人，例如退款爭議、個資更改、法律或安全問題。不要一開始就把所有客服工作交給 AI。\n\n### 2. 建立可靠的資料、權限與轉接機制\n整理並確認知識庫、價格、政策與流程的正確性，指定負責更新的人；限制 AI 可讀取及可執行的資料與操作。設好個資保護、對話保存規則、真人轉接條件，以及將對話脈絡交給客服的方式。\n\n### 3. 小規模試行，訂出成效與停用門檻\n先選少數產品或低風險問題試行，讓人工客服並行監看。除了自動解決率，也要追蹤回答正確率、轉接率、客戶滿意度、重複聯絡率、投訴與資安事件；預先設定出現錯誤或客訴升高時的修正、回退或停用條件。\n\n**核心原則：**把 AI 當成客服的輔助與分流工具，而不是預設的「真人替代品」。能快速轉真人、能追蹤錯誤、能隨時回退，通常比追求最高自動化比例更重要。"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 40,
+          "output_tokens": 430,
+          "reasoning_tokens": 13,
+          "finish_reason": "stop",
+          "cost_micro_usd": 4380,
+          "text": "把客服改成 AI 聊天機器人，主要風險不只是「回答不夠好」，還包括客戶信任、個資與營運責任。\n\n**可能的風險**\n- **答錯或亂答**：誤報價格、退貨規則或處理方式，造成客訴甚至法律爭議。\n- **複雜問題處理不佳**：遇到情緒激動、特殊個案或需要判斷的問題，可能讓客戶覺得被敷衍。\n- **個資與資安風險**：對話可能包含姓名、訂單、付款等資料；若蒐集、保存或串接不當，可能外洩。\n- **品牌與營運風險**：機器人答非所問、轉真人困難，可能降低滿意度；過度依賴 AI 也可能讓團隊失去處理例外案件的能力。\n\n**導入前先做三件事**\n1. **盤點客服問題並劃定界線**：找出適合自動處理的高頻、低風險問題；退款爭議、個資異動等案件明確交由真人處理。\n2. **整理並驗證知識庫**：統一產品、價格、政策等資料來源，指定負責人更新，並用真實案例測試回答正確率。\n3. **建立轉真人與監控機制**：讓客戶容易找到真人；設定錯誤率、解決率、客訴率等指標，先小範圍試行，再決定是否擴大。\n\n比較穩妥的做法是讓 AI **先輔助、再逐步承接**，而不是一次完全取代真人客服。"
+        }
+      },
+      "id": "c01",
+      "expected": "strong",
+      "masked": "請分析一下公司把客服改成 AI 聊天機器人，可能的風險有哪些，以及導入前要先做的三件事。",
+      "chars": 44,
+      "routed_model": "gpt-6-sol",
+      "route_reason": "keyword"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 38,
+          "output_tokens": 699,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 354,
+          "text": "## PostgreSQL 與 DynamoDB 比較\n\n| 面向 | PostgreSQL | DynamoDB |\n|---|---|---|\n| **資料模型** | 關聯式資料庫，適合以訂單、客戶、商品等資料表建立關聯 | NoSQL 資料庫，通常依照查詢方式設計鍵與資料項目 |\n| **訂單資料與一致性** | 支援交易、外鍵與一致性約束；建立訂單、扣庫存等多步操作較容易管理 | 單筆操作很快；也支援交易，但資料模型與交易設計較受限，需更仔細規劃 |\n| **查詢彈性** | 可用 SQL 彈性查詢、排序、彙總及跨表 JOIN，適合報表與新需求 | 查詢需事先設計好索引與存取模式；臨時查詢、跨資料集關聯較不方便 |\n| **擴展與效能** | 可從單機或託管資料庫開始，之後再調整；高流量時可能需要額外擴展工作 | 託管、擴展性與高流量處理出色，適合大量且可預期的鍵值查詢 |\n| **維運與成本** | 自行架設需處理備份、升級與容量；託管服務可降低維運負擔。小型系統通常容易估算 | 免管理伺服器、可按使用量付費，但讀寫量、索引、資料傳輸與流量尖峰會影響成本 |\n| **開發門檻** | SQL、交易與資料建模方式成熟，容易找到工具與人才 | 若不熟悉 NoSQL 與 DynamoDB 的存取模式，初期設計可能較費心；改需求也可能要調整資料模型 |\n\n## 建議\n\n**對五人以下的小團隊，若沒有明確的超高流量或 DynamoDB 專屬需求，優先選 PostgreSQL，最好採用託管服務。**\n\n訂單通常需要可靠的交易處理、明確的資料關聯，以及日後方便查詢訂單、客戶、商品和退款等資訊。PostgreSQL 的 SQL 與交易功能能讓小團隊以較直觀的方式處理這些需求，也較適合需求仍在變動的產品。\n\n**以下情況可優先考慮 DynamoDB：**\n\n- 主要查詢模式很明確，而且以訂單 ID、客戶 ID 等鍵值讀寫為主。\n- 需要處理很大的流量或劇烈流量尖峰，並希望盡量減少資料庫維運。\n- 團隊熟悉 DynamoDB，且能在初期就妥善設計索引與資料存取模式。\n\n**簡單結論：**一般新創或小型產品的訂單系統，選託管 PostgreSQL；若核心需求是大規模、低延遲的鍵值存取，且資料模型可配合 DynamoDB 的查詢方式，再選 DynamoDB。"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 38,
+          "output_tokens": 370,
+          "reasoning_tokens": 19,
+          "finish_reason": "stop",
+          "cost_micro_usd": 3776,
+          "text": "**建議五人以下的小團隊先選 PostgreSQL。**訂單資料通常需要交易一致性、關聯查詢，以及依商品、顧客、付款狀態產生報表；PostgreSQL 比較容易直接滿足這些需求，也較容易隨產品變化調整查詢。\n\n| 面向 | PostgreSQL | DynamoDB |\n|---|---|---|\n| 資料一致性 | 交易、外鍵與約束成熟，適合避免訂單與明細不一致 | 支援交易，但跨項目資料設計與維護通常較費心 |\n| 查詢與報表 | SQL、JOIN、彙總查詢靈活 | 要先規劃存取模式；臨時新增查詢需求可能需要新索引或資料重複存放 |\n| 擴展與維運 | 一般規模很夠用，但極大規模時擴展較複雜 | 擅長高流量、低延遲存取；託管服務可減少基礎設施管理 |\n| 成本 | 小規模通常較容易預估 | 成本受讀寫量、索引及資料模型影響，需留意用量 |\n\n如果團隊希望少管伺服器，可以選**託管 PostgreSQL**。只有在訂單存取模式已相當固定、流量非常大，而且團隊願意為 DynamoDB 的資料模型投入設計與維護成本時，才建議優先考慮 DynamoDB。"
+        }
+      },
+      "id": "c02",
+      "expected": "strong",
+      "masked": "請比較 PostgreSQL 和 DynamoDB 用來存訂單資料的優缺點，並建議五人以下的小團隊用哪一個。",
+      "chars": 54,
+      "routed_model": "gpt-6-sol",
+      "route_reason": "keyword"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 38,
+          "output_tokens": 1000,
+          "reasoning_tokens": 0,
+          "finish_reason": "length",
+          "cost_micro_usd": 504,
+          "text": "以下以一般公司「員工提出請假申請，主管或人資審核，系統記錄假別額度與異動」為例，設計一組關聯式資料表。欄位型別可依 PostgreSQL、MySQL 等資料庫調整。\n\n## 一、核心資料表\n\n### 1. `employees`：員工資料\n\n保存員工基本資料，供申請人、主管與審核人共用。\n\n| 欄位 | 說明 |\n|---|---|\n| `employee_id` | 主鍵 |\n| `employee_no` | 員工編號，唯一 |\n| `name` | 姓名 |\n| `email` | 電子郵件，通常設為唯一 |\n| `department_id` | 所屬部門 |\n| `manager_id` | 直屬主管，參照 `employees.employee_id` |\n| `hire_date` | 到職日 |\n| `status` | 在職、離職、留停等狀態 |\n| `created_at` | 建立時間 |\n\n`manager_id` 可為空，例如最高主管或尚未指派主管的員工。\n\n---\n\n### 2. `departments`：部門資料\n\n保存公司部門資訊。\n\n| 欄位 | 說明 |\n|---|---|\n| `department_id` | 主鍵 |\n| `department_name` | 部門名稱 |\n| `parent_department_id` | 上層部門，可參照本表 |\n| `status` | 部門是否啟用 |\n\n一個部門可以有多位員工，也可用 `parent_department_id` 表示部門階層。\n\n---\n\n### 3. `leave_types`：假別資料\n\n定義系統支援的假別及其計算方式。\n\n| 欄位 | 說明 |\n|---|---|\n| `leave_type_id` | 主鍵 |\n| `leave_code` | 假別代碼，例如 `ANNUAL`、`SICK` |\n| `leave_name` | 假別名稱，例如特休、病假 |\n| `unit` | 計算單位，例如天、小時 |\n| `requires_attachment` | 是否需要附件 |\n| `is_paid` | 是否給薪 |\n| `is_active` | 是否仍可申請 |\n\n假別規則可能因地區、年資或公司政策而異，較複雜時可另外建立規則表。\n\n---\n\n### 4. `leave_requests`：請假申請\n\n每筆資料代表一張請假單。\n\n| 欄位 | 說明 |\n|---|---|\n| `request_id` | 主鍵 |\n| `employee_id` | 申請人，參照 `employees.employee_id` |\n| `leave_type_id` | 假別，參照 `leave_types.leave_type_id` |\n| `start_at` | 請假開始時間 |\n| `end_at` | 請假結束時間 |\n| `requested_amount` | 申請時數或天數 |\n| `reason` | 請假事由 |\n| `status` | 草稿、待審核、核准、退回、取消等 |\n| `submitted_at` | 送出時間 |\n| `created_at` | 建立時間 |\n| `updated_at` | 最後更新時間 |\n\n建議保存送出當下的 `requested_amount`，避免日後因行事曆或計算規則改變，申請紀錄的請假量也跟著變動。\n\n---\n\n### 5. `leave_approvals`：審核紀錄\n\n一張請假單可能需要多層簽核，因此將審核流程獨立存放。\n\n| 欄位 | 說明 |\n|---|---|\n| `approval_id` | 主鍵 |\n| `request_id` | 請假單，參照 `leave_requests.request_id` |\n| `approver_id` | 審核人，參照 `employees.employee_id` |\n| `step_no` | 簽核順序 |\n| `decision` | 待處理、核准、駁回、退回 |\n| `comment` | 審核意見 |\n| `acted_at` | 審核時間 |\n\n若只需要單一主管審核，也可將審核人與審核結果放在 `leave_requests`；但獨立成表更容易支援多層簽核與完整歷程。\n\n---\n\n### 6. `leave_balances`：員工假"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 38,
+          "output_tokens": 952,
+          "reasoning_tokens": 44,
+          "finish_reason": "stop",
+          "cost_micro_usd": 9596,
+          "text": "以下以關聯式資料庫為例，設計一套支援**請假申請、主管審核、假別額度及扣假紀錄**的基本資料表。\n\n## 資料表設計\n\n| 資料表 | 主要欄位 | 用途 |\n|---|---|---|\n| `employees` 員工 | `id`（PK）、`employee_no`（唯一）、`name`、`department_id`（FK）、`manager_id`（FK，指向 `employees.id`）、`hire_date`、`status` | 儲存員工資料及直屬主管。 |\n| `departments` 部門 | `id`（PK）、`name`、`parent_id`（FK，可空） | 儲存部門及上下層部門關係。 |\n| `leave_types` 假別 | `id`（PK）、`name`、`unit`（小時／天）、`requires_balance`、`is_active` | 定義特休、病假、事假等假別，以及是否需要檢查額度。 |\n| `leave_requests` 請假單 | `id`（PK）、`employee_id`（FK）、`leave_type_id`（FK）、`start_at`、`end_at`、`requested_units`、`reason`、`status`、`submitted_at`、`created_at` | 記錄每筆請假申請。`status` 可為草稿、待審、核准、駁回、取消。 |\n| `leave_approvals` 審核紀錄 | `id`（PK）、`request_id`（FK）、`approver_id`（FK）、`step_no`、`action`、`comment`、`acted_at` | 保存每一關審核的處理者與結果，支援多層簽核。 |\n| `leave_entitlements` 假別額度 | `id`（PK）、`employee_id`（FK）、`leave_type_id`（FK）、`period_start`、`period_end`、`granted_units` | 記錄員工在指定期間獲得的額度，例如年度特休。 |\n| `leave_balance_entries` 額度異動 | `id`（PK）、`entitlement_id`（FK）、`request_id`（FK，可空）、`units_change`、`reason`、`created_at` | 以流水帳記錄扣假、退還及人工調整；負數表示扣除，正數表示增加。 |\n| `holidays` 假日 | `date`（PK）、`name`、`is_workday` | 供請假時數計算使用，例如排除國定假日，或標示補班日。 |\n\n## 資料表關係\n\n- 一個**部門**有多名**員工**；一名員工可透過 `manager_id` 對應另一名員工作為主管。\n- 一名**員工**可有多張**請假單**；每張請假單只屬於一種**假別**。\n- 一張**請假單**可有多筆**審核紀錄**，依 `step_no` 表示簽核順序。\n- 一名員工可在不同期間、不同假別擁有多筆**假別額度**；每筆額度可有多筆**額度異動**。\n- **假日**表供計算請假時數時查詢，不必直接與請假單建立外鍵關係。\n\n額度可用 `granted_units + SUM(leave_balance_entries.units_change)` 計算。建議只在請假單**核准後**建立扣假異動；若核准後取消，再新增一筆退還異動，不刪除原紀錄，以保留完整歷程。另外，`requested_units` 應儲存送審時確認的時數或天數，避免日後行事曆設定改變而影響舊單據。"
+        }
+      },
+      "id": "c03",
+      "expected": "strong",
+      "masked": "請幫我設計一個員工請假系統的資料表，說明每張表的用途和彼此的關係。",
+      "chars": 33,
+      "routed_model": "gpt-6-sol",
+      "route_reason": "keyword"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 48,
+          "output_tokens": 100,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 55,
+          "text": "因為迴圈裡沒有改變 `i`，所以 `i` 一直是 `0`，條件 `i < 10` 永遠成立。\n\n在迴圈中加入遞增語句即可：\n\n```python\ni = 0\nwhile i < 10:\n    print(i)\n    i += 1\n```\n\n這段程式會依序印出 `0` 到 `9`，然後停止。"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 48,
+          "output_tokens": 97,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 1066,
+          "text": "因為 `i` 在迴圈中沒有增加，所以條件 `i < 10` 會一直成立，造成無限迴圈。在迴圈內加入 `i += 1` 即可：\n\n```python\ni = 0\nwhile i < 10:\n    print(i)\n    i += 1\n```\n\n修正後會依序印出 `0` 到 `9`，然後結束。"
+        }
+      },
+      "id": "c04",
+      "expected": "strong",
+      "masked": "下面這段 Python 為什麼會一直跑不停？請除錯並給我修正後的程式碼。\n\ni = 0\nwhile i < 10:\n    print(i)",
+      "chars": 70,
+      "routed_model": "gpt-6-sol",
+      "route_reason": "keyword"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 28,
+          "output_tokens": 671,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 339,
+          "text": "A public API rate limiter should protect backend capacity while giving clients predictable limits, fair access, and clear feedback.\n\n## Design\n\n1. **Identify the caller**\n   - Prefer an API key or authenticated account ID.\n   - For unauthenticated traffic, use an IP-based limit, but account for shared IPs and proxying.\n   - Apply additional global and per-endpoint limits to protect especially expensive operations.\n\n2. **Define limits**\n   - Configure limits by plan and endpoint, such as “100 requests per minute” plus a burst allowance.\n   - Use separate policies for sustained throughput and costly operations where needed.\n   - Document the limits and how clients can request higher quotas.\n\n3. **Enforce limits**\n   - Put enforcement at the API gateway or a shared middleware layer, before expensive application work.\n   - In a distributed deployment, keep limiter state in a shared store such as Redis, using atomic operations (for example, a Lua script) to avoid races between API servers.\n   - Set timeouts and a deliberate fallback policy if the store is unavailable. Failing open preserves availability but risks overload; failing closed protects the service but can block legitimate traffic.\n\n4. **Report limits**\n   - Return `429 Too Many Requests` when a client exceeds its limit.\n   - Include useful headers such as `RateLimit-Limit`, `RateLimit-Remaining`, and `RateLimit-Reset`, plus `Retry-After` when applicable.\n   - Make retries safe with backoff and jitter; avoid encouraging clients to retry immediately.\n\n5. **Operate and tune**\n   - Monitor rejections, backend load, limiter-store latency/errors, and usage by endpoint and client.\n   - Add safeguards against key spoofing, hot keys, and abuse across many identities.\n   - Load-test burst behavior and failure modes.\n\n## Token bucket vs. sliding window\n\n| | Token bucket | Sliding window |\n|---|---|---|\n| **How it works** | Tokens refill at a set rate up to a capacity. Each request consumes a token. | Counts requests over the preceding time interval, often using timestamps or time buckets. |\n| **Burst behavior** | Explicitly allows bursts up to the bucket capacity while controlling the long-term average. | Enforces a closer bound on requests in any rolling interval; bursts are limited by that bound. |\n| **Accuracy and state** | Compact state per client: token count and last-refill time. Efficient and easy to scale. | Exact implementations may store many timestamps; approximate bucketed versions use less state but can be imprecise near boundaries. |\n| **Best fit** | APIs that should tolerate short bursts while limiting sustained traffic. | Policies that need a strict rolling-period cap, such as “no more than N requests in any 60 seconds.” |\n\nA fixed-window counter is cheaper still, but can allow nearly twice the configured limit around a window boundary. A sliding-window counter reduces that boundary problem at lower storage cost than tracking every request.\n\n**Recommendation:** use a token bucket for general API traffic when modest bursts are acceptable. Use a sliding-window approach when clients or backend constraints require a tighter rolling cap. In either case, consider layered limits—for example, a token bucket per client plus a global concurrency or throughput limit—to protect the service from aggregate overload."
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 28,
+          "output_tokens": 487,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 4926,
+          "text": "For a public API, I’d use a **token bucket per API key** as the default rate limiter, with a separate, stricter limit for unauthenticated traffic. It allows short bursts while enforcing a sustainable average rate.\n\n### Basic design\n\n1. **Identify the caller:** Prefer an API key or account ID. For unauthenticated requests, use an IP address with the understanding that shared IPs can affect many users.\n2. **Define limits by tier and endpoint:** For example, a general request limit plus a lower limit for expensive endpoints.\n3. **Check before processing:** Store shared limiter state in a low-latency system such as Redis so all API instances apply the same limits. Make the check and update atomic.\n4. **Respond predictably:** Return `429 Too Many Requests` with `Retry-After` when a request is denied. Document the limits and expose remaining-quota headers if useful.\n5. **Monitor and protect the limiter:** Track rejection rates and latency, and decide explicitly what happens if the limiter store is unavailable. A public API may need a local emergency limit rather than allowing unlimited traffic.\n\n### Token bucket vs. sliding window\n\n| | Token bucket | Sliding window |\n|---|---|---|\n| **Rule** | Tokens refill at a fixed rate; each request spends one. | Allow at most *N* requests in the preceding time interval. |\n| **Bursts** | Permits bursts up to the bucket capacity. | Constrains bursts within any rolling interval. |\n| **State and cost** | Small state per caller; efficient to update. | Exact versions need request timestamps; approximate versions use counters and less memory. |\n| **Best fit** | APIs where brief bursts are acceptable but sustained load must be controlled. | APIs with a strict “no more than *N* in any rolling minute” requirement. |\n\nThe key trade-off is **flexibility versus a strict rolling cap**. A token bucket with a 100-token capacity and a refill rate of 100 tokens/minute can accept a 100-request burst, then gradually admit more requests as tokens refill. A sliding window capped at 100 requests per minute rejects further requests until earlier ones age out.\n\nFor most public APIs, I’d start with token buckets because they’re inexpensive and user-friendly, then add a sliding-window limit where a strict rolling quota is needed."
+        }
+      },
+      "id": "c05",
+      "expected": "strong",
+      "masked": "Design a rate limiter for a public API. Explain the trade-offs between a token bucket and a sliding window.",
+      "chars": 107,
+      "routed_model": "gpt-6-luna",
+      "route_reason": "default"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 37,
+          "output_tokens": 781,
+          "reasoning_tokens": 0,
+          "finish_reason": "stop",
+          "cost_micro_usd": 395,
+          "text": "訂單服務固定在晚上尖峰逾時，通常和「流量增加、資源不足、下游變慢，或定時工作撞在一起」有關。建議先用同一個尖峰時段的時間線，把請求延遲、錯誤率、流量和依賴服務的狀況對起來。\n\n### 常見原因\n- **流量或請求型態改變**：促銷、批次下單、重試風暴，或特定查詢／結帳流程特別昂貴。\n- **應用程式資源耗盡**：CPU、記憶體、執行緒池、連線池或佇列滿載；GC 停頓也可能造成延遲。\n- **資料庫瓶頸**：慢查詢、鎖等待、連線耗盡、索引不合適，或尖峰時寫入競爭增加。\n- **下游服務變慢**：庫存、付款、促銷、配送等依賴服務延遲或故障；同步呼叫會把延遲傳回訂單服務。\n- **排程工作重疊**：夜間報表、資料同步、備份、清理或批次任務搶占 CPU、資料庫或網路資源。\n- **快取或佇列問題**：快取失效／命中率下降、佇列堆積，或消費速度跟不上。\n- **網路或基礎設施問題**：負載平衡器、DNS、容器／虛擬機資源限制，或自動擴縮容啟動太慢。\n\n### 建議的排查順序\n1. **先確認逾時發生在哪一段**：看分散式追蹤或請求日誌，判斷是訂單服務本身、資料庫，還是某個下游呼叫耗時。特別比較尖峰時段與平常的慢請求。\n2. **對照尖峰監控指標**：流量（RPS）、延遲分位數（尤其 P95/P99）、錯誤率、CPU／記憶體、執行緒與連線池使用率、佇列深度。\n3. **檢查資料庫**：慢查詢、鎖等待、連線數、CPU／IO，以及逾時請求是否集中在特定查詢或表。\n4. **核對排程與部署時間**：確認是否有固定在晚上執行的批次工作、備份、報表，或近期變更恰好在尖峰生效。\n5. **檢查下游依賴**：逐一比對付款、庫存等服務的延遲、錯誤率與連線池狀況，並確認重試是否放大流量。\n6. **確認逾時與重試設定**：過短的逾時會造成假性失敗；無上限或同步重試則可能讓尖峰更嚴重。檢查是否有退避、熔斷和併發限制。\n\n若只能先做一件事，先找出**逾時請求最耗時的呼叫區段**，再把該區段的指標和固定晚間排程對照。這通常比一開始就盲目加機器更快定位原因。"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 37,
+          "output_tokens": 440,
+          "reasoning_tokens": 14,
+          "finish_reason": "stop",
+          "cost_micro_usd": 4474,
+          "text": "每天晚上尖峰才逾時，先不要急著調整 timeout；重點是找出**哪一段先變慢**，以及是否有晚上才發生的負載或排程。\n\n**建議先這樣查：**\n\n1. **確認逾時的位置與時間線**：是使用者到 API、訂單服務呼叫下游，還是資料庫查詢逾時？把尖峰前後的請求量、p95/p99 延遲、錯誤率放在同一張圖上，找出誰先上升。\n2. **對照資源與佇列**：看訂單服務的 CPU、記憶體、GC、執行緒／連線池，以及資料庫連線數、慢查詢、鎖等待。特別注意「連線池用滿、請求排隊」這類會在尖峰突然放大延遲的情況。\n3. **檢查下游依賴**：支付、庫存、優惠券等服務是否同時變慢或限流；用 trace 找出逾時請求耗在哪一跳，並檢查重試是否讓流量雪上加霜。\n4. **核對夜間事件**：批次作業、報表、備份、資料同步、促銷活動或定時任務，是否與開始變慢的時間吻合。\n\n常見原因是**流量超過處理能力、資料庫慢查詢／鎖競爭、連線池耗盡、下游變慢，或夜間批次作業搶資源**。若只能先做一件事，我會先取一段尖峰時的逾時請求 trace，對照同時段的流量與資料庫／連線池指標；這通常能最快縮小範圍。"
+        }
+      },
+      "id": "c06",
+      "expected": "strong",
+      "masked": "我們的訂單服務每天晚上尖峰都會逾時，可能的原因有哪些？應該先從哪裡查起？",
+      "chars": 36,
+      "routed_model": "gpt-6-luna",
+      "route_reason": "default"
+    },
+    {
+      "answers": {
+        "gpt-6-luna": {
+          "provider_model": "gpt-6-luna",
+          "input_tokens": 281,
+          "output_tokens": 1000,
+          "reasoning_tokens": 0,
+          "finish_reason": "length",
+          "cost_micro_usd": 529,
+          "text": "以你們目前的規模，建議把目標訂為：**先消除單一主機故障和促銷時的效能瓶頸，再逐步搬遷；不要為了「上雲」一次重寫整套系統。**兩位工程師、預算有限的情況下，應優先採用託管服務與簡單架構，減少自行維護的工作。\n\n## 建議的搬遷優先順序\n\n1. **先做好備份與還原演練**\n   - 立即確認訂單資料庫有自動備份，並把備份複製到另一台主機或異地儲存；不要只把備份放在目前那台主機上。\n   - 設定備份保留期限，並實際演練還原，確認訂單、會員及付款相關資料能在可接受時間內恢復。\n   - 記錄可接受的資料遺失量（RPO）和恢復時間（RTO）。訂單資料通常應要求很低的 RPO，但是否能接近零，取決於資料庫和遷移設計。\n\n2. **先盤點與建立基準**\n   - 列出網站、後台、資料庫、檔案、排程工作、金流與物流串接、網域、憑證、寄信服務及外部 API。\n   - 量測平常與促銷時的 CPU、記憶體、磁碟、網路、資料庫連線數、查詢延遲及錯誤率。\n   - 確認目前資料量、資料庫版本、是否有特殊外掛或舊系統相依性，以及促銷流量預估。\n   - 先修正明顯的效能問題，例如慢查詢、缺少索引、圖片過大、應用程式未快取等；不必等搬上雲才處理。\n\n3. **先搬資料庫，再搬網站，分階段驗證**\n   - 優先評估雲端託管資料庫：它通常能減少備份、修補與故障切換的維運負擔，適合工程人力有限的團隊；但要比較費用、版本相容性及資料庫限制。\n   - 網站和後台可先搬到一至兩台雲端虛擬機器，或採用容易維護的託管平台。初期不必急著導入 Kubernetes、複雜微服務或多雲架構。\n   - 靜態圖片、下載檔等非交易資料可另放物件儲存，並視需要透過 CDN 提供，減輕網站主機負擔。\n   - 搬遷前先做測試環境與資料庫遷移演練，核對訂單筆數、金額、時間、會員資料及抽樣記錄，也要測試下單、付款回呼、取消、退款、出貨及報表流程。\n\n4. **採用可回退的正式切換方式**\n   - 若舊資料庫仍可持續運作，可評估初次全量複製後再做持續同步；正式切換時暫停寫入或短暫進入維護模式，讓兩邊資料一致後再切換流量。具體方法需依資料庫類型和雲端服務確認。\n   - 選在訂單低峰、客服與金流相關人員可配合的時段，事先準備切換清單、負責人、聯絡方式與回退條件。\n   - 切換後持續比對新舊環境的訂單數、金額和錯誤紀錄。不要在確認新環境穩定前就刪除舊主機或舊資料。\n   - 「停機不超過一個晚上」可作為目標，但要先用演練結果驗證；若無法保證同步和回退流程，寧可安排較保守的維護窗口，也不要冒資料不一致的風險。\n\n## 搬遷前應準備的事情\n\n- **先指定技術負責人與決策者**：資料庫工程師主責資料庫盤點、遷移及資料驗證；前端工程師主責網站與流程"
+        },
+        "gpt-6-sol": {
+          "provider_model": "gpt-6-sol",
+          "input_tokens": 281,
+          "output_tokens": 1372,
+          "reasoning_tokens": 49,
+          "finish_reason": "stop",
+          "cost_micro_usd": 14282,
+          "text": "你們目前最大的風險不只是促銷時變慢，而是**網站、訂單資料庫與後台都在同一台已有故障紀錄的主機上**。建議不要把三套系統原樣搬到一台雲端虛擬機；那只是把單點故障換了位置。以兩位工程師、六個月期限來看，應優先採用較容易維運的託管服務，分階段搬遷。\n\n## 搬遷優先順序\n\n1. **先保住訂單資料，再談搬遷。** 立即確認備份涵蓋訂單資料庫、網站程式、設定與必要檔案；至少保留一份不在原主機上的加密備份，並實際做一次還原演練。上次救援花兩天，表示「有備份」還不足以證明能及時恢復。\n2. **先摸清瓶頸與相依關係。** 記錄平日及促銷時的 CPU、記憶體、磁碟 I/O、資料庫連線數、慢查詢和網站回應時間；盤點金流、物流、簡訊、排程、後台及上傳檔案。尖峰每小時 500 筆訂單可作為測試起點，但還要測瀏覽及購物車流量，不能只用訂單數估算容量。\n3. **建立雲端基礎環境，再搬網站。** 優先考慮託管資料庫、應用程式執行環境、負載平衡及物件儲存；資料庫不直接對外開放。先部署測試環境，驗證效能、備份、監控與復原，再做正式切換。\n4. **資料庫最後切換。** 若現有資料庫支援，可先匯入初始資料，再以持續複寫或變更同步追上新增訂單；切換時短暫停止寫入、確認資料一致後才讓雲端接單。這比停機後才開始搬全部資料，更有機會把停機控制在一個晚上內。\n\n## 六個月內的務實安排\n\n| 時間 | 主要工作 |\n|---|---|\n| 第 1 個月 | 備份與還原演練、系統盤點、量測瓶頸；訂出可接受的資料遺失量（RPO）與恢復時間（RTO） |\n| 第 2–3 個月 | 建立雲端網路、權限、監控及測試環境；部署網站與後台，測試金流、物流等串接 |\n| 第 4 個月 | 匯入資料並測試同步；以接近促銷情境的流量做壓力測試和故障演練 |\n| 第 5 個月 | 完整演練切換與回退，核對訂單數、金額、狀態及付款回呼 |\n| 第 6 個月 | 選低流量夜間正式切換；密切監控數日，確認穩定後才停用舊主機 |\n\n正式切換前，請寫好由誰執行、何時停止接單、如何核對資料、何時決定回退的操作清單。**回退方式必須先演練**：一旦雲端開始接受新訂單，不能簡單把網址指回舊主機，否則可能造成兩邊訂單不一致。\n\n## 控制費用的方法\n\n- **先設每月預算與告警**，按正式、測試環境及服務分類追蹤；指定一人每週查看帳單。\n- **從量測結果選規格，不先買過大的主機。** 上線後觀察一至兩個促銷週期，再調整容量或購買長期承諾方案。\n- **測試環境非工作時間關閉或縮小**；設定日誌與備份保留期限，定期清理不用的磁碟、快照及資源。\n- **估算完整帳單**，不只看主機價格：託管資料庫、備份儲存、對外流量、負載平衡、監控與簡訊等都要列入。促銷尖峰的擴容也要設定上限及告警。\n- 有限預算下，**不要為了省託管費而自行維護複雜的資料庫叢集**；兩位工程師的維運時間與故障風險也是成本。\n\n## 客戶資料與合規\n\n姓名、電話、地址屬個人資料。上雲前要確認資料存放地區、雲端供應商的資料處理條款、可存取資料的人員，以及備份會存在哪裡；採用最小權限、多因素驗證、傳輸及靜態加密，並保留存取紀錄。也要訂出資料保留與刪除規則、資安事件通報流程。若公司在臺灣，需檢視《個人資料保護法》及適用的產業要求；若服務其他地區客戶，還須核對當地規範。若系統處理信用卡資料，應另外確認金流服務與 PCI DSS 的責任範圍，盡量避免自行儲存卡號。\n\n**第一週最值得做的事**：安排一次從備份還原訂單資料庫的演練，同時取得促銷期間的效能數據。這兩項結果會決定搬遷架構、切換時間和合理預算。"
+        }
+      },
+      "id": "c07",
+      "expected": "strong",
+      "masked": "我們是一間大約五十人的電商公司，目前所有服務都跑在機房裡的一台實體主機上，包括網站、訂單資料庫和後台管理系統。最近半年訂單量成長了三倍，促銷活動時網站常常變慢甚至連不上，而且這台主機已經用了六年，硬碟壞過一次，當時花了兩天才把資料救回來。老闆希望半年內把系統搬到雲端，但預算有限，團隊只有兩位工程師，一位熟悉資料庫，另一位主要負責前端。目前每天大約三千筆訂單，尖峰時一小時可以到五百筆，我們希望搬遷期間網站停機不要超過一個晚上。我們也擔心搬遷時訂單資料遺失，或是搬完之後每個月的雲端費用失控；另外客戶資料裡有姓名、電話和地址，不確定放到雲端之後要注意哪些規定。請針對我們的情況，建議搬遷的優先順序、要先準備的事情，以及控制雲端費用的做法。",
+      "chars": 319,
+      "routed_model": "gpt-6-sol",
+      "route_reason": "length"
+    }
+  ]
+}

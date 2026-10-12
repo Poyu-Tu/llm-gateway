@@ -1,0 +1,121 @@
+# M3 步驟 7：路由測試集（20 題）
+# expected：這一題「應該」由哪一種模型回答（本人判斷）
+#   cheap  = 查詢、改寫、翻譯、摘要、常識解釋：便宜模型就夠
+#   strong = 要多步推理、設計取捨、寫或改程式、答錯代價高：需要強模型
+# 個資只用假資料（example.com 信箱）
+
+[[questions]]
+id = "s01"
+expected = "cheap"
+text = "請把「會議延到下週三下午兩點」翻成英文。"
+
+[[questions]]
+id = "s02"
+expected = "cheap"
+text = "幫我把這句話改得比較有禮貌：「你們的報表又遲交了。」"
+
+[[questions]]
+id = "s03"
+expected = "cheap"
+text = "Excel 要怎麼把兩欄文字合併成一欄？"
+
+[[questions]]
+id = "s04"
+expected = "cheap"
+text = "幫我寫一則提醒同事星期五前交週報的訊息，語氣輕鬆一點。"
+
+[[questions]]
+id = "s05"
+expected = "cheap"
+text = "What is the difference between \"affect\" and \"effect\"?"
+
+[[questions]]
+id = "s06"
+expected = "cheap"
+text = "請給我五個部門聚餐的主題建議。"
+
+[[questions]]
+id = "s07"
+expected = "cheap"
+text = "HTTP 狀態碼 404 和 500 各代表什麼？"
+
+[[questions]]
+id = "s08"
+expected = "cheap"
+text = "幫我寫一封短信給 test@example.com，通知會議改到週五上午十點。"
+
+[[questions]]
+id = "s09"
+expected = "cheap"
+text = "請用三點整理這段話的重點：公司下個月起改用新的請款系統，舊系統只能查詢不能送單；新系統的帳號會在月底前寄到各位信箱，第一次登入要改密碼；有問題請找財務部。"
+
+[[questions]]
+id = "s10"
+expected = "cheap"
+text = "請簡單說明什麼是雲端運算，讓沒有技術背景的人也聽得懂。"
+
+[[questions]]
+id = "s11"
+note = "邊界題：很長但很簡單（改寫公告），測字數門檻會不會把它送去強模型"
+expected = "cheap"
+text = """
+各位同仁好，下週三下午兩點原本預定在三樓大會議室舉行的第四季專案進度會議，因為當天會議室臨時被安排給外部訪客使用，所以需要改到五樓的小會議室舉行，時間不變。請各專案負責人在會議前一天下班前，把各自負責項目的進度更新到共用資料夾裡的進度表，內容包括目前完成的比例、遇到的困難，以及下一階段預計要完成的工作。會議當天請準時出席，如果有事不能參加，請事先告知部門助理，並指定一位代理人代為報告。另外，會後會有簡單的茶點，請有飲食限制的同仁回覆助理，方便我們準備。會議資料會在前一天下午寄出，請大家先看過，當天討論會更有效率；如果需要投影設備或視訊連線，也請提前告訴助理。謝謝大家的配合。
+
+請把上面這段公告改寫成更正式、簡潔的版本。"""
+
+[[questions]]
+id = "s12"
+note = "邊界題：decode 裡面含有關鍵字 code"
+expected = "cheap"
+text = "請幫我把這段 base64 decode 成文字：SGVsbG8gV29ybGQ="
+
+[[questions]]
+id = "s13"
+note = "邊界題：「比較」在這裡是「哪個較常用」，不是要做比較分析"
+expected = "cheap"
+text = "「帳號」和「賬號」哪個比較常用？"
+
+[[questions]]
+id = "c01"
+expected = "strong"
+text = "請分析一下公司把客服改成 AI 聊天機器人，可能的風險有哪些，以及導入前要先做的三件事。"
+
+[[questions]]
+id = "c02"
+expected = "strong"
+text = "請比較 PostgreSQL 和 DynamoDB 用來存訂單資料的優缺點，並建議五人以下的小團隊用哪一個。"
+
+[[questions]]
+id = "c03"
+expected = "strong"
+text = "請幫我設計一個員工請假系統的資料表，說明每張表的用途和彼此的關係。"
+
+[[questions]]
+id = "c04"
+expected = "strong"
+text = """
+下面這段 Python 為什麼會一直跑不停？請除錯並給我修正後的程式碼。
+
+i = 0
+while i < 10:
+    print(i)
+"""
+
+[[questions]]
+id = "c05"
+note = "邊界題：英文的複雜問題，但關鍵字清單沒有 design、trade-off"
+expected = "strong"
+text = "Design a rate limiter for a public API. Explain the trade-offs between a token bucket and a sliding window."
+
+[[questions]]
+id = "c06"
+note = "邊界題：很短、沒有關鍵字，但要推理排查"
+expected = "strong"
+text = "我們的訂單服務每天晚上尖峰都會逾時，可能的原因有哪些？應該先從哪裡查起？"
+
+[[questions]]
+id = "c07"
+note = "很長而且複雜：測字數門檻該不該送去強模型"
+expected = "strong"
+text = """
+我們是一間大約五十人的電商公司，目前所有服務都跑在機房裡的一台實體主機上，包括網站、訂單資料庫和後台管理系統。最近半年訂單量成長了三倍，促銷活動時網站常常變慢甚至連不上，而且這台主機已經用了六年，硬碟壞過一次，當時花了兩天才把資料救回來。老闆希望半年內把系統搬到雲端，但預算有限，團隊只有兩位工程師，一位熟悉資料庫，另一位主要負責前端。目前每天大約三千筆訂單，尖峰時一小時可以到五百筆，我們希望搬遷期間網站停機不要超過一個晚上。我們也擔心搬遷時訂單資料遺失，或是搬完之後每個月的雲端費用失控；另外客戶資料裡有姓名、電話和地址，不確定放到雲端之後要注意哪些規定。請針對我們的情況，建議搬遷的優先順序、要先準備的事情，以及控制雲端費用的做法。"""
