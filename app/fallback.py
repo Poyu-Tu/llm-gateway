@@ -66,3 +66,28 @@ def chat_with_fallback(client, messages: list[dict], model: str, settings: Model
     cheap_settings = find_model_config(config.models, cheap_model)
     reason = type(first.error).__name__
     return call_once(client, messages, cheap_model, cheap_settings, True, reason)
+
+
+# 兩顆都被限流時，告訴使用者大約多久後再試：沒有標頭或看不懂時用這個
+DEFAULT_RETRY_AFTER_SECONDS = 30
+# 供應商說要等再久，最多也只轉告這麼久（和 SDK 自己願意等的上限相同）
+MAX_RETRY_AFTER_SECONDS = 120
+
+
+# 照抄供應商說的等待秒數，但不照單全收：只收整數秒，太大就壓到上限，沒有或看不懂就用預設值
+def retry_after_seconds(error: RateLimitError) -> int:
+    """Return how many seconds the caller should wait, based on the provider's Retry-After header."""
+    value = error.response.headers.get("retry-after")
+    if value is None:
+        return DEFAULT_RETRY_AFTER_SECONDS
+
+    try:
+        seconds = int(value)
+    except ValueError:
+        return DEFAULT_RETRY_AFTER_SECONDS
+
+    if seconds < 1:
+        return DEFAULT_RETRY_AFTER_SECONDS
+    if seconds > MAX_RETRY_AFTER_SECONDS:
+        return MAX_RETRY_AFTER_SECONDS
+    return seconds

@@ -1,9 +1,9 @@
-"""Tests for chat_with_fallback(): which model is called, how many times, and what comes back."""
+"""Tests for chat_with_fallback() and retry_after_seconds()."""
 
 from openai import OpenAIError
 
 from app.config import GatewayConfig, ModelConfig, RoutingConfig
-from app.fallback import chat_with_fallback
+from app.fallback import chat_with_fallback, retry_after_seconds
 from tests.fakes import make_fake_client, make_rate_limit_error
 
 # 測試用的設定：兩顆模型的思考量和輸出上限都不同，降級後拿錯設定才看得出來
@@ -184,3 +184,45 @@ def test_rate_limited_cheap_route_does_not_fall_back():
     assert outcome.fallback is False
     assert outcome.fallback_reason is None
     assert completions.models_called() == ["small"]
+
+
+# ---------- retry_after_seconds()：兩顆都被限流時，告訴使用者多久後再試 ----------
+
+
+# 供應商說 7 秒，就轉告 7 秒
+def test_retry_after_copies_the_providers_seconds():
+    assert retry_after_seconds(make_rate_limit_error(retry_after=7)) == 7
+
+
+# 下限：1 秒照抄
+def test_retry_after_accepts_one_second():
+    assert retry_after_seconds(make_rate_limit_error(retry_after=1)) == 1
+
+
+# 上限：120 秒照抄
+def test_retry_after_accepts_the_maximum():
+    assert retry_after_seconds(make_rate_limit_error(retry_after=120)) == 120
+
+
+# 超過上限就壓到上限，不照單全收
+def test_retry_after_caps_long_waits():
+    assert retry_after_seconds(make_rate_limit_error(retry_after=121)) == 120
+    assert retry_after_seconds(make_rate_limit_error(retry_after=86400)) == 120
+
+
+# 供應商沒給標頭：用預設的 30 秒
+def test_retry_after_uses_the_default_without_a_header():
+    assert retry_after_seconds(make_rate_limit_error()) == 30
+
+
+# 0 或負數：叫對方立刻重試沒有意義，用預設值
+def test_retry_after_uses_the_default_for_zero_or_negative():
+    assert retry_after_seconds(make_rate_limit_error(retry_after=0)) == 30
+    assert retry_after_seconds(make_rate_limit_error(retry_after=-5)) == 30
+
+
+# 看不懂的寫法（文字、小數、日期）：不猜，用預設值
+def test_retry_after_uses_the_default_for_values_it_cannot_read():
+    assert retry_after_seconds(make_rate_limit_error(retry_after="soon")) == 30
+    assert retry_after_seconds(make_rate_limit_error(retry_after="1.5")) == 30
+    assert retry_after_seconds(make_rate_limit_error(retry_after="Wed, 21 Oct 2026 07:28:00 GMT")) == 30

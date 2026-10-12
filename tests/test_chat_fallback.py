@@ -118,3 +118,54 @@ def test_chat_returns_502_when_the_cheap_model_fails_after_fallback(tmp_path):
     assert record["status"] == "error"
     assert record["error_type"] == "OpenAIError"
     assert charged_amounts(database) == ["0"]
+
+
+# 兩顆都被限流：回 503，Retry-After 照便宜模型（最後一次）的標頭，不是強模型的
+def test_chat_returns_503_with_retry_after_when_both_models_are_rate_limited(tmp_path):
+    errors = {"big": make_rate_limit_error(retry_after=50), "small": make_rate_limit_error(retry_after=7)}
+    client, completions, _, _ = make_fallback_test_client(tmp_path, errors=errors)
+
+    response = client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Service temporarily unavailable"}
+    assert response.headers["retry-after"] == "7"
+    assert completions.models_called() == ["big", "small"]
+
+
+# 便宜模型的錯誤沒有帶標頭：Retry-After 用預設的 30 秒
+def test_chat_uses_the_default_retry_after_without_a_provider_header(tmp_path):
+    errors = {"big": make_rate_limit_error(), "small": make_rate_limit_error()}
+    client, _, _, _ = make_fallback_test_client(tmp_path, errors=errors)
+
+    response = client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "30"
+
+
+# 路由一開始就選便宜模型、它被限流：一樣回 503 與 Retry-After，只呼叫一次
+def test_chat_returns_503_when_the_cheap_route_is_rate_limited(tmp_path):
+    client, completions, _, _ = make_fallback_test_client(tmp_path, errors={"small": make_rate_limit_error(retry_after=9)})
+
+    response = client.post("/v1/chat", json={"message": "Say hi"})
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "9"
+    assert completions.models_called() == ["small"]
+
+
+# 兩顆都被限流：留下一筆失敗的稽核，不扣錢（資料庫只收到事前的「加 0」）
+def test_chat_audits_and_spends_nothing_when_both_models_are_rate_limited(tmp_path):
+    errors = {"big": make_rate_limit_error(), "small": make_rate_limit_error()}
+    client, _, audit_path, database = make_fallback_test_client(tmp_path, errors=errors)
+
+    response = client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    # 先確認請求真的是在這條路結束的，下面的「沒扣錢」才有意義
+    assert response.status_code == 503
+    record = read_audit(audit_path)
+    assert record["status"] == "error"
+    assert record["error_type"] == "RateLimitError"
+    assert record["routed_model"] == "big"
+    assert charged_amounts(database) == ["0"]
