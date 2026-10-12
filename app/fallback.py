@@ -45,6 +45,26 @@ def call_once(client, messages: list[dict], model: str, settings: ModelConfig, f
     )
 
 
+# 供應商「預算用完」的代碼：換成便宜模型刷的還是同一張卡，降級沒用，而且要有人去處理
+BUDGET_ERROR_CODES = [
+    "insufficient_quota",
+    "credit_balance_exhausted",
+    "project_spend_limit_exceeded",
+    "organization_spend_limit_exceeded",
+    "organization_usage_limit_exceeded",
+]
+
+
+# 這個 429 是不是「預算用完」：看代碼，也看類型；兩邊都對不上的，一律當成限流（排除法）
+def is_budget_exhausted(error: RateLimitError) -> bool:
+    """Return True when the 429 means the provider's budget or credit has run out."""
+    if error.code in BUDGET_ERROR_CODES:
+        return True
+    if error.type == "insufficient_quota":
+        return True
+    return False
+
+
 # 強模型被限流就改用便宜模型一次；便宜模型後面沒有備胎，照平常的方式呼叫
 def chat_with_fallback(client, messages: list[dict], model: str, settings: ModelConfig, config: GatewayConfig) -> CallOutcome:
     """Call the routed model; when the strong model is rate limited, try the cheap model once."""
@@ -60,6 +80,9 @@ def chat_with_fallback(client, messages: list[dict], model: str, settings: Model
 
     # 成功，或是限流以外的錯誤：都不降級，直接交回去
     if not isinstance(first.error, RateLimitError):
+        return first
+    # 供應商的預算用完：降級也一樣會被拒，不降級，直接交回去
+    if is_budget_exhausted(first.error):
         return first
 
     # 強模型被限流：查到便宜模型自己的設定，用它再呼叫一次

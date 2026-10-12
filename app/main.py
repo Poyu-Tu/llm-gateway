@@ -17,7 +17,7 @@ from app.db import make_dynamodb_client
 from app.config import CONFIG_PATH, GatewayConfig, load_config
 from app.router import choose_model
 from app.pricing import ModelNotConfiguredError, cost_micro_usd, find_model_config
-from app.fallback import chat_with_fallback, retry_after_seconds
+from app.fallback import chat_with_fallback, is_budget_exhausted, retry_after_seconds
 from app.quota import add_usage, is_over_quota, period_of, read_limit, read_used, seconds_until_next_period
 
 # 啟動時就把設定讀進來並檢查：設定有問題，Gateway 直接起不來
@@ -194,8 +194,12 @@ def chat_endpoint(
         record["status"] = "error"
         record["error_type"] = type(outcome.error).__name__
         append_audit(record, audit_path)
-        # 最後一次也是被限流（降級後的便宜模型，或路由一開始就選便宜模型）：回 503，告訴對方大約多久後再試
+        # 供應商回 429（限流或預算用完）：回 503
         if isinstance(outcome.error, RateLimitError):
+            # 供應商的預算用完：多久會恢復無從得知，要有人處理，所以不付 Retry-After
+            if is_budget_exhausted(outcome.error):
+                raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+            # 限流（降級後的便宜模型，或路由一開始就選便宜模型）：告訴對方大約多久後再試
             raise HTTPException(
                 status_code=503,
                 detail="Service temporarily unavailable",

@@ -1,9 +1,9 @@
-"""Tests for chat_with_fallback() and retry_after_seconds()."""
+"""Tests for chat_with_fallback(), retry_after_seconds() and is_budget_exhausted()."""
 
 from openai import OpenAIError
 
 from app.config import GatewayConfig, ModelConfig, RoutingConfig
-from app.fallback import chat_with_fallback, retry_after_seconds
+from app.fallback import chat_with_fallback, is_budget_exhausted, retry_after_seconds
 from tests.fakes import make_fake_client, make_rate_limit_error
 
 # 測試用的設定：兩顆模型的思考量和輸出上限都不同，降級後拿錯設定才看得出來
@@ -226,3 +226,58 @@ def test_retry_after_uses_the_default_for_values_it_cannot_read():
     assert retry_after_seconds(make_rate_limit_error(retry_after="soon")) == 30
     assert retry_after_seconds(make_rate_limit_error(retry_after="1.5")) == 30
     assert retry_after_seconds(make_rate_limit_error(retry_after="Wed, 21 Oct 2026 07:28:00 GMT")) == 30
+
+
+# ---------- is_budget_exhausted()：這個 429 是限流，還是供應商的預算用完 ----------
+
+
+# 官方文件列的預算類代碼：每一個都要認得（少打一個字母，這個測試就會紅）
+def test_budget_codes_are_recognized():
+    codes = [
+        "insufficient_quota",
+        "credit_balance_exhausted",
+        "project_spend_limit_exceeded",
+        "organization_spend_limit_exceeded",
+        "organization_usage_limit_exceeded",
+    ]
+    for code in codes:
+        assert is_budget_exhausted(make_rate_limit_error(code=code, error_type="invalid_request_error")) is True, code
+
+
+# 代碼沒見過、但類型是 insufficient_quota：一樣算預算用完
+def test_budget_type_is_recognized_with_an_unknown_code():
+    error = make_rate_limit_error(code="some_new_billing_code", error_type="insufficient_quota")
+
+    assert is_budget_exhausted(error) is True
+
+
+# 一般的限流不是預算用完
+def test_rate_limit_is_not_a_budget_problem():
+    assert is_budget_exhausted(make_rate_limit_error()) is False
+
+
+# 官方文件的另一種限流（請求增加得太快）也不是預算用完
+def test_slow_down_is_not_a_budget_problem():
+    error = make_rate_limit_error(code="slow_down", error_type="rate_limit_error")
+
+    assert is_budget_exhausted(error) is False
+
+
+# 沒有代碼也沒有類型（供應商的回應不是 JSON）：當成限流，不當成預算用完（排除法）
+def test_unknown_429_is_treated_as_a_rate_limit():
+    assert is_budget_exhausted(make_rate_limit_error(code=None, error_type=None)) is False
+
+
+# 強模型遇到預算用完：不降級，把那個錯誤交回去，便宜模型沒有被呼叫
+def test_budget_exhausted_on_the_strong_model_does_not_fall_back():
+    budget_error = make_rate_limit_error(code="project_spend_limit_exceeded", error_type="insufficient_quota")
+    client, completions = make_fake_client(errors={"big": budget_error})
+
+    outcome = call(client, "big")
+
+    assert outcome.error is budget_error
+    assert outcome.result is None
+    assert outcome.model == "big"
+    assert outcome.fallback is False
+    assert outcome.fallback_reason is None
+    assert completions.models_called() == ["big"]

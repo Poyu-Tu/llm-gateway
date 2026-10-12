@@ -169,3 +169,58 @@ def test_chat_audits_and_spends_nothing_when_both_models_are_rate_limited(tmp_pa
     assert record["error_type"] == "RateLimitError"
     assert record["routed_model"] == "big"
     assert charged_amounts(database) == ["0"]
+
+
+# 預算用完的錯誤：代碼與類型照官方文件的寫法
+def make_budget_error():
+    """Return the 429 the provider sends when the project's spend limit is reached."""
+    return make_rate_limit_error(code="project_spend_limit_exceeded", error_type="insufficient_quota")
+
+
+# 強模型遇到預算用完：不降級，回 503，不附 Retry-After（多久恢復無從得知）
+def test_chat_does_not_fall_back_when_the_provider_budget_is_exhausted(tmp_path):
+    client, completions, _, _ = make_fallback_test_client(tmp_path, errors={"big": make_budget_error()})
+
+    response = client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Service temporarily unavailable"}
+    assert "retry-after" not in response.headers
+    assert completions.models_called() == ["big"]
+
+
+# 路由一開始就選便宜模型、遇到預算用完：一樣回 503、不附 Retry-After
+def test_chat_returns_503_without_retry_after_when_the_cheap_route_hits_the_budget(tmp_path):
+    client, completions, _, _ = make_fallback_test_client(tmp_path, errors={"small": make_budget_error()})
+
+    response = client.post("/v1/chat", json={"message": "Say hi"})
+
+    assert response.status_code == 503
+    assert "retry-after" not in response.headers
+    assert completions.models_called() == ["small"]
+
+
+# 強模型被限流、降級後的便宜模型剛好遇到預算用完：看的是最後那一次的錯誤，不附 Retry-After
+def test_chat_returns_503_without_retry_after_when_the_budget_runs_out_after_fallback(tmp_path):
+    errors = {"big": make_rate_limit_error(retry_after=7), "small": make_budget_error()}
+    client, completions, _, _ = make_fallback_test_client(tmp_path, errors=errors)
+
+    response = client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    assert response.status_code == 503
+    assert "retry-after" not in response.headers
+    assert completions.models_called() == ["big", "small"]
+
+
+# 預算用完：留下一筆失敗的稽核，不扣錢
+def test_chat_audits_and_spends_nothing_when_the_provider_budget_is_exhausted(tmp_path):
+    client, _, audit_path, database = make_fallback_test_client(tmp_path, errors={"big": make_budget_error()})
+
+    response = client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    # 先確認請求真的是在這條路結束的，下面的「沒扣錢」才有意義
+    assert response.status_code == 503
+    record = read_audit(audit_path)
+    assert record["status"] == "error"
+    assert record["error_type"] == "RateLimitError"
+    assert charged_amounts(database) == ["0"]
