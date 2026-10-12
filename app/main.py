@@ -8,7 +8,7 @@ from pathlib import Path
 from botocore.client import BaseClient
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, FastAPI, Header, HTTPException
-from openai import OpenAI, OpenAIError
+from openai import OpenAI
 from pydantic import BaseModel, Field
 
 from app.audit import append_audit, hash_prompt, make_summary, mask, detect_pii_types
@@ -17,7 +17,7 @@ from app.db import make_dynamodb_client
 from app.config import CONFIG_PATH, GatewayConfig, load_config
 from app.router import choose_model
 from app.pricing import ModelNotConfiguredError, cost_micro_usd, find_model_config
-from app.providers.openai_client import chat
+from app.fallback import chat_with_fallback
 from app.quota import add_usage, is_over_quota, period_of, read_limit, read_used, seconds_until_next_period
 
 # 啟動時就把設定讀進來並檢查：設定有問題，Gateway 直接起不來
@@ -179,25 +179,27 @@ def chat_endpoint(
         record["error_type"] = type(exc).__name__
         append_audit(record, audit_path)
         raise HTTPException(status_code=500, detail="Internal server error")
-        
-    # 試著呼叫模型；OpenAI 出錯就記一筆失敗，回 502
-    try:
-        result = chat(
-            client,
-            decision.model,
-            [{"role": "user", "content": masked}],
-            settings.reasoning_effort,
-            settings.max_completion_tokens,
-        )
-    except OpenAIError as exc:
+
+    # 呼叫模型：強模型被限流時改用便宜模型一次；不論成功失敗，都交回一個結果（不往外丟錯誤）
+    outcome = chat_with_fallback(
+        client,
+        [{"role": "user", "content": masked}],
+        decision.model,
+        settings,
+        config,
+    )
+
+    # 沒拿到回答：記一筆失敗，回 502
+    if outcome.error is not None:
         record["status"] = "error"
-        record["error_type"] = type(exc).__name__
+        record["error_type"] = type(outcome.error).__name__
         append_audit(record, audit_path)
         raise HTTPException(status_code=502, detail="Upstream model error")
 
     # 成功：補上模型和用量，再寫入
-    # model 記我們指定、也拿來計費的名稱；provider_model 記 OpenAI 回報的名稱，兩者可能不同
-    record["model"] = decision.model
+    # model 記實際回答、也拿來計費的那一顆（降級後是便宜模型）；provider_model 記 OpenAI 回報的名稱
+    result = outcome.result
+    record["model"] = outcome.model
     record["provider_model"] = result.model
     record["input_tokens"] = result.input_tokens
     record["output_tokens"] = result.output_tokens
@@ -205,7 +207,7 @@ def chat_endpoint(
     record["status"] = "ok"
 
     # 把這次的成本加到當月已用量；這時模型已經回答了，扣失敗也照樣把回答交出去，並記下沒扣到
-    cost = cost_micro_usd(settings, result.input_tokens, result.output_tokens)
+    cost = cost_micro_usd(outcome.settings, result.input_tokens, result.output_tokens)
     record["cost_micro_usd"] = cost
     try:
         add_usage(dynamodb, user_id, period, cost)
@@ -217,5 +219,5 @@ def chat_endpoint(
     return {
         "request_id": request_id,
         "reply": result.text,
-        "model": decision.model,
+        "model": outcome.model,
     }
