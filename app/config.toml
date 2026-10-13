@@ -18,7 +18,7 @@ keywords = ["分析", "請比較", "優缺點", "評估", "設計", "架構", "�
 reasoning_effort = "none"
 # 輸出上限：一次呼叫最多花多少，靠它才算得出來（思考 token 也算在裡面）
 # 10/13 依 20 題測試集定案（步驟 7）：1,000 時有兩題寫到上限被截斷，改為 2,000
-max_completion_tokens = 2000
+max_completion_tokens = 1000
 input_price = 100_000
 output_price = 500_000
 
