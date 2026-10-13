@@ -9,22 +9,22 @@ CONFIG = load_config(CONFIG_PATH)
 ROUTING = CONFIG.routing
 
 
-# 20 題用現在的規則重新分流：送對 17 題，送錯的就是定案時接受的那三題
+# 20 題用現在的規則重新分流：送對 18 題，送錯的就是定案時接受的那二題
 def test_shipped_rules_route_the_test_set_as_decided():
     result = summarize(load_rows(RUN_PATH), ROUTING)
 
-    assert result.matched == 17
-    assert result.wasted == ["s11", "s12"]
+    assert result.matched == 18
+    assert result.wasted == ["s11"]
     assert result.risky == ["c06"]
 
 
-# 簡報與結語用的數字：全部用強模型 55,724、現在的規則 41,888，省 24.8%
+# 簡報與結語用的數字：全部用強模型 55,724、現在的規則 41,612，省 25.3%
 def test_shipped_rules_save_the_recorded_amount():
     result = summarize(load_rows(RUN_PATH), ROUTING)
 
     assert result.all_strong == 55724
-    assert result.routed == 41888
-    assert result.saving_percent == 24.8
+    assert result.routed == 41612
+    assert result.saving_percent == 25.3
 
 
 # 「比較」當副詞用（比較有禮貌、比較常用）時是簡單的問題，不能送去強模型

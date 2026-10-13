@@ -10,7 +10,7 @@ cheap_model = "gpt-6-luna"
 strong_model = "gpt-6-sol"
 # 輸入達到這個字數就用強模型
 min_chars = 300
-# 輸入含有任何一個關鍵字就用強模型（不分大小寫）
+# 輸入含有任何一個關鍵字就用強模型（不分大小寫；英文關鍵字前面不能緊貼英文字母或數字，decode 不算 code）
 # 10/13 依 20 題測試集調整（步驟 7）：「比較」常當副詞用（比較有禮貌），改成「請比較」「優缺點」；英文關鍵字和中文對應
 keywords = ["分析", "請比較", "優缺點", "評估", "設計", "架構", "程式碼", "除錯", "code", "debug", "design", "architecture", "trade-off", "compare", "analyze"]
 
