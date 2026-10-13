@@ -2089,6 +2089,8 @@ Settings → Advanced Security → Code scanning → CodeQL analysis → Default
 
 **影響：** 只要有 Gateway Key 的人送一段很長的字串（例如一大段 base64），每個請求就佔住一條處理線好幾秒到好幾分鐘；同時送幾十個就能拖垮 Gateway。
 
+**更正（E105）：** 上面的影響寫得太重。請求本來就有 4,000 字上限（D38），舊寫法在 4,000 字時約 16 毫秒（Claude 實測）；「好幾秒到好幾分鐘」是沒有上限時的情況。修正仍然必要：規則的時間不該隨長度平方變長，上限之後也可能調整
+
 **本人撰寫（`app/audit.py` 第 11～13 行，填空 1 格）：**
 
 ```python
@@ -2136,7 +2138,7 @@ FAILED tests/test_mask_speed.py::test_two_at_signs_give_the_same_result_as_befor
 - **CodeQL 的設定不在 repo 裡**（預設設定由 GitHub 維護）；看程式碼的人看不出有開，靠本紀錄
 - **#2 的關閉靠我們的實測與測試**，不是 CodeQL 自己確認修好；之後改信箱規則，要重看速度測試是否仍有意義
 - **時間當測試門檻**：依賴執行的電腦；目前餘裕約 100 倍
-- **prompt 長度沒有上限**：這條規則修好了，很長的輸入仍可能拖慢其他地方，也影響成本（列入待決）
+- ~~**prompt 長度沒有上限**：這條規則修好了，很長的輸入仍可能拖慢其他地方，也影響成本（列入待決）~~ **更正（E105）：** 寫錯了。`ChatRequest.message` 從 M2 起就限 4,000 字（D38），超過回 422；E105 補了 5 個測試把它釘住
 - **Trivy v0.69.3 偏舊**（執行時提示 0.75.0 已出）；弱點資料庫每天更新，程式沒改也可能某天突然變紅
 - **鎖住的 Action 版本不會自己更新**，要手動換（可考慮 Dependabot 搭配冷卻期，列入待決）
 - **`main` 還能直接推送**：CI 紅了也擋不住直接推送；「CI 通過才能合併」要等改成分支流程
@@ -2161,8 +2163,244 @@ FAILED tests/test_mask_speed.py::test_two_at_signs_give_the_same_result_as_befor
 | `40b3c00` | 13:36 | `build: bump the python base image to pick up the pcre2 fix`（`414228d..40b3c00`） |
 | `341ba79` | 13:40 後 | `test: check that CI catches a changed output cap`（分支 `ci-break-test`，PR #1 關閉、未合併，分支已刪） |
 | `60d8fe0` | 14:17 | `fix: keep the email mask linear on long input`（`40b3c00..60d8fe0`） |
+| `0b972c5` | 16:46 前 | `docs: record M3 step 8 evidence`（`60d8fe0..0b972c5`） |
 
 CI 執行：#1（`414228d`）Tests ✅、Image scan ❌；`40b3c00` 兩個 ✅；PR #1 Tests ❌、Image scan ✅；#4（`60d8fe0`）兩個 ✅，共 27 秒。
+
+---
+
+## E105. 長度上限補測試、關鍵字改成字首比對、步驟 9 真實驗收 S05～S07（2026-10-13 16:50～20:08）
+
+**依據：** `m3-step8-handoff.md` 第 5 節的第 2、3、4 項；E104 的待決（單次 prompt 的長度上限）；E97、E103 的限制（`code` 命中 `decode`）；E103 的 R3 再評估；決策書 11.4（S05～S07）、11.5（截圖規範）、D38（`ChatRequest`）。
+
+**範圍：**
+
+- 單次 prompt 的長度上限：先定上限與錯誤，再補測試
+- 英文關鍵字改成字首比對（`contains_keyword()`，本人撰寫），重算省下的比例
+- 步驟 9 的工具：重問單一題目的 `scripts/ask_cheap.py`、模擬強模型被限流的 `scripts/demo_fallback.py`（Claude 提供）
+- 用便宜模型重問 c07，決定 R3
+- 真實驗收 S05、S06、S07：截圖與錄影
+
+**生活比喻：** 找名字叫 Ann 的人：Annie 要算，Joanna 不要算，因為 Ann 前面緊貼著別的字母。降級的驗收像消防演習：真的火災叫不來，就點一個假警報，看大樓的應變流程有沒有照順序走。
+
+### 1. 單次 prompt 的長度上限：只補測試，不改程式
+
+**發現（Claude 讀程式）：** `app/main.py` 的 `ChatRequest.message` 從 M2 起就是 `Field(min_length=1, max_length=4000)`（D38）。超過 4,000 字時，Pydantic 在對話入口執行之前就回 `422`；驗證 Key 的相依先解析，所以壞 Key 加超長的訊息回 `401`。E104 限制寫的「prompt 長度沒有上限」是錯的（見下方更正）。
+
+**成本試算：** 以一個字約一個 token 估，強模型一次最多約 4,000 × 2 ＋ 2,000 × 10 ＝ 28,000 micro-USD，其中 20,000 來自輸出上限。**控制單次成本的主要槓桿是 `max_completion_tokens`，不是輸入長度。**
+
+**定案（10/13 本人「照建議」）：**
+
+| 決定 | 定案 | 不選的選項與理由 |
+|---|---|---|
+| 上限 | 維持 **4,000 字** | 調低：20 題最長的 c07 只有 319 字，但真實使用會貼長文件；目前沒有資料支持調低 |
+| 超過時 | 維持 **`422`**（Pydantic 驗證失敗的原生回應） | `413`：是「整個請求太大」的傳輸層狀態碼；改成 413 要另寫錯誤處理，對使用者沒有多的資訊 |
+| 稽核 | **不記** | 請求在進入對話入口前就被擋，沒有呼叫模型、沒有花費；稽核記的是走進對話入口的請求 |
+
+**測試（Claude 整份提供，`tests/test_message_limit.py`，5 個）：**
+
+| 測試 | 檢查什麼 |
+|---|---|
+| `test_message_at_the_limit_is_accepted` | 剛好 4,000 字 → `200` |
+| `test_message_one_over_the_limit_is_rejected` | 4,001 字 → `422` |
+| `test_rejected_message_never_reaches_the_model` | 被擋的訊息沒有送到模型，也沒有寫稽核 |
+| `test_limit_counts_characters_not_bytes` | 4,000 個中文字（約 12,000 位元組）→ `200`：算的是字數，不是位元組 |
+| `test_bad_key_gets_401_even_when_the_message_is_too_long` | 壞 Key 加超長 → `401`，先驗身分 |
+
+- **這 5 個一開始就是綠的**，因為上限早就存在；沒有「先紅再綠」，改用破壞實驗證明它們守得住
+- 測試檔裡另外寫一次 `MAX_MESSAGE_CHARS = 4000`（不從 `main.py` 讀）：有人改了上限，測試會紅，要有人確認是刻意的
+
+**破壞實驗（本人執行；做完改回 4000）：**
+
+| 改成 | 結果 | 紅的是 |
+|---|---|---|
+| `max_length=3999` | `2 failed, 3 passed` | `at_the_limit_is_accepted`、`counts_characters_not_bytes`（`assert 422 == 200`） |
+| `max_length=4001` | `2 failed, 3 passed` | `one_over_the_limit_is_rejected`、`never_reaches_the_model`（`assert 200 == 422`） |
+
+### 2. 英文關鍵字改成字首比對：`contains_keyword()`
+
+**問題：** 關鍵字是「出現在文字裡就算」，`code` 會命中 `decode`、`barcode`，把簡單題送去貴 20 倍的強模型（E97、E103）。
+
+| 選項 | 做法 | `decode` | `debugging` | 評估 |
+|---|---|---|---|---|
+| 子字串（原本） | 有出現就算 | 命中（誤判） | 命中 | 多花錢 |
+| 整字比對 | 前後都不能緊貼英文字母或數字 | 不命中 | **不命中（漏掉）** | 難題被送去便宜模型，答不好 |
+| **字首比對（採用）** | **只限制前面**：英文關鍵字前面不能緊貼英文字母或數字 | 不命中 | 命中 | 只擋「從別的字中間開始」的誤判 |
+
+- **為什麼不選整字比對：** 漏掉（難題送便宜模型、使用者拿到較弱的回答）比誤判（多花錢，月額度封頂）更糟
+- **中文：** 沒有空格，沒有「字的開頭」可以判斷；關鍵字第一個字不是英文字母或數字，就維持「有出現就算」
+- **為什麼不用內建的 `\b`：** Python 把中文也當成「字」，`程式code` 裡 `code` 前面沒有邊界，`\bcode` 找不到；`(?<![a-z0-9])code` 找得到（Claude 實測）
+
+**本人撰寫（`app/router.py`，填空 5 格；④⑤ 卡住後由 Claude 給出寫法）：**
+
+```python
+# 英文字母與數字：英文關鍵字的前面不能緊貼這些字（decode 不算 code）
+ASCII_WORD_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+
+# 文字裡有沒有這個關鍵字；英文關鍵字不能藏在別的字中間，中文關鍵字沒有這個限制
+def contains_keyword(lowered: str, keyword: str) -> bool:
+    """Return True when the keyword appears in the text and does not start inside a word."""
+    keyword = keyword.lower()
+    if keyword[0] not in ASCII_WORD_CHARS:
+        return keyword in lowered
+    pattern = r"(?<![a-z0-9])" + re.escape(keyword)
+    return re.search(pattern, lowered) is not None
+```
+
+`choose_model()` 原本的 `if keyword.lower() in lowered:` 改成 `if contains_keyword(lowered, keyword):`；檔案開頭加 `import re`；`app/config.toml` 第 13 行的註解補上「英文關鍵字前面不能緊貼英文字母或數字，decode 不算 code」。
+
+**測試（Claude 整份提供，`tests/test_router_word_boundary.py`，8 個；測試用的規則：`分析`、`code`、`debug`、`trade-off`、`a.b`，字數門檻 1,000）：**
+
+| 測試 | 輸入 | 預期 |
+|---|---|---|
+| `test_keyword_inside_another_word_does_not_count` | `decode this`、`scan the barcode`、`encode it`、`xdebug`、`2code` | 便宜模型、`default` |
+| `test_word_that_starts_with_the_keyword_still_counts` | `fix my debugging`、`read the codebase`、`list the codes` | 強模型、`keyword` |
+| `test_keyword_at_the_start_of_the_text_counts` | `debug this`（前面沒有任何字） | 強模型 |
+| `test_keyword_after_chinese_or_punctuation_counts` | `請幫我debug這個`、`(debug)`、`re-code it`、`OK,code` | 強模型 |
+| `test_keyword_ignores_case` | `DeBuG it` 算、`xDEBUG` 不算 | — |
+| `test_chinese_keyword_is_still_found_anywhere` | `請分析一下`、`abc分析`、`3分析` | 強模型 |
+| `test_symbols_in_a_keyword_are_literal` | `axb` 不算；`see a.b here`、`a trade-off` 算 | — |
+| `test_shipped_rules_follow_the_word_boundary` | 正式規則：`decode`、`barcode` 留在便宜模型；`debugging`、`designing` 送強模型 | — |
+
+**過程（本人執行）：**
+
+| 時機 | 結果 |
+|---|---|
+| 寫函式之前（兩個新測試檔一起跑） | `3 failed, 10 passed`（藏在別字中間、大小寫、正式規則） |
+| 第一次寫完 | `8 failed, 5 passed`：`TypeError: 'in <string>' requires string as left operand, not bool`。原因：把 `choose_model()` 那一行寫成 `if contains_keyword(text, keyword) in lowered:`，函式已經回答 True／False，又多接了原本的 `in lowered`；第一格也交成沒轉小寫的 `text` |
+| 改正後 | `13 passed` |
+| 全部測試 | `2 failed, 257 passed`：都在 `tests/test_routing_rules.py`（`assert 18 == 17`、`assert 41612 == 41888`），**是設計**：數字由本人決定後再改 |
+| 本人改數字之後 | `259 passed` |
+
+**破壞實驗（本人執行，五個；每個做完還原；結果與 Claude 事先給的預期全部相同）：**
+
+| # | 改了什麼 | 結果 | 紅的是 | 證明了 |
+|---|---|---|---|---|
+| A | `re.escape(keyword)` 換成 `keyword` | `1 failed, 7 passed` | `symbols_in_a_keyword_are_literal` | `a.b` 的點會變成「任何一個字」 |
+| B | 拿掉 `(?<![a-z0-9])` | `3 failed, 5 passed` | 藏在別字中間、大小寫、正式規則 | 這一行就是擋住 `decode` 誤判的那道門 |
+| C | 後面再接 `(?![a-z0-9])`（變整字比對） | `2 failed, 6 passed` | `starts_with_the_keyword_still_counts`、正式規則 | 整字比對會漏掉 `debugging`：選字首比對的理由 |
+| D | 換成 `(?<!\S)`（前面一定要空白） | `1 failed, 7 passed` | `after_chinese_or_punctuation_counts` | 中文後面緊貼英文的問法會漏掉 |
+| E | 中文分流改成 `if False:` | `1 failed, 7 passed` | `chinese_keyword_is_still_found_anywhere` | 中文關鍵字要走另一條路 |
+
+**省下的比例重算（`uv run python -m scripts.routing_eval`，本人執行）：**
+
+| 規則 | E103 的數字 | 字首比對後 | 變化的原因 |
+|---|---|---|---|
+| R0 10/12 以前 | 38,515、30.9%、送對 14 | **38,239、31.4%、送對 15** | s12 不再多花錢 |
+| R1 「請比較」「優缺點」 | 37,301、33.1%、送對 16 | **37,025、33.6%、送對 17** | 同上 |
+| **R2 現在的設定檔（定案）** | 41,888、24.8%、送對 17 | **41,612、25.3%、送對 18** | 同上；多花錢只剩 s11 |
+| R3 字數門檻 500 | 25,609、54.0%、送對 17 | 25,333、54.5%、送對 18（c07 換成第 4 節的新成本後約 54.0%） | 同上 |
+
+全部用強模型 55,724、完全照判斷分流 43,165（22.5%）不變。`tests/test_routing_rules.py` 由本人改成：`matched == 18`、`wasted == ["s11"]`、`routed == 41612`、`saving_percent == 25.3`（`risky == ["c06"]`、`all_strong == 55724` 不變），註解同步。
+
+**誠實記錄：** 多出來的 0.5 個百分點只來自 s12 一題，而且規則是用同一組 20 題調的，不能當成「規則變準了」的證據。這次改動的價值是不再誤判 `decode`、`barcode`。
+
+**本人的三句與修正：** 收在「LLM Gateway 程式面試練習本」的「contains_keyword()」一節。要修正的是：第 1 句補「可以是別的字的開頭」；第 2 句原本描述的是「怎麼運作」，改成講取捨（整字比對漏掉變形字、中文沒有字的開頭），並更正「中文那條路回傳 True／False，不是轉成小寫的關鍵字」；第 3 句補上「所以證明了…」與實驗 C。
+
+### 3. 步驟 9 的工具（Claude 提供，本人放進 repo）
+
+| 檔案 | 做什麼 | 測試 |
+|---|---|---|
+| `scripts/ask_cheap.py` | 用便宜模型、設定檔裡的輸出上限問測試集的某一題（先遮罩），印出結束原因、token 數、成本與完整回答；`OpenAI(max_retries=0)` | `tests/test_ask_cheap.py`（4 個）：問的是便宜模型、上限來自設定檔；先遮罩；交回結束原因與成本；用編號找題目 |
+| `scripts/demo_fallback.py` | 啟動真的 Gateway，只換掉連線：問強模型一律丟假的 429（`rate_limit_exceeded`、`retry-after: 7`），問便宜模型原封不動送給真的 OpenAI；換過重試設定的連線也照樣被限流；啟動時印 `SIMULATION: every call to gpt-6-sol gets a fake 429. Calls to other models are real.` | `tests/test_demo_fallback.py`（4 個）：強模型丟 429 且沒送出去；便宜模型照送；換過重試設定的連線也被限流；整條路：路由到強模型 → 假 429 → 降級 → `200`，稽核 `fallback: true` |
+
+- Claude 的試跑環境：非 `integration` `222 passed`；`demo_fallback.py` 的破壞實驗（`==` 改 `!=`）4 個全紅；啟動後 `/health` 有回應
+- 本人：`git status -s` 剛好四個新檔；`267 passed`（45 個 `integration`）
+- 這兩個是 Claude 提供的工具，不是本人寫的函式，沒有三句
+
+### 4. R3 再評估：便宜模型重問 c07（本人在個人電腦執行）
+
+`uv run --env-file .env python -m scripts.ask_cheap c07`：
+
+| 項目 | E103（上限 1,000） | 這次（上限 2,000） |
+|---|---|---|
+| 結束原因 | `length`（被截斷） | **`stop`** |
+| 輸出 token | 寫到上限 | 1,556 |
+| 成本 | 529 | 807 micro-USD |
+| 強模型答同一題 | 14,282 | （同左） |
+
+回答有四段：搬遷優先順序、搬遷前要準備的事、控制雲端費用、客戶個資與合規（並提醒「由熟悉當地法規的人員或顧問確認」）。Claude 判讀：以這題來說便宜模型夠用。
+
+**定案（19:07 本人：「維持就好」）：** 維持 **R2（字數門檻 300）**。
+
+| 決定 | 不選 R3 的理由 | 弱點 |
+|---|---|---|
+| R2 | E103 不選 R3 的主因（c07 被截斷）已不成立；剩下的理由：① R3 多出的 28.7 個百分點裡，c07 一題就佔 24.2 個（價差 13,475），只有一個樣本；② 錯誤的代價不對稱：R2 送錯是多花錢（月額度封頂），R3 送錯是長而複雜的問題拿到較弱的回答 | s11（長而簡單）仍多花錢；有了更多長題目或真實稽核紀錄後要再評估（列入待決） |
+
+### 5. 真實驗收 S05～S07（本人在個人電腦執行，19:15～20:08）
+
+**環境：** Gateway 以 `uv run --env-file .env uvicorn app.main:app --host 127.0.0.1 --port 8000` 啟動（S07 改用 `uv run --env-file .env python -m scripts.demo_fallback`，同一個 8000 埠），連真的 OpenAI 與練習場的 DynamoDB Local（8001）；`docker compose up -d` 後跑種子腳本建立 alice、bob。bob 的 Key 以 `Read-Host` 收進變數，不出現在指令與畫面上。
+
+**小工具（Claude 提供，放在 `data\`，不進 git）：** `demo.ps1` 定義 `ask 檔名`（用 bob 的 Key 送 `data\` 裡的訊息檔，最後印 `HTTP 狀態碼`）與 `last`（稽核最後一筆的驗收欄位）；訊息檔 `s05-easy.json`、`s05-hard.json`（UTF-8）。從瀏覽器下載的 `demo.ps1` 被執行原則擋下（「未經數位簽署」）：本人先用記事本確認內容，再 `Unblock-File` 解除這一個檔的「來自網際網路」標記；執行原則本身不改。
+
+**訊息（Claude 事先用正式規則確認路由）：**
+
+- 簡單：`請把這句話翻成英文：今天天氣很好`（16 字，沒有關鍵字 → `default`）
+- 複雜：`請用三句話說明：設計一個多人共用的 AI 服務，架構上要注意什麼？`（33 字，命中「設計」「架構」→ `keyword`）
+
+**先不錄影走一遍：** 三段都與預期相同（S05：7、1,358；S07：72）。
+
+**錄影版的結果：**
+
+| 編號 | 動作 | 回應 | 稽核（`last`） | 手算（micro-USD） |
+|---|---|---|---|---|
+| S05 | `ask s05-easy` | `200`、`gpt-6-luna` | `routed_model: gpt-6-luna`、`route_reason: default`、輸入 19、輸出 10、`7` | 19 × 0.1 ＋ 10 × 0.5 ＝ 6.9 → 7 |
+| S05 | `ask s05-hard` | `200`、`gpt-6-sol` | `routed_model: gpt-6-sol`、`route_reason: keyword`、輸入 34、輸出 137、`1438` | 34 × 2 ＋ 137 × 10 ＝ 1,438 |
+| S06 | `last` → `34*2 + 137*10` → `routing_eval` | — | 同上一列 | 畫面上手算 1,438 與稽核一致；R2 省 25.3% |
+| S07 | （模擬版）`ask s05-hard` | `200`、**`gpt-6-luna`** | `routed_model: gpt-6-sol`、`route_reason: keyword`、`model: gpt-6-luna`、`fallback: True`、`fallback_reason: RateLimitError`、輸入 34、輸出 123、`65` | 34 × 0.1 ＋ 123 × 0.5 ＝ 64.9 → 65 |
+
+- **單價換算：** 設定檔的單價是「每一百萬個 token 多少 micro-USD」，除以一百萬就是每個 token：`gpt-6-sol` 輸入 2、輸出 10；`gpt-6-luna` 輸入 0.1、輸出 0.5；`cost_micro_usd()` 先用整數相加再除以一百萬，有餘數就進位
+- **S07 的畫面：** 終端機 A 開頭的 `SIMULATION:` 那一行留在畫面上，片段標「模擬」（決策書 11.4 本來就寫「模擬限流後的降級紀錄」）
+- **同一句複雜題：** 強模型 1,438，降級後便宜模型 65；降級讓使用者照樣拿到回答、成本也下降，代價是回答變成便宜模型的版本
+
+**截圖（`docs/screenshots/`，`b980921`）：** `s05-routing.png`、`s06-cost-savings.png`、`s07-fallback.png`。提示字元已設成 `PS>`，Claude 逐張看過：沒有 Key、`sk-`、使用者資料夾名稱，不需遮蔽。`request_id` 是單號，不是機密。
+
+**錄影（不進 repo；存在 repo 外的資料夾並備份到雲端硬碟）：**
+
+| 檔名 | 畫面內容 | 長度 |
+|---|---|---|
+| `m3-s05-routing.mp4` | 簡單題 → `gpt-6-luna`／`default`；複雜題 → `gpt-6-sol`／`keyword` | 44 秒 |
+| `m3-s06-cost-savings.mp4` | 稽核的成本 → 手算 1,438 → 省下比例表（R2 25.3%） | 44 秒 |
+| `m3-s07-fallback.mp4` | `SIMULATION:` 橫幅 → 複雜題 → `200`、`gpt-6-luna`；稽核 `fallback: True`、`RateLimitError` | 59 秒 |
+
+**挫折：S06 第一次錄的手算與稽核對不上。** 第一次錄影時手算打的是 `34*2 + 129*10`（1,358），129 是試跑那一次的輸出 token；正式錄影時模型寫了 137 個，稽核是 1,438。Claude 看截圖時發現，S06 改成 `34*2 + 137*10` 重錄。**學到的：** 手算要用畫面上那一筆的數字，不能照抄試跑的。
+
+**本次真實呼叫的花費（合計約 3,754 micro-USD，約 US$0.004）：** c07 807；試跑 7 ＋ 1,358 ＋ 72；錄影 7 ＋ 1,438 ＋ 65。
+
+### 限制（誠實記錄）
+
+- **S07 是模擬：** 只證明 Gateway 收到 429 之後的反應（降級、計費、稽核），沒有證明 OpenAI 真正限流時的樣子；本專題到目前為止沒有遇過真的 429。便宜模型那一次是真的呼叫
+- **影片沒有經過 Claude 的抽格檢查：** Claude 讀不到影片所在的資料夾，雲端硬碟上的檔案（120～160 MB）也無法透過連接器下載；只靠截圖確認最後畫面，影片由本人自行觀看
+- **S05 每種題只示範一句**，不是統計；25.3% 是 20 題的結果，題目比例（簡單 65%、複雜 35%）是假設，不是真實流量
+- **字首比對仍有的誤判與漏掉：** `designer`、`codebase` 仍會命中 `design`、`code`（字首相同）；英文詞形變化對不上（`analyze` 對不到 `analysis`、`analyzing`）
+- **長度上限的 5 個測試沒有「先紅」**：上限早就存在，只靠破壞實驗證明
+- **R3 的判斷只有 c07 一個樣本**；結果檔裡 c07 的便宜模型成本仍是被截斷那次的 529，`routing_eval` 印出的 R3 54.5% 偏樂觀
+- `demo_fallback.py` 的假 429 固定帶 `retry-after: 7`；兩顆都被限流（503 附 `Retry-After`）與預算用完（503 不降級）這兩種情況只有自動測試，沒有錄影
+
+### 面試可用的說法
+
+- 「我原本以為要加一個長度上限，讀程式才發現 M2 的請求格式早就限 4,000 字、超過回 422。所以我沒有改程式，只補 5 個測試把它釘住，包括『算字數不是位元組』和『壞 Key 先回 401』。這 5 個一開始就是綠的，我用破壞實驗證明它們守得住：把上限改成 3,999 和 4,001，各有兩個測試紅。」
+- 「關鍵字原本只要出現就算，code 會命中 decode。我評估了整字比對，但它會讓 debugging 不算命中，難題被送去便宜模型，這比多花錢更糟。所以我只限制關鍵字前面不能緊貼英文字母。中文沒有空格，維持出現就算。我也沒用內建的 \b，因為 Python 把中文當成字的一部分，『程式code』會找不到。」
+- 「改完之後省下的比例從 24.8% 變 25.3%，但我不會拿這 0.5 個百分點說規則變準了：它只來自一題，而且規則是用同一組題目調的。這次改動的價值是少了一種誤判。」
+- 「把字數門檻放寬到 500 可以省 54%，而且便宜模型這次把那一題答得很完整。但多出來的錢有 24 個百分點來自同一題，只有一個樣本；送錯的代價也不對稱，多花錢有月額度擋著，答不好使用者會直接感受到。所以我維持 300，把它記成已知的取捨。」
+- 「降級我沒辦法叫 OpenAI 真的限流，所以寫了一個啟動腳本：Gateway 全部是真的，只把連線換成『問強模型一律回 429』。畫面開頭會印 SIMULATION，影片也標模擬。它證明的是 Gateway 的反應，不是 OpenAI 的行為，這一點我會照實講。」
+
+**推送後 Claude 的核對：** 讀取公開 repo（`b980921`）：`scripts/ask_cheap.py`、`scripts/demo_fallback.py`、`tests/test_ask_cheap.py`、`tests/test_demo_fallback.py`、`tests/test_message_limit.py`、`tests/test_router_word_boundary.py` 與交付的版本相同；`app/router.py` 的 `contains_keyword()` 與參考寫法相同（`RouteDecision` 後面只空一行，風格問題，不影響功能）。在試跑環境執行 `b980921`：非 `integration` `222 passed`。
+
+---
+
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `8439e20` | 10/13 18:16 前 | `test: pin the 4,000-character message limit` |
+| `dff05ed` | 18:22 前 | `feat: match English keywords only at the start of a word`（兩個一起推送，`0b972c5..dff05ed`） |
+| `0288580` | 19:03 前 | `feat: add a script that asks the cheap model one test question` |
+| `45a29b7` | 19:03 前 | `feat: add a launcher that simulates a rate-limited strong model`（`dff05ed..45a29b7`） |
+| `b980921` | 20:08 | `docs: add M3 acceptance screenshots`（`45a29b7..b980921`） |
+
+CI 執行：`dff05ed` 的 ci #6 ✅（32 秒）、CodeQL ✅（1 分 6 秒）；`45a29b7`、`b980921` 的結果尚未確認。
 
 ---
 
@@ -2193,18 +2431,24 @@ CI 執行：#1（`414228d`）Tests ✅、Image scan ❌；`40b3c00` 兩個 ✅�
 | 21 | D22（repo 結構） | `scripts/` 加上 `probe_usage.py`（真實用量探測，只在個人電腦執行）；`tests/` 加上 `test_chat_truncation.py`；`docs/logs/` 加上 `m3-step6-usage-probe.log`（E101） |
 | 22 | PART 11（11.1、11.6）、8.3 第 7 項 | 簡報 v2.0：拆成 10 分鐘報告版（17 頁）與 6 分鐘廠商影片版（15 頁）兩份簡報、兩份旁白稿（`narration-10min-v2.0.md`、`narration-6min-v2.0.md`）；頁序、Agenda 與子目錄見 E102；每頁標題寫成「Agenda 項目｜子目錄」；技術細節 20 頁留在 v1.2 當 Q&A 備用。取代第 11 項的頁序與 11.1 的時間預算：10 分鐘版配給 9 分 07 秒（現場語速每分鐘 200 字）、6 分鐘版 5 分 34 秒（每分鐘 220 字）。補上老師 10/12 的簡報規則：一頁不超過 3 個重點（最多 5）、字 14～16 pt 以上、標題用本人訂的、去 emoji、以圖為主（E102） |
 | 23 | 3.1 Demo 腳本、8.2 的 M6、PART 11（影片製作） | Demo 改為三章：節費（兩題路由、省多少、Grafana 依使用者與模型的花費）、個資（請 AI 原樣唸一次、稽核反查）、額度（用完被擋）；10 分鐘報告播錄影、本人現場口述；錄影用兩個帳號與會自動放大的錄影工具；動畫由 Claude 以程式算圖成 MP4、只用在本人實測內容的示意；10 分鐘版用 PowerPoint 的轉化（Morph）組裝，6 分鐘版用 CapCut 上繁中字幕（E102） |
-| 24 | D8、12.5「路由門檻」、8.2 的 M3 | 路由規則 v1 的修訂（E103）：關鍵字拿掉「比較」，加「請比較」「優缺點」與英文 `design`、`architecture`、`trade-off`、`compare`、`analyze`；字數門檻維持 300。依據 20 題測試集（兩顆模型都真打）的比較：送對 17 題、省 24.8%；不選省 54% 的字數門檻 500（多省的錢來自把最複雜的題送去便宜模型，而它被截斷）。補上做法：測試集 `scripts/routing_questions.toml`、執行工具 `scripts/run_routing_eval.py`、比較 `scripts/routing_eval.py`；重跑時機：模型換版、單價變更、改路由規則 |
+| 24 | D8、12.5「路由門檻」、8.2 的 M3 | 路由規則 v1 的修訂（E103）：關鍵字拿掉「比較」，加「請比較」「優缺點」與英文 `design`、`architecture`、`trade-off`、`compare`、`analyze`；字數門檻維持 300。依據 20 題測試集（兩顆模型都真打）的比較：送對 17 題、省 24.8%（E105 改成字首比對後：送對 18 題、省 25.3%）；不選省 54% 的字數門檻 500（E103：多省的錢來自把最複雜的題送去便宜模型，而它被截斷；E105 重問後它答完整了，仍不選：只有一個樣本、錯誤代價不對稱）。補上做法：測試集 `scripts/routing_questions.toml`、執行工具 `scripts/run_routing_eval.py`、比較 `scripts/routing_eval.py`；重跑時機：模型換版、單價變更、改路由規則 |
 | 25 | 7.10、3.4、E94 定案 5 的超扣試算 | 輸出上限定案（E103）：`gpt-6-luna` 2,000（1,000 時 20 題有 2 題被截斷）、`gpt-6-sol` 2,000（最多用到 1,372）；一次最多花費：便宜模型 1,000 micro-USD，強模型約 20,000 加輸入。強模型思考量 `low` 時思考 token 實測 0～49 |
-| 26 | 8.2 的 M3（S06）、PART 11、1.x 的成本效益說法 | 「省下 X%」定為 24.8%（20 題、簡單題佔 65%）；報告時必附題目比例；完全照判斷分流是 22.5%，簡單題佔 80%、90% 時推算約 38%、57%（E103） |
+| 26 | 8.2 的 M3（S06）、PART 11、1.x 的成本效益說法 | 「省下 X%」定為 ~~24.8%~~ **25.3%**（E105，關鍵字改字首比對後；20 題、簡單題佔 65%、送對 18 題）；報告時必附題目比例；完全照判斷分流是 22.5%，簡單題佔 80%、90% 時推算約 38%、57%（E103） |
 | 27 | 6.x 單價來源、7.1 模型選擇 | 10/12 再查官方價目表：單價不變；官方已有同價的 `gpt-6.1-sol`，本案維持 `gpt-6-sol`（換模型要改 OpenAI 端白名單、重做步驟 6、7 的實測）；`gpt-6-sol` 沒有棄用公告（E103） |
 | 28 | D22（repo 結構） | `scripts/` 加上 `routing_questions.toml`、`run_routing_eval.py`、`routing_eval.py`；`tests/` 加上 `test_routing_eval.py`、`test_routing_rules.py`；`docs/logs/` 加上 `m3-step7-routing-run.json`（E103） |
 | 29 | D19（版本鎖定） | 基底映像改為 `python:3.12-slim@sha256:a6e34c59…`（10/6 建立、Debian 13.7、`libpcre2-8-0` 已是修補版 `10.46-1~deb13u3`）；原因：Trivy 掃出 CVE-2026-103111（HIGH，有修補版）。補上做法：換指紋前確認新映像已含修補、過 3 天冷卻期；不在 Dockerfile 用 `apt-get upgrade`（E104） |
 | 30 | 8.2 的 M3、10.3、D22（repo 結構） | CI 已實作（E104）：`.github/workflows/ci.yml` 兩個工作（Tests：`uv sync --locked`、`compose.yaml` 起 `dynamodb-test`、`pytest`；Image scan：`docker build` + Trivy，有修補版的 HIGH、CRITICAL 才失敗）；`trivy-action` v0.35.0 鎖 SHA、Trivy v0.69.3（2026-03 供應鏈事件後 Aqua 公告的安全版本）；CodeQL 預設設定（Python、GitHub Actions），不在 repo 裡。repo 結構加上 `.github/workflows/ci.yml`、`tests/test_mask_speed.py` |
 | 31 | D4／D6（個資遮罩）、PART 9 安全 | 信箱規則加起點限制 `(?<![A-Za-z0-9._%+-])`，比對時間由隨長度平方變長改為成正比（4 萬字 2.5 秒 → 0.007 秒），比對結果不變；由 `tests/test_mask_speed.py` 守住。CodeQL 的 4 個警告：1 個修正、3 個附理由關閉（雜湊 Key、建資料腳本印 Key、稽核路徑），修正後仍被標記的那一個附實測數字關閉（E104） |
+| 32 | D8、12.5「路由門檻」、8.2 的 M3 | 英文關鍵字改為**字首比對**（E105）：前面不能緊貼英文字母或數字（`code` 不命中 `decode`，`debug` 命中 `debugging`）；第一個字不是英文字母或數字的關鍵字（中文）維持「有出現就算」。不選整字比對（會漏掉 `debugging`、`designing`）；不用 `\b`（Python 把中文當成字的一部分）。實作 `contains_keyword()`、`ASCII_WORD_CHARS`（`app/router.py`）；已知仍有：`designer` 命中 `design`、詞形變化（`analysis`）對不到 `analyze` |
+| 33 | D38、2.2 的回應對照表 | 單次訊息上限 4,000 字（字數，不是位元組）；超過回 `422`、不呼叫模型、不寫稽核；壞 Key 加超長先回 `401`。由 `tests/test_message_limit.py` 釘住（E105）。補上：單次成本的主要槓桿是輸出上限（強模型一次最多約 28,000 micro-USD，其中 20,000 來自輸出） |
+| 34 | 8.2 的 M3、11.4（S05～S07） | S05、S06、S07 ✅ 10/13（E105）：截圖 `s05-routing.png`、`s06-cost-savings.png`、`s07-fallback.png`；錄影 `m3-s05-routing.mp4`（44 秒）、`m3-s06-cost-savings.mp4`（44 秒）、`m3-s07-fallback.mp4`（59 秒）。S07 用 `scripts/demo_fallback.py` 模擬強模型被限流，畫面與片段標「模擬」 |
+| 35 | 12.5「路由門檻」 | R3（字數門檻 500）再評估（E105）：上限 2,000 時便宜模型答 c07 完整（`stop`、1,556 token、807 micro-USD），仍維持 300；理由：多省的 24 個百分點來自 c07 一題、送錯代價不對稱。待更多長題目或真實稽核紀錄再評估 |
+| 36 | D22（repo 結構） | `scripts/` 加上 `ask_cheap.py`、`demo_fallback.py`；`tests/` 加上 `test_message_limit.py`、`test_router_word_boundary.py`、`test_ask_cheap.py`、`test_demo_fallback.py`（E105） |
+| 37 | PART 9、新增 `SECURITY.md` | GitHub 的 Security policy 是 Disabled（已開 Private vulnerability reporting）；補 `SECURITY.md` 說明回報方式（M3 結案時做） |
 
 ---
 
-## 目前進度（2026-10-13 14:25）
+## 目前進度（2026-10-13 20:10）
 
 - 交接檔第 2 節的事項已回覆（E94、E100）
 - M3 開工前五項定案 ✅（E94）
@@ -2220,9 +2464,11 @@ CI 執行：#1（`414228d`）Tests ✅、Image scan ❌；`40b3c00` 兩個 ✅�
 - 簡報 v2.0（10 分鐘 17 頁、6 分鐘 15 頁）、旁白稿 v2.0 與一段動畫樣片 ✅（E102）；字再少一輪、本人手作版與動畫片段，交給另一個對話繼續
 - 步驟 7（20 題測試集兩顆模型都真打；`summarize()` 算省下的比例；關鍵字改為 R2、便宜模型上限 2,000，並以測試鎖住）✅（E103，已推送 `c64d784`）；省 24.8%（20 題、送對 17 題）；當時 `241 passed`
 - **步驟 8（CI：測試含 `integration`、Trivy 掃映像、CodeQL 預設設定）✅（E104，已推送 `60d8fe0`）；Trivy 抓到基底映像的 HIGH → 換指紋；破壞實驗證明 CI 會擋；CodeQL 4 個 High：信箱規則的速度問題已修，其餘 3 個附理由關閉（Open 0）；目前 `246 passed`（其中 45 個是 `integration`）**
-- M7 開工的第一個條件（M3 與 CI 在 10/16 前完成）：CI 已完成，M3 剩步驟 9、10
-- 下一步：步驟 9（真實驗收 S05～S07，順便用便宜模型重問 c07；**要金鑰，只在個人電腦做**）；之後步驟 10（結案）
-- 下一筆證據是 **E105**
+- 步驟 8 之後：單次訊息上限（4,000 字、422）補測試；英文關鍵字改成字首比對（`contains_keyword()`），省 **25.3%**（送對 18 題）✅（E105，已推送 `dff05ed`）
+- **步驟 9（真實驗收 S05～S07；R3 重問 c07 後維持 300 字）✅（E105，已推送 `b980921`）；目前 `267 passed`（其中 45 個是 `integration`）**
+- M7 開工的第一個條件（M3 與 CI 在 10/16 前完成）：CI 已完成，M3 剩步驟 10
+- 下一步：步驟 10（結案：M3 結案報告、決策書 v2.9、`SECURITY.md`、`protect-main` 改分支流程、簡報數字同步）
+- 下一筆證據是 **E106**
 
 ---
 
@@ -2237,14 +2483,16 @@ CI 執行：#1（`414228d`）Tests ✅、Image scan ❌；`40b3c00` 兩個 ✅�
 | 被截斷的回答要不要告知使用者、要不要不扣錢（E101 選項 B） | M3 只記進稽核。步驟 7：上限 1,000 時便宜模型 20 題有 2 題被截斷（都是複雜題，照規則本來就送強模型），已把上限調到 2,000 | M3 結案時 |
 | ~~路由門檻的數字（300 字、關鍵字清單）~~ | ✅ 10/13 定案 R2（E103）：字數 300 不變；關鍵字見決策書 v2.9 待改第 24 項 | — |
 | 中英文字數的算法（`len()` 把中文字和英文字母都算 1；決策書 12.5） | 維持；20 題沒有長的英文題可以驗證。之後用真實的稽核紀錄再評估 | M3 結案時 |
-| 字數門檻要不要放寬（R3，E103） | 便宜模型上限改 2,000 後用便宜模型重問 c07，本人讀完整回答再決定 | 步驟 9 |
-| 關鍵字是子字串比對（`code` 命中 `decode`、`design` 命中 `designer`；E97、E103） | 已知、未處理；改成整字比對要改 `choose_model()` | M3 結案時 |
+| ~~字數門檻要不要放寬（R3，E103）~~ | ✅ 10/13 維持 300（E105）：便宜模型答 c07 完整，但只有一個樣本；更多長題目或真實稽核紀錄出來後再評估 | M4 之後 |
+| ~~關鍵字是子字串比對（`code` 命中 `decode`；E97、E103）~~ | ✅ 10/13 改為字首比對（E105） | — |
+| 字首比對仍有的誤判與漏掉（E105） | `designer`、`codebase` 仍命中 `design`、`code`；詞形變化（`analysis`、`analyzing`）對不到 `analyze`；清單短、誤判只是多花錢，目前接受 | M4 之後（看真實稽核紀錄） |
 | 新關鍵字是看過 20 題才定的（E103） | 用新的題目或真實的稽核紀錄再驗一次 | M4 之後 |
 | ~~CI 怎麼跑 `integration` 測試；CodeQL（E89、M1 報告）~~ | ✅ 10/12 定案（E101）：`compose.yaml` 起 `dynamodb-test`；pytest + Trivy + CodeQL 預設設定；步驟 8 實作 | — |
-| `protect-main` 加「CI 通過才能合併」 | CI 已上線（E104）；要加的話先改成分支流程（直接推送到 `main` 會被擋） | M3 結案時 |
-| 單次 prompt 的長度上限（E104） | 信箱規則已修；長度上限當第二道防線，也能控制成本；會改到 API 的行為 | M3 結案時 |
+| `protect-main` 加「CI 通過才能合併」 | CI 已上線（E104）；要加的話先改成分支流程（直接推送到 `main` 會被擋）；等結案文件最後一次直接推送之後再開 | M3 結案時 |
+| `SECURITY.md`（E105） | GitHub 的 Security policy 是 Disabled；已開 Private vulnerability reporting，補一份說明回報方式 | M3 結案時 |
+| ~~單次 prompt 的長度上限（E104）~~ | ✅ 10/13：上限早就存在（4,000 字、422、不寫稽核），只補測試（E105） | — |
 | Trivy 升級（目前 v0.69.3，已有 0.75.0）與 Action 的更新方式（E104） | 照 3 天冷卻期手動升級；評估 Dependabot（可設冷卻期）提醒 Action 與基底映像的新版 | M4 前 |
-| 降級（S07）的驗收怎麼呈現（E100） | 真的限流做不出來，用假的模型模擬；畫面上是否標「模擬」待定（老師 10/12 的回覆沒有提到） | 步驟 9 |
+| ~~降級（S07）的驗收怎麼呈現（E100）~~ | ✅ 10/13：`scripts/demo_fallback.py` 只把強模型換成假的 429，其餘全是真的；畫面開頭印 `SIMULATION:`，片段標「模擬」（E105） | — |
 | 降級時便宜模型查不到設定（E100） | 正常走不到（啟動時已檢查）；要處理的話與 500 那條路合併，留稽核 | M3 結案時決定 |
 | SDK 在便宜模型那次的等待與 ALB 閒置逾時（E100） | 評估關掉便宜模型那次的 SDK 重試，或調整 ALB 逾時；上雲後量一次 | M4 前 |
 | 供應商預算用完的告警（D32、E100） | M3 只記稽核的 `error_code`；告警的做法另定 | M4～M6 |
