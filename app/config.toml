@@ -2,7 +2,7 @@
 # 改這個檔就是改價或改規則，一律經過 commit；不從網路下載價格表（決策書 D8、D30）
 #
 # 單價的單位：每一百萬個 token 多少 micro-USD（$0.10 → 100_000；$2 → 2_000_000）
-# 單價來源：OpenAI 官方價目表，2026-09-26 查證
+# 單價來源：OpenAI 官方價目表，2026-09-26 查證；2026-10-12 再查一次，價格不變
 
 [routing]
 # 便宜模型與強模型；名稱要和下面 [models.名稱] 的名稱完全相同
@@ -10,18 +10,21 @@ cheap_model = "gpt-6-luna"
 strong_model = "gpt-6-sol"
 # 輸入達到這個字數就用強模型
 min_chars = 300
-# 輸入含有任何一個關鍵字就用強模型
-keywords = ["分析", "比較", "評估", "設計", "架構", "程式碼", "除錯", "code", "debug"]
+# 輸入含有任何一個關鍵字就用強模型（不分大小寫）
+# 10/13 依 20 題測試集調整（步驟 7）：「比較」常當副詞用（比較有禮貌），改成「請比較」「優缺點」；英文關鍵字和中文對應
+keywords = ["分析", "請比較", "優缺點", "評估", "設計", "架構", "程式碼", "除錯", "code", "debug", "design", "architecture", "trade-off", "compare", "analyze"]
 
 [models.gpt-6-luna]
 reasoning_effort = "none"
-# 輸出上限（暫定，用真實回應試過再調）：一次呼叫最多花多少，靠它才算得出來
-max_completion_tokens = 1000
+# 輸出上限：一次呼叫最多花多少，靠它才算得出來（思考 token 也算在裡面）
+# 10/13 依 20 題測試集定案（步驟 7）：1,000 時有兩題寫到上限被截斷，改為 2,000
+max_completion_tokens = 2000
 input_price = 100_000
 output_price = 500_000
 
 [models.gpt-6-sol]
 reasoning_effort = "low"
+# 10/13：20 題最多用到 1,372，沒有被截斷，維持 2,000
 max_completion_tokens = 2000
 input_price = 2_000_000
 output_price = 10_000_000

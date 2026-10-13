@@ -96,25 +96,24 @@ def load_rows(path: Path) -> list[dict]:
         return json.load(file)["questions"]
 
 
-# 比較幾組規則：現在的規則，以及幾個候選的改法
+# 10/12 以前的關鍵字：步驟 7 比較時的起點（R0）
+OLD_KEYWORDS = ["分析", "比較", "評估", "設計", "架構", "程式碼", "除錯", "code", "debug"]
+
+
+# 比較幾組規則：10/12 以前的規則、兩個候選，以及現在設定檔裡的規則
 def main() -> None:
-    """Print how each candidate set of rules does on the recorded test set."""
+    """Print how each set of rules does on the recorded test set."""
     rows = load_rows(RUN_PATH)
     current = load_config(CONFIG_PATH).routing
 
     # 候選規則：只換關鍵字或字數門檻，其他沿用現在的設定
-    keywords_r1 = []
-    for keyword in current.keywords:
-        if keyword != "比較":
-            keywords_r1.append(keyword)
-    keywords_r1 = keywords_r1 + ["請比較", "優缺點"]
-    keywords_r2 = keywords_r1 + ["design", "architecture", "trade-off", "compare", "analyze"]
+    keywords_r1 = ["分析", "請比較", "優缺點", "評估", "設計", "架構", "程式碼", "除錯", "code", "debug"]
 
     candidates = [
-        ("R0 現在的規則", current),
+        ("R0 10/12 以前的規則", replace(current, keywords=OLD_KEYWORDS)),
         ("R1 「比較」換成「請比較」「優缺點」", replace(current, keywords=keywords_r1)),
-        ("R2 R1 加上英文關鍵字", replace(current, keywords=keywords_r2)),
-        ("R3 R2 加上字數門檻 500", replace(current, keywords=keywords_r2, min_chars=500)),
+        ("R2 現在的設定檔（10/13 定案）", current),
+        ("R3 現在的設定檔，字數門檻改成 500", replace(current, min_chars=500)),
     ]
 
     first = summarize(rows, current)
