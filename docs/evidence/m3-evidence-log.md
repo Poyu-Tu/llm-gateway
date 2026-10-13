@@ -1965,6 +1965,207 @@ max_completion_tokens = 2000
 
 ---
 
+## E104. 步驟 8：CI 上線（測試含 `integration`、Trivy、CodeQL），修掉掃出來的兩個問題（2026-10-13 11:01～14:25）
+
+**依據：** E101 的 16:45 定案（步驟 8：pytest 含 `integration`、Trivy 掃容器映像、CodeQL 預設設定；tfsec 不用；`protect-main` 的「CI 通過才能合併」之後再加；Action 鎖 commit SHA、過 3 天冷卻期）；決策書 D19（版本鎖定）、D4／D6（個資遮罩）、8.2 的 M3、10.3。
+
+**範圍：**
+
+- CI 設定檔 `.github/workflows/ci.yml`（Claude 提供）與第一次執行
+- Trivy 抓到基底映像的弱點 → 換基底映像
+- 破壞實驗：故意改壞設定，確認 CI 會擋
+- CodeQL 第一次掃描的 4 個警告：1 個是真的問題（信箱規則可以被拖慢，本人修正），3 個判斷不用改程式
+
+**生活比喻：** 餐廳出餐口的品管站。每次推送，GitHub 借一台全新的電腦，兩位檢查員同時上工：試吃員照食譜從頭做一遍、跑完全部測試；食材檢驗員把整盤菜（Docker 映像）送驗，看有沒有已知有問題的食材。任何一位說不行，那次推送就打紅叉。
+
+### CI 設定檔（`.github/workflows/ci.yml`，Claude 提供）
+
+| 工作 | 步驟 | 說明 |
+|---|---|---|
+| Tests | 取出程式碼 → 裝 uv 0.12.19 → `uv sync --locked` → `docker compose up -d dynamodb-test` → 等資料庫回應（最多 30 秒）→ `uv run pytest` | 和本機同一個 `compose.yaml`、同一個考場（127.0.0.1:8002）；lock 檔和 `pyproject.toml` 對不上就失敗 |
+| Image scan | 取出程式碼 → `docker build` → Trivy 掃映像 | 有修補版的 HIGH、CRITICAL 才讓 CI 失敗（`ignore-unfixed: true`、`exit-code: 1`） |
+
+共同的設定：推送到 `main` 與每個 PR 觸發；權限只有 `contents: read`；取出程式碼時不把 GitHub 權杖留在 git 設定裡（`persist-credentials: false`）；同一個分支有新推送就取消舊的執行；每個工作最多 15 分鐘。交付前用 zizmor 1.30.1 檢查（最嚴格的等級沒有發現問題）。
+
+**Action 的版本（全部鎖 commit SHA）：**
+
+| Action | 版本 | 發布日 | 備註 |
+|---|---|---|---|
+| `actions/checkout` | v7.0.1 `3d3c42e5…` | 2026-07-17 | |
+| `astral-sh/setup-uv` | v10.2.0 `c18668ad…` | 2026-09-21 | 最新的 v10.3.0（10/9）剛滿 3 天，選前一版多留緩衝 |
+| `aquasecurity/trivy-action` | v0.35.0 `57a97c7e…` | — | 內建 Trivy v0.69.3，設定檔再明寫一次 |
+
+**為什麼 Trivy 特別講究：** 2026 年 3 月 19～20 日，`trivy-action` 77 個版本標籤中有 76 個被改指向惡意程式，Trivy v0.69.4 也是惡意版本；用標籤的人中招，鎖 SHA 的人不受影響。v0.35.0 與這個 SHA、以及 Trivy v0.69.3，是 Aqua 事後公告列為安全的版本（[Aqua 公告](https://www.aquasec.com/blog/trivy-supply-chain-attack-what-you-need-to-know)）。
+
+**Trivy 擋到什麼程度（Claude 建議、本人照用）：**
+
+| | 做法 | 結果 |
+|---|---|---|
+| **A（採用）** | 有修補版的 HIGH、CRITICAL 才擋 | 擋下來就有事可做（升級） |
+| B | 全部列出、不擋 | 紅字看久了沒人看 |
+| C | 所有 HIGH、CRITICAL 都擋 | 沒有修補版的弱點只能等上游，CI 可能紅好幾週 |
+
+### 第一次執行（`414228d`）：Tests 綠、Image scan 紅
+
+- **Tests：** 23 秒，全部通過（當時 241 個，其中 45 個 `integration`）
+- **Image scan：** Trivy 掃出 1 個 HIGH，其餘全部乾淨
+
+| 範圍 | 結果 |
+|---|---|
+| Python 套件（`app/.venv` 裡 26 個，與基底映像的 `pip`） | 全部 0 |
+| 基底系統 Debian 13.7（87 個套件） | 1 個 HIGH |
+
+| 套件 | 弱點 | 嚴重度 | 安裝的版本 | 修補版 | 說明 |
+|---|---|---|---|---|---|
+| `libpcre2-8-0` | CVE-2026-103111 | HIGH | `10.46-1~deb13u2` | `10.46-1~deb13u3` | 特製的正規表示式可以寫到記憶體範圍外 |
+
+**原因：** Dockerfile 的基底映像鎖了指紋（`python:3.12-slim@sha256:dddfd7e0…`），每次建出來都一樣，代價是不會自動拿到修補。
+
+### 修正：換基底映像的指紋（`40b3c00`）
+
+**兩種修法（Claude 建議 A，本人照做）：**
+
+| | 做法 | 為什麼選或不選 |
+|---|---|---|
+| **A（採用）** | 換成新版 `python:3.12-slim` 的指紋 | 照樣鎖死、可重現；前提是官方新映像已含修補 |
+| B | Dockerfile 加 `apt-get upgrade` | 同一份 Dockerfile 不同天建，內容不同，等於鎖指紋白鎖一半 |
+
+**先確認前提（本人執行）：**
+
+```
+docker pull python:3.12-slim
+Digest: sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+docker run --rm python:3.12-slim dpkg-query -W libpcre2-8-0
+libpcre2-8-0:amd64      10.46-1~deb13u3
+
+docker images --digests python
+REPOSITORY   TAG         DIGEST                    IMAGE ID       CREATED      SIZE
+python       3.12-slim   sha256:a6e34c598f24…      a6e34c598f24   7 days ago   179MB
+```
+
+新映像已含修補版，建立於 7 天前，過了 3 天冷卻期。Dockerfile 第 2 行（builder）與第 19 行（正式映像）都換成 `sha256:a6e34c59…`，兩段保持同一個系統版本。推送後 Tests 與 Image scan 都綠，Trivy 沒有「有修補版卻沒修」的 HIGH、CRITICAL。
+
+### 破壞實驗：CI 真的會擋（PR #1，`341ba79`，本人執行）
+
+開分支 `ci-break-test`，把 `app/config.toml` 第 21 行便宜模型的 `max_completion_tokens` 從 2000 改成 1000，推送後開 PR：
+
+```
+FAILED tests/test_routing_rules.py::test_shipped_output_caps_follow_the_test_set - AssertionError: assert 1000 == 2000
+====== 1 failed, 240 passed in 3.12s ======
+```
+
+- PR 頁面：`ci / Tests (pull_request)` 失敗、`ci / Image scan (pull_request)` 通過（「1 failing, 1 successful checks」）
+- PR 關閉、沒有合併，分支刪除；本機切回 `main` 並刪掉分支
+- Claude 事前在試跑環境做過同一個實驗：只有這一個測試紅
+
+**證明了什麼：** 有人把步驟 7 定案的輸出上限改回 1,000，CI 會在合併前標紅；不靠人記得要跑測試。
+
+### CodeQL 預設設定（本人在 GitHub 設定頁開啟）
+
+Settings → Advanced Security → Code scanning → CodeQL analysis → Default；語言 Python 與 GitHub Actions。第一次掃描標出 4 個 High：
+
+| 警告 | 位置 | 判斷（Claude 讀程式與實測） | 處理 |
+|---|---|---|---|
+| #2 比對規則可以被拖慢（`py/polynomial-redos`） | `app/audit.py` 信箱規則 | **真的問題**：一長串字母從每個位置各重掃一次，時間隨長度平方變長 | 本人修正（下一節）；修正後 CodeQL 仍標，實測確認已修好，標 False positive 並附數據 |
+| #4 雜湊演算法太弱 | `app/auth.py:15` | Key 是 `secrets.token_hex(32)` 的 256 位元亂數，不是密碼；快的雜湊對高亂度的祕密沒有被暴力猜出的問題 | 標 False positive，附理由 |
+| #3 把敏感資料印出來 | `scripts/seed.py:53` | 刻意設計：本機的建資料腳本把新 Key 在操作者自己的終端機顯示一次，資料庫只存雜湊；CI 不執行它 | 標 Won't fix，附理由；若之後要對 AWS 執行再檢討 |
+| #1 路徑由外部控制 | `app/audit.py:103` | `audit_path` 來自相依 `get_audit_path()`，永遠回傳 `data/audit.jsonl`，使用者碰不到；CodeQL 把每個路由參數都當成使用者輸入 | 標 False positive，附理由 |
+
+結果：Code scanning **Open 0、Closed 4**（3 個 False positive、1 個 Won't fix）。
+
+### 真的問題：信箱規則可以被拖慢（`60d8fe0`）
+
+**比喻：** 一條很長、沒有任何 @ 的街。舊寫法從第 1 戶走到街尾找 @，沒有；再從第 2 戶走到街尾……n 戶要走 n 趟。新寫法只從街口（前一個字不是信箱的字）出發，整條街只走一遍。
+
+**實測（Claude 執行）：**
+
+| 輸入 | 修正前 | 修正後 |
+|---|---|---|
+| 4 萬個字母 `a` | 2.556 秒 | 0.007 秒 |
+| 4 萬個數字 `1` | 2.628 秒 | 0.005 秒 |
+| 40 萬個字母 `a` | 照平方推算約 4 分鐘 | 0.048 秒 |
+| 40 萬個 `%`（修正後 CodeQL 點名的輸入） | — | 0.029 秒 |
+
+**影響：** 只要有 Gateway Key 的人送一段很長的字串（例如一大段 base64），每個請求就佔住一條處理線好幾秒到好幾分鐘；同時送幾十個就能拖垮 Gateway。
+
+**本人撰寫（`app/audit.py` 第 11～13 行，填空 1 格）：**
+
+```python
+# 信箱的形狀：名字 @ 網域 . 結尾；名字只能從「前一個字不是信箱的字」的地方開始找
+# （CodeQL 10/13：沒有這個限制時，一長串字母會從每個位置各重掃一次，時間隨長度平方變長）
+EMAIL_PATTERN = r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+```
+
+`(?<!…)` 只看前一個字、不把它吃進比對結果，所以比對結果和修正前相同；原本的 241 個測試全部照過。
+
+**測試（Claude 整份提供，`tests/test_mask_speed.py`，5 個；測試數 241 → 246）：**
+
+| 測試 | 檢查什麼 |
+|---|---|
+| `test_long_run_of_letters_is_masked_quickly` | 5 萬個 `a` 在 1 秒內遮完 |
+| `test_long_run_of_digits_is_masked_quickly` | 5 萬個 `1` 在 1 秒內遮完 |
+| `test_email_right_after_chinese_is_still_masked` | 「寄到test@example.com謝謝」→「寄到[EMAIL]謝謝」 |
+| `test_ordinary_emails_are_still_masked` | 前後有空格、名字有點和加號的信箱照樣遮 |
+| `test_two_at_signs_give_the_same_result_as_before` | `abc@def@ghi.com` → `abc@[EMAIL]`，與修正前相同 |
+
+- 修正前：2 個測速度的紅（約 9 秒）。**這一步在 Claude 的試跑環境驗證，本人沒有重跑**
+- 修正後（本人執行）：`5 passed`；全部 `246 passed`
+- 門檻 1 秒：修正後約 0.01 秒、修正前約 4 秒，兩邊差好幾百倍，CI 的電腦慢一些也不會誤判
+
+**破壞實驗（本人執行，做完改回）：** 把起點限制換成 `\S`（前面一定要是空白）：
+
+```
+FAILED tests/test_mask_speed.py::test_email_right_after_chinese_is_still_masked - AssertionError: assert '寄到test@example.com謝謝' == '寄到[EMAIL]謝謝'
+FAILED tests/test_mask_speed.py::test_two_at_signs_give_the_same_result_as_before - AssertionError: assert 'abc@def@ghi.com' == 'abc@[EMAIL]'
+====== 2 failed, 3 passed ======
+```
+
+證明了：中文句子裡的信箱前面通常沒有空格，「前面要是空白」這種寫法會讓個資原樣送出去；`abc@def…` 的 `def` 前面是 `@`，也整個不遮。改回後 `5 passed`。
+
+**修正後 CodeQL 仍然標記（10/13 14:20 左右）：** 位置跟著移到第 63 行，訊息是「很多個 `%` 連在一起時會變慢」。實測修正後的規則：40 萬個 `%` 0.029 秒、`x@` 接 40 萬個 `%` 0.040 秒，長度與時間成正比。判斷是 CodeQL 不認得 `(?<!…)`，把限制當成不存在。**不為了讓工具不再標記而改寫法：** 改成「名字最多 64 個字」CodeQL 看得懂，但超過 64 字的名字會整個不遮；速度改由 `test_mask_speed.py` 在每次推送時守住。以 False positive 標記，留言附 commit 與實測數字。
+
+**本人的三句（10/13 14:12，原文）與修正：** 收在「LLM Gateway 程式面試練習本」的「EMAIL_PATTERN」一節。要修正的是：第 2 句「一條一條找」改成「每個起點都重新往後掃到底」，並補上誰能利用、後果多大；第 3 句補上測速度的測試，並以「所以證明了…」收尾。
+
+### 推送後 Claude 的核對
+
+讀取公開 repo：`.github/workflows/ci.yml`、`tests/test_mask_speed.py` 與交付的版本相同；`40b3c00` 只改 Dockerfile 兩行（`4 ++--`）；`app/audit.py` 第 13 行與參考寫法相同。在試跑環境執行 `60d8fe0`：`246 passed`（其中 45 個 `integration`，以替身伺服器代替 DynamoDB Local）。
+
+### 限制（誠實記錄）
+
+- **CodeQL 的設定不在 repo 裡**（預設設定由 GitHub 維護）；看程式碼的人看不出有開，靠本紀錄
+- **#2 的關閉靠我們的實測與測試**，不是 CodeQL 自己確認修好；之後改信箱規則，要重看速度測試是否仍有意義
+- **時間當測試門檻**：依賴執行的電腦；目前餘裕約 100 倍
+- **prompt 長度沒有上限**：這條規則修好了，很長的輸入仍可能拖慢其他地方，也影響成本（列入待決）
+- **Trivy v0.69.3 偏舊**（執行時提示 0.75.0 已出）；弱點資料庫每天更新，程式沒改也可能某天突然變紅
+- **鎖住的 Action 版本不會自己更新**，要手動換（可考慮 Dependabot 搭配冷卻期，列入待決）
+- **`main` 還能直接推送**：CI 紅了也擋不住直接推送；「CI 通過才能合併」要等改成分支流程
+- 破壞實驗只證明了一種改壞的方式會被擋；CI 只跑得到有測試的地方
+- Trivy 的「秘密掃描」有開，但本次只看弱點的結果，沒有另外驗證它能抓到什麼
+
+### 面試可用的說法
+
+- 「我的 CI 第一次跑，測試全綠、映像掃描是紅的：基底映像裡處理正規表示式的系統套件有一個 HIGH 弱點，Debian 已經出修補版。因為我把基底映像鎖在指紋上，它不會自己更新；我確認新的官方映像已含修補、也過了 3 天冷卻期，才換指紋，而不是在 Dockerfile 裡 `apt-get upgrade`，因為那樣同一份檔案不同天建出來會不一樣。」
+- 「CI 會不會擋，我用破壞實驗證明：開一個 PR 故意把輸出上限從 2,000 改回 1,000，測試紅在鎖住這個決定的那一個測試，PR 不合併直接關掉。」
+- 「CodeQL 第一次掃出 4 個 High。我一個一個讀程式、實測：一個是真的，信箱比對在一長串字母上會隨長度平方變慢，4 萬個字要 2.5 秒；加一個『只從開頭找』的限制後變成 0.007 秒。另外三個是誤判或刻意設計，我在 GitHub 上寫理由關掉，不是一鍵全部忽略。」
+- 「修好之後 CodeQL 還是標著，因為它看不懂我用的寫法。能讓它看懂的改法會讓超過 64 字的信箱不被遮，所以我不為了讓工具閉嘴改行為，改用測試守住速度，並在警告上附實測數字。」
+- 「Trivy 的 GitHub Action 在 2026 年 3 月被入侵，76 個版本標籤被改指向惡意程式。我所有 Action 都鎖 commit SHA，Trivy 用官方公告列為安全的版本，新版本至少放 3 天才用。」
+
+---
+
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `414228d` | 10/13 13:26 | `ci: run the tests and scan the image on every push`（`7edacb3..414228d`） |
+| `40b3c00` | 13:36 | `build: bump the python base image to pick up the pcre2 fix`（`414228d..40b3c00`） |
+| `341ba79` | 13:40 後 | `test: check that CI catches a changed output cap`（分支 `ci-break-test`，PR #1 關閉、未合併，分支已刪） |
+| `60d8fe0` | 14:17 | `fix: keep the email mask linear on long input`（`40b3c00..60d8fe0`） |
+
+CI 執行：#1（`414228d`）Tests ✅、Image scan ❌；`40b3c00` 兩個 ✅；PR #1 Tests ❌、Image scan ✅；#4（`60d8fe0`）兩個 ✅，共 27 秒。
+
+---
+
 ## 決策書 v2.9 待改項目
 
 | # | v2.8 的位置 | 要改什麼 |
@@ -1997,10 +2198,13 @@ max_completion_tokens = 2000
 | 26 | 8.2 的 M3（S06）、PART 11、1.x 的成本效益說法 | 「省下 X%」定為 24.8%（20 題、簡單題佔 65%）；報告時必附題目比例；完全照判斷分流是 22.5%，簡單題佔 80%、90% 時推算約 38%、57%（E103） |
 | 27 | 6.x 單價來源、7.1 模型選擇 | 10/12 再查官方價目表：單價不變；官方已有同價的 `gpt-6.1-sol`，本案維持 `gpt-6-sol`（換模型要改 OpenAI 端白名單、重做步驟 6、7 的實測）；`gpt-6-sol` 沒有棄用公告（E103） |
 | 28 | D22（repo 結構） | `scripts/` 加上 `routing_questions.toml`、`run_routing_eval.py`、`routing_eval.py`；`tests/` 加上 `test_routing_eval.py`、`test_routing_rules.py`；`docs/logs/` 加上 `m3-step7-routing-run.json`（E103） |
+| 29 | D19（版本鎖定） | 基底映像改為 `python:3.12-slim@sha256:a6e34c59…`（10/6 建立、Debian 13.7、`libpcre2-8-0` 已是修補版 `10.46-1~deb13u3`）；原因：Trivy 掃出 CVE-2026-103111（HIGH，有修補版）。補上做法：換指紋前確認新映像已含修補、過 3 天冷卻期；不在 Dockerfile 用 `apt-get upgrade`（E104） |
+| 30 | 8.2 的 M3、10.3、D22（repo 結構） | CI 已實作（E104）：`.github/workflows/ci.yml` 兩個工作（Tests：`uv sync --locked`、`compose.yaml` 起 `dynamodb-test`、`pytest`；Image scan：`docker build` + Trivy，有修補版的 HIGH、CRITICAL 才失敗）；`trivy-action` v0.35.0 鎖 SHA、Trivy v0.69.3（2026-03 供應鏈事件後 Aqua 公告的安全版本）；CodeQL 預設設定（Python、GitHub Actions），不在 repo 裡。repo 結構加上 `.github/workflows/ci.yml`、`tests/test_mask_speed.py` |
+| 31 | D4／D6（個資遮罩）、PART 9 安全 | 信箱規則加起點限制 `(?<![A-Za-z0-9._%+-])`，比對時間由隨長度平方變長改為成正比（4 萬字 2.5 秒 → 0.007 秒），比對結果不變；由 `tests/test_mask_speed.py` 守住。CodeQL 的 4 個警告：1 個修正、3 個附理由關閉（雜湊 Key、建資料腳本印 Key、稽核路徑），修正後仍被標記的那一個附實測數字關閉（E104） |
 
 ---
 
-## 目前進度（2026-10-13 10:56）
+## 目前進度（2026-10-13 14:25）
 
 - 交接檔第 2 節的事項已回覆（E94、E100）
 - M3 開工前五項定案 ✅（E94）
@@ -2014,10 +2218,11 @@ max_completion_tokens = 2000
 - 步驟 7、8 的做法已定案（E101 的 16:45 定案）
 - 老師 10/12 回覆：10 分鐘期末報告（含 Demo）與 6 分鐘廠商影片，兩個版本分開做（E101）；簡報改版在另一個對話
 - 簡報 v2.0（10 分鐘 17 頁、6 分鐘 15 頁）、旁白稿 v2.0 與一段動畫樣片 ✅（E102）；字再少一輪、本人手作版與動畫片段，交給另一個對話繼續
-- **步驟 7（20 題測試集兩顆模型都真打；`summarize()` 算省下的比例；關鍵字改為 R2、便宜模型上限 2,000，並以測試鎖住）✅（E103，已推送 `c64d784`）；省 24.8%（20 題、送對 17 題）；目前 `241 passed`（其中 45 個是 `integration`）**
-- 下一步：步驟 8（CI：pytest 含 `integration`、Trivy、CodeQL；不需要金鑰）
-- 之後：步驟 9（真實驗收 S05～S07，順便用便宜模型重問 c07；**要金鑰，只在個人電腦做**）、步驟 10（結案）
-- 下一筆證據是 **E104**
+- 步驟 7（20 題測試集兩顆模型都真打；`summarize()` 算省下的比例；關鍵字改為 R2、便宜模型上限 2,000，並以測試鎖住）✅（E103，已推送 `c64d784`）；省 24.8%（20 題、送對 17 題）；當時 `241 passed`
+- **步驟 8（CI：測試含 `integration`、Trivy 掃映像、CodeQL 預設設定）✅（E104，已推送 `60d8fe0`）；Trivy 抓到基底映像的 HIGH → 換指紋；破壞實驗證明 CI 會擋；CodeQL 4 個 High：信箱規則的速度問題已修，其餘 3 個附理由關閉（Open 0）；目前 `246 passed`（其中 45 個是 `integration`）**
+- M7 開工的第一個條件（M3 與 CI 在 10/16 前完成）：CI 已完成，M3 剩步驟 9、10
+- 下一步：步驟 9（真實驗收 S05～S07，順便用便宜模型重問 c07；**要金鑰，只在個人電腦做**）；之後步驟 10（結案）
+- 下一筆證據是 **E105**
 
 ---
 
@@ -2036,13 +2241,15 @@ max_completion_tokens = 2000
 | 關鍵字是子字串比對（`code` 命中 `decode`、`design` 命中 `designer`；E97、E103） | 已知、未處理；改成整字比對要改 `choose_model()` | M3 結案時 |
 | 新關鍵字是看過 20 題才定的（E103） | 用新的題目或真實的稽核紀錄再驗一次 | M4 之後 |
 | ~~CI 怎麼跑 `integration` 測試；CodeQL（E89、M1 報告）~~ | ✅ 10/12 定案（E101）：`compose.yaml` 起 `dynamodb-test`；pytest + Trivy + CodeQL 預設設定；步驟 8 實作 | — |
-| `protect-main` 加「CI 通過才能合併」 | CI 跑穩之後再加，屆時改成分支流程（E101） | 步驟 8 之後 |
+| `protect-main` 加「CI 通過才能合併」 | CI 已上線（E104）；要加的話先改成分支流程（直接推送到 `main` 會被擋） | M3 結案時 |
+| 單次 prompt 的長度上限（E104） | 信箱規則已修；長度上限當第二道防線，也能控制成本；會改到 API 的行為 | M3 結案時 |
+| Trivy 升級（目前 v0.69.3，已有 0.75.0）與 Action 的更新方式（E104） | 照 3 天冷卻期手動升級；評估 Dependabot（可設冷卻期）提醒 Action 與基底映像的新版 | M4 前 |
 | 降級（S07）的驗收怎麼呈現（E100） | 真的限流做不出來，用假的模型模擬；畫面上是否標「模擬」待定（老師 10/12 的回覆沒有提到） | 步驟 9 |
 | 降級時便宜模型查不到設定（E100） | 正常走不到（啟動時已檢查）；要處理的話與 500 那條路合併，留稽核 | M3 結案時決定 |
 | SDK 在便宜模型那次的等待與 ALB 閒置逾時（E100） | 評估關掉便宜模型那次的 SDK 重試，或調整 ALB 逾時；上雲後量一次 | M4 前 |
 | 供應商預算用完的告警（D32、E100） | M3 只記稽核的 `error_code`；告警的做法另定 | M4～M6 |
 | 預扣（7.10） | M3 不做（E94 定案 5） | M5 |
-| M7 是否開工（E79） | 第一個時段的條件：M3 與 CI 在 10/16（五）前完成 | 10/16、10/30、11/1 |
+| M7 是否開工（E79） | 第一個時段的條件：M3 與 CI 在 10/16（五）前完成；CI 已完成（E104） | 10/16、10/30、11/1 |
 | ~~和老師討論示範影片的結果（E100）~~ | ✅ 10/12：10 分鐘期末報告（含 Demo，主軸是 Demo）與 6 分鐘廠商影片，兩個版本分開做（E101）；簡報與旁白稿的改版在另一個對話 | — |
 | 簡報計時試講（E84、E102） | 10 分鐘報告版至少計時試講一次（原本是主影片）；v2.0 的配給是 9 分 07 秒 | 10/18 前 |
 | 簡報下一輪（E102） | 本人先手作（標題、故事線、至少一張自己畫的圖）→ AI 再修；字 14 pt 以上、畫面只放圖、Demo 或動畫；改完請第二個 AI 扮受眾看一次 | 交接的簡報對話 |
