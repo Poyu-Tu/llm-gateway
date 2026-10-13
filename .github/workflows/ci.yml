@@ -1,0 +1,86 @@
+# CI：每次推送到 main、每個 PR，都自動跑全部測試，並掃描容器映像的弱點
+# 所有 Action 都鎖在 commit SHA（標籤可以被改指向別的程式碼，SHA 不行），並過 3 天冷卻期
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 預設只給讀程式碼的權限；這份 CI 不需要寫入任何東西
+permissions:
+  contents: read
+
+# 同一個分支有新的推送時，取消還在跑的舊執行，省時間也不會兩次結果打架
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 全部的測試，包括連 DynamoDB Local 的 integration 測試
+  test:
+    name: Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      # 取出程式碼；不把 GitHub 的權杖留在 git 設定裡，後面的步驟拿不到
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # 安裝 uv，版本和 Dockerfile 用的一樣
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.19"
+
+      # 照 uv.lock 安裝；lock 檔和 pyproject.toml 對不上就直接失敗
+      - name: Install dependencies from the lock file
+        run: uv sync --locked
+
+      # 和本機一樣，用 compose.yaml 起測試專用的資料庫（127.0.0.1:8002）
+      - name: Start the test database
+        run: docker compose up -d dynamodb-test
+
+      # 等資料庫起來：有回應就好（回什麼狀態碼都可以），最多等 30 秒
+      - name: Wait for the test database
+        run: |
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null http://127.0.0.1:8002; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "DynamoDB Local did not start in 30 seconds"
+          exit 1
+
+      - name: Run all tests
+        run: uv run pytest
+
+  # 建出和正式環境一樣的映像，用 Trivy 掃弱點
+  image-scan:
+    name: Image scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the image
+        run: docker build -t llm-gateway:ci .
+
+      # 有修補版可以升級的 HIGH、CRITICAL 弱點就讓 CI 失敗；還沒有修補版的先不算（只能等上游修）
+      # trivy-action 用 v0.35.0：2026-03 供應鏈事件後，Aqua 公告點名安全的版本與 SHA；
+      # 它內建的 Trivy 是 v0.69.3（同一份公告列為安全），這裡再明寫一次
+      - name: Scan the image with Trivy
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: llm-gateway:ci
+          version: v0.69.3
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
