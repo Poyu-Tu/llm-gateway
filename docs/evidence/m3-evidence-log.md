@@ -2534,7 +2534,16 @@ Claude 讀取公開 repo 核對：兩個檔與交付的版本相同。
 
 ---
 
-**推送：** 待本人推送後補上。
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `19f87da` | 10/14 00:34 | `docs: add decision book v2.9 and the security policy`（`bb45acd..19f87da`；最後一次直接推送 `main`） |
+
+- Claude 讀取公開 repo 核對：三個檔與交付的版本相同
+- 本人截圖：`protect-main` 顯示「Ruleset updated」、Active；Security 分頁的 Security policy、Private vulnerability reporting 都是 Enabled
+- **截圖沒有拍到加進去的檢查項目（`Tests`、`Image scan`）**；規則有沒有真的擋住直接推送，留到 M4 第一步實測（E108）
+- 這一段推送紀錄寫在 `19f87da` 之後，`main` 已不能直接推送，所以隨 M4 的第一個 PR 進 repo
 
 ---
 
