@@ -11,9 +11,30 @@ services:
       # 只綁本機；主機用 8001，因為 8000 是 Gateway 的
       - "127.0.0.1:8001:8000"
 
-# 測試專用（考場）：每個測試都會清空重建資料表，所以和上面開發用的分開
+  # 測試專用（考場）：每個測試都會清空重建資料表，所以和上面開發用的分開
   dynamodb-test:
     image: amazon/dynamodb-local:3.3.1@sha256:ff89bd48ff32cd8d9be5fee8873b65b8854dc408f1afe881be6eb00247bc0dab
     command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
     ports:
       - "127.0.0.1:8002:8000"
+
+  # Gateway 本身：用 repo 的 Dockerfile 建映像，驗證「容器裡也跑得起來」（M4 上雲跑的就是這個映像）
+  gateway:
+    # 平常 docker compose up -d 不會啟動它；要加 --profile gateway 才會（不搶 uvicorn 的 8000 埠）
+    profiles: ["gateway"]
+    # 用這個資料夾的 Dockerfile 建映像
+    build: .
+    # 只綁本機
+    ports:
+      - "127.0.0.1:8000:8000"
+    # 金鑰從 .env 讀；沒有 .env 也照樣啟動（公司電腦驗證設定檔與 /health 用）
+    env_file:
+      - path: .env
+        required: false
+    # 不是機密的設定直接寫；這裡的值會蓋過 .env 裡的同名設定
+    # 容器之間用服務名稱找對方，走資料庫容器自己的 8000 埠（不是主機的 8001）
+    environment:
+      DYNAMODB_ENDPOINT_URL: http://dynamodb:8000
+    # 先把資料庫容器開起來（只保證「開始啟動」，不保證「已經可以用」）
+    depends_on:
+      - dynamodb
