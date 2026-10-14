@@ -411,7 +411,7 @@ def make_dynamodb_client() -> BaseClient:
 
 ---
 
-## E112. 第 4 項：停用 Key 的腳本 `scripts/disable_key.py`（2026-10-14 15:55～17:11，破壞實驗與三句待補）
+## E112. 第 4 項：停用 Key 的腳本 `scripts/disable_key.py`（2026-10-14 15:55～17:11；破壞實驗與三句 18:40～18:48）
 
 **依據：** E91（M2：停用 Key 只能手動改資料庫）；決策書 12.5「停用 Key 的腳本」。
 
@@ -459,23 +459,109 @@ def make_dynamodb_client() -> BaseClient:
 
 **過程（本人執行）：** 只放測試 → `1 error during collection`（`scripts.disable_key` 還不存在）；填完、改正三格 → `290 passed`。
 
-**Claude 在試跑環境做過、本人待做的破壞實驗：**
+### 破壞實驗（本人執行，三個；每個做完 `git restore`，只跑 `tests/test_disable_key.py`；最後整套 `290 passed`）
 
-| # | 改了什麼 | 試跑結果 |
-|---|---|---|
-| 1 | 拿掉 `ConditionExpression` | `1 failed`：`test_disable_key_rejects_an_unknown_key_without_creating_one` |
-| 2 | 改成 `SET status = :disabled`、拿掉 `ExpressionAttributeNames` | `6 failed`：`ValidationException … reserved keyword: status` |
-| 3 | 內圈迴圈之後加 `break`（只看第一頁） | `1 failed`：`test_disable_user_keys_reads_every_page` |
+| # | 改了什麼 | 結果 | 失敗訊息 | Claude 的試跑 |
+|---|---|---|---|---|
+| 1 | 拿掉 `ConditionExpression` | `1 failed, 7 passed` | `test_disable_key_rejects_an_unknown_key_without_creating_one - Failed: DID NOT RAISE KeyNotFoundError` | 相同 |
+| 2 | 改成 `SET status = :disabled`、拿掉 `ExpressionAttributeNames` | `7 failed, 1 passed` | 7 個都是 `ClientError: … (ValidationException) when calling the UpdateItem`；唯一綠的是 `test_disable_user_keys_returns_zero_for_an_unknown_user` | **6 failed**（不同，見下） |
+| 3 | 外圈迴圈裡、內圈結束後加 `break`（只看第一頁） | `1 failed, 7 passed` | `test_disable_user_keys_reads_every_page - assert 1 == 3` | 相同 |
+
+**判讀：**
+
+- **實驗 1：** 其他 7 個照樣綠。擋住「打錯字卻回報成功」的只有這個條件與這個測試
+- **實驗 2 與試跑差 1 個：** 差在 `rejects_an_unknown_key`。DynamoDB Local 先檢查語法，丟 `ValidationException`，程式原封不動往外丟，不是 `KeyNotFoundError`，所以這個測試也紅；Claude 的替身伺服器（試跑環境）看來是先檢查「這筆存不存在」，變成 `KeyNotFoundError` 而剛好綠。Claude 事先在對話中提醒過這個差異，請本人照實記數字。**替身伺服器的檢查順序可能和真的不同，破壞實驗以 DynamoDB Local 的結果為準**；雲端 DynamoDB 的行為上雲後才知道
+- **實驗 2 唯一綠的那個：** 沒有這個人時根本不會呼叫更新，所以碰不到壞掉的語法
+- **實驗 3：** Key 少的測試一頁就裝完，看不出漏頁；只有把一頁調成 1 筆的測試抓得到。`1 == 3` 直接說出 3 把只停了 1 把
+
+**本人的三句與修正：** 收在「LLM Gateway 程式面試練習本」的 `disable_key_hash()`、`disable_key()` 與 `disable_user_keys()` 兩節。要修正的是：兩組第 2 句都寫成步驟（「輸入 → 算雜湊 → 改成 disabled」），改成講風險（更新找不到會自己新建一筆、掃表結果一頁一頁回來）與代價；`disable_user_keys()` 的第 2 句「兩個方式都做最完整」是選 C 的理由，不是函式為什麼這樣寫；兩組第 3 句都補上破壞實驗本身、結果與「所以證明了…」。`disable_user_keys()` 第 3 句裡「為什麼只有這個測試抓得到」講得對，保留。
 
 ### 限制（誠實記錄）
 
-- **破壞實驗與兩組三句還沒做**（`disable_key_hash()`、`disable_user_keys()`），在合併前補上
 - `disable_user_keys()` 用掃表：表大了會慢、按讀取量計費；之後若常用，要加以 `user_id` 為鍵的索引
 - 停用不可復原（沒有「重新啟用」的指令）；沒有記錄停用時間與操作者
 - 對雲端執行時，操作者需要 `dynamodb:UpdateItem`、`dynamodb:Scan` 的權限，M4 寫 IAM 時處理
-- 只在練習場與 Claude 的替身伺服器上測過
+- 只在練習場與 Claude 的替身伺服器上測過；兩者在實驗 2 的結果就不同，雲端行為要上雲後確認
+- `disable_user_keys()` 回傳的數字包含原本就已停用的 Key（掃表只按 `user_id` 篩選）；重跑不會壞事，但數字會偏大
 
-**推送：** 10/14 17:1x 推到分支 `feat/compose-gateway`（commit 見下一筆）；三句修正後才開 PR 合併。
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `17f7be9` | 10/14 17:1x | `feat: add a script that disables one key or every key of a user`（分支 `feat/compose-gateway`，`cae6354..17f7be9`） |
+| （待推） | 10/14 晚上 | 本筆補上破壞實驗與三句，隨容器驗證的 commit 一起推 |
+
+---
+
+## E113. 第 7 項：OpenAI 工作負載身分聯盟探測成功，`chat.completions` 收這種權杖（2026-10-14 19:00～20:12）
+
+**依據：** E110（定案 A：M4 直接用身分聯盟；退路 B：SSM 放金鑰）；決策書 4.5。
+
+**目的：** 把 M4 最大的未知數提前驗證：OpenAI 的 `chat.completions` 收不收 AWS 開出的身分證明（JWT）換來的存取權杖；整條路不用 API 金鑰。
+
+**生活比喻：** 不再發萬用鑰匙。員工每次刷員工證（AWS 的身分證明，5 分鐘有效），警衛核對發證單位與用途後，給一張臨時通行證（OpenAI 的存取權杖），通行證只能進一個房間（Chat completions）。
+
+### 設定（本人在主控台操作）
+
+**AWS：**
+
+| 步驟 | 結果 |
+|---|---|
+| `aws login`、`aws sts get-caller-identity` | 成功 |
+| `aws iam enable-outbound-web-identity-federation` | 成功，取得帳號專屬的 issuer 網址（`https://<issuer>`，網域為 `tokens.sts.global.api.aws`） |
+
+**OpenAI（組織設定 → Security → Workload Identity Provider）：**
+
+| 項目 | 設定 |
+|---|---|
+| 身分提供者 | Name `aws-outbound-capstone`；Provider type `OIDC`；OIDC Issuer URL = 探測印出的 `iss`；Audience `llm-gateway-capstone`；不用自訂探索網址、不上傳 JWKS、不加屬性轉換 |
+| 服務帳號對應 | Name `terry-admin-probe`；Key `sub`、Value = 探測印出的 `sub`（IAM 使用者的 ARN）；Project `llm-gateway-capstone` |
+| 服務帳號 | **新建 `gateway-wif`**（不用 `m1-gateway`，見下方定案） |
+| 權限 | Restricted：**只開 Model capabilities 裡的 Chat completions（`/v1/chat/completions`）**，其他全部 None |
+
+### 定案（19:58，本人選 A）
+
+| 選項 | 做法 | 評估 |
+|---|---|---|
+| **A（採用）** | 新建服務帳號 `gateway-wif` 給身分聯盟用 | 用金鑰與不用金鑰的呼叫分屬兩個身分：用量分得開，停其中一個不牽連另一個；不受 `m1-gateway` 金鑰 11/2 到期與換金鑰影響 |
+| B | 沿用 `m1-gateway` | 少一步；但與 11/2 到期的金鑰綁在一起（OpenAI 刪金鑰時是否影響服務帳號，未查證） |
+
+**權限只開 Chat completions 的理由：** Gateway 只呼叫 `chat.completions`。這個身分即使被濫用，也不能讀檔案、微調、碰 Vector Store。OpenAI 的權限頁把 `/v1/chat/completions` 列成可以單獨開的一項，比文件寫的（`api.model.request` 等）更細。
+
+### 探測結果（本人執行，`scripts/probe_wif.py`；日誌 `docs/logs/m4-wif-probe.log`）
+
+| 次 | 條件 | `[1]` AWS 開證明 | `[2]` OpenAI |
+|---|---|---|---|
+| 1 | 只設 audience | ✅ `aud: llm-gateway-capstone`、`sub: arn:aws:iam::<account-id>:user/terry-admin`、有效 300 秒 | 未執行：`KeyError: 'OPENAI_IDENTITY_PROVIDER_ID'`（預期，OpenAI 端尚未設定） |
+| 2 | OpenAI 設定完成 | ✅ 同上 | ✅ **`chat.completions` 有回答**：模型 `gpt-6-luna`、結束原因 `stop`、輸入 12、輸出 12 個 token |
+| 3（破壞實驗） | audience 改成 `llm-gateway-wrong` | ✅ `aud: llm-gateway-wrong`（AWS 照開） | ❌ `openai.OAuthError: OAuth authentication error.`，發生在 SDK 向 OpenAI 換存取權杖的那一步（`_fetch_token_from_exchange`），還沒送出對話請求 |
+
+**判讀：**
+
+- **第 2 次：** OpenAI 驗過 AWS 的簽章、audience，對上 `sub` → 服務帳號 `gateway-wif`，`/v1/chat/completions` 收下。腳本偵測到 `OPENAI_API_KEY` 有值就會停，所以這次成功**沒有用到任何 API 金鑰**
+- **第 3 次：** AWS 不管證明要拿去哪裡用，要什麼 audience 就照開；擋下來的是 OpenAI 的換證口，對話端點根本沒被呼叫。所以證明了：替別的服務開出的證明，拿不到這個 OpenAI 專案的通行證
+- 花費：第 2 次 24 個 token，遠低於 US$0.0001
+
+**執行時遇到的事（與重做探測有關）：** `aws configure export-credentials` 匯出到環境變數的是**固定的臨時身分，不會自動換新**；環境變數又比 `aws login` 的登入狀態優先，28 分鐘後再跑 AWS CLI 出現 `Credentials were refreshed, but the refreshed credentials are still expired`。做法：CLI 指令用登入狀態（先 `Remove-Item Env:AWS_*`），只有在跑 Python 腳本前才匯出，匯出後馬上跑。臨時身分的確切有效期沒有查證。Fargate 不會有這個問題：任務角色的憑證由 ECS 自動換新。
+
+### 結論：M4 照 A 做，退路 B 不需要
+
+### 限制（誠實記錄）
+
+- **證明的是 IAM 使用者 `terry-admin`，不是 Fargate 的角色。** M4 要在 OpenAI 另建一筆對應（`sub` = Fargate 任務角色的 ARN），Fargate 上拿不拿得到證明、DNS 防火牆放行 `sts.ap-northeast-1.amazonaws.com` 與 `auth.openai.com` 後通不通，都要 M4 才驗證
+- 破壞實驗 3 的錯誤訊息只有 `OAuth authentication error.`，SDK 沒有印出 OpenAI 回的原因；推定是 audience 不符（唯一改的地方），但沒有看到原文
+- 只用一個請求驗證；權杖快到期時 SDK 自動重換（E110 查到的「到期前 20 分鐘」）沒有測到
+- 沒有測「權限只開 Chat completions」會不會擋下其他端點（例如 `responses`）
+- `terry-admin-probe` 對應留著，M4 的 Fargate 角色對應驗證成功後刪除；帳號的對外身分聯盟保持開啟（M4 要用）
+
+### 面試可用的說法
+
+- 「Gateway 呼叫 OpenAI 不用 API 金鑰。容器用 AWS 的身分向 STS 要一張 5 分鐘的證明，拿去 OpenAI 換一小時的通行證。所以沒有金鑰可以外流，也不用輪替金鑰。」
+- 「上雲前我先用自己的 IAM 使用者把整條路打通，因為官方文件只示範 Responses API，沒說 Chat Completions 收不收。我也事先定了退路：不通就改回 SSM 放金鑰。」
+- 「我做了破壞實驗：把 audience 改成別的值，AWS 照樣開證明，但 OpenAI 在換通行證那一步就拒絕了。代表替別的服務開出的證明，拿不到我這個專案的通行證。」
+- 「OpenAI 那邊我只開了 Chat completions 一個權限，還另外建一個服務帳號專門給這條路用，跟原本用金鑰的那個分開。」
+
+**推送：** 日誌與本筆隨容器驗證的 commit 一起推。
 
 ---
 
@@ -488,23 +574,23 @@ def make_dynamodb_client() -> BaseClient:
 | 3 | 12.5「資料庫故障的 503 要不要附 `Retry-After`」、2.2 的回應對照表、D48 | 不附；4 個資料庫 503 的測試釘住；12.5 該列劃掉（E109） |
 | 4 | D10、D59、3.4、12.5「SDK 的等待與 ALB 閒置逾時」 | `OPENAI_MAX_RETRIES` 由 1 改為 0：所有 OpenAI 呼叫都不讓 SDK 重試；強模型那次的 `with_options(max_retries=0)` 保留。代價：網路瞬間抖動直接 502。ALB 閒置逾時在 M4 的 Terraform 明寫（理論最長 2 × 30 = 60 秒）（E109） |
 | 5 | D22（repo 結構） | `compose.yaml` 加上 `gateway` 服務（profile `gateway`）；`tests/` 加上 `test_production_settings.py`（E109；容器驗證待補） |
-| 6 | 4.5、4.1、3.5、D21 | OpenAI 改用工作負載身分聯盟：Fargate 角色向地區 STS 要 JWT，換成 OpenAI 存取權杖，SSM 不放 OpenAI 金鑰；DNS 防火牆放行清單加 `auth.openai.com`、`sts.ap-northeast-1.amazonaws.com`；`get_client()` 改為共用一個連線物件。退路是 SSM 放金鑰（E110；探測結果待補） |
+| 6 | 4.5、4.1、3.5、D21 | OpenAI 改用工作負載身分聯盟：Fargate 角色向地區 STS 要 JWT，換成 OpenAI 存取權杖，SSM 不放 OpenAI 金鑰；DNS 防火牆放行清單加 `auth.openai.com`、`sts.ap-northeast-1.amazonaws.com`；`get_client()` 改為共用一個連線物件。退路是 SSM 放金鑰（E110）。探測成功：`chat.completions` 收這種權杖；OpenAI 端用專用服務帳號 `gateway-wif`、權限只開 Chat completions；M4 另建 Fargate 角色的對應（E113） |
 | 7 | 10.3、D19 | `.github/dependabot.yml`：GitHub Action 與 Dockerfile 基底映像的版本更新，每週、冷卻 7 天；Python 套件只收安全性更新（E110） |
 | 8 | 12.5「`app/db.py` 怎麼表示連真的 AWS…」、D49、PART 4 應用層 | `DYNAMODB_TARGET`：`aws` 連雲端（IAM 角色）、網址連練習場（假帳密）、沒設或寫錯就報錯；三個讀取強一致；雲端計費模式隨需；12.5 該列劃掉（E111） |
 | 9 | 12.5「停用 Key 的腳本」、D22（repo 結構） | `scripts/disable_key.py`：`--key`（`getpass` 輸入）停一把、`--user` 停一個人的全部；更新加「必須已存在」的條件；`tests/` 加上 `test_disable_key.py`（E112） |
 
 ---
 
-## 目前進度（2026-10-14 17:15）
+## 目前進度（2026-10-14 20:15）
 
 - 第 0 步：分支流程 ✅（E108，PR #2 合併為 `cd9abf6`）
 - 第 1 項：`compose.yaml` 加上 `gateway` 服務（profile）已寫好並推到分支 `feat/compose-gateway`（`b0b0d9c`）；**建映像與容器驗證還沒做**（下一筆證據）
 - 第 5、6 項：說明頁關閉、資料庫 503 不附 `Retry-After`、SDK 不重試 ✅（E109，`3864f57`，同一個分支）；`271 passed`（45 個 `integration`）
-- 第 7、8 項：身分聯盟（今晚探測）、Dependabot 定案（E110）
+- 第 7、8 項：Dependabot 定案（E110）；身分聯盟探測成功，M4 照 A 做 ✅（E113）
 - 分支 `feat/compose-gateway` 的 PR：容器驗證完成後再開
 - 第 3 項：`DYNAMODB_TARGET`、強一致讀取、隨需計費 ✅（E111）；`282 passed`
-- 第 4 項：停用 Key 的腳本 ✅ 程式與測試（E112）；`290 passed`；破壞實驗與三句待補
-- 下一筆證據是 **E113**
+- 第 4 項：停用 Key 的腳本 ✅（E112）；`290 passed`；破壞實驗三個與兩組三句 ✅
+- 下一筆證據是 **E114**（容器驗證）
 
 ---
 
@@ -514,14 +600,14 @@ def make_dynamodb_client() -> BaseClient:
 |---|---|---|
 | 稽核搬進 `audit` 表；扣額度失敗的紀錄與告警；`pii_types` 的型別（D52） | — | 10/16 前 |
 | ~~`app/db.py` 連真的 AWS 的表示法；強一致讀取；DynamoDB 計費模式（E89、E90）~~ | ✅ 10/14（E111） | — |
-| ~~停用 Key 的腳本（E91）~~ | ✅ 10/14 程式與測試（E112）；破壞實驗與三句待補 | 開 PR 前 |
+| ~~停用 Key 的腳本（E91）~~ | ✅ 10/14 程式、測試、破壞實驗、三句（E112） | — |
 | ~~`/docs`、`/openapi.json` 是否在正式環境關閉（12.5）~~ | ✅ 10/14 一律關閉（E109） | — |
 | ~~資料庫故障的 503 要不要附 `Retry-After`（12.5）~~ | ✅ 10/14 不附，測試釘住（E109） | — |
 | ~~便宜模型那次 SDK 的等待與 ALB 閒置逾時（E100）~~ | ✅ 10/14 SDK 一律不重試（E109） | — |
 | ALB 閒置逾時的值（E109） | Terraform 明寫；理論最長 2 × 30 = 60 秒，考慮設 75 | M4 寫 Terraform 時 |
 | 30 秒的逾時夠不夠（E109） | 用容器打一次強模型的長回答，記下花了幾秒（約 US$0.015） | 容器驗證時 |
 | 容器驗證：建映像、`/health`、容器裡的說明頁 404、連得到資料庫容器、真實對話、設定檔改壞拒絕啟動 | 分支 `feat/compose-gateway` 已備好 | 10/14 晚上 |
-| OpenAI 工作負載身分聯盟（4.5、E110） | 已定案用 A；`chat.completions` 收不收要靠今晚的探測 | 10/14 晚上 |
+| ~~OpenAI 工作負載身分聯盟（4.5、E110）~~ | ✅ 10/14 探測成功（E113）；Fargate 角色的對應在 M4 | — |
 | `m1-gateway` 金鑰 11/2 到期（12.5） | 雲端改用身分聯盟就不需要；**本機開發與 11/2 之後的錄影仍要用金鑰**，到期前在個人電腦換一把新的 | 11/2 前 |
 | ~~Trivy 升級與 Action 的更新方式（E104）~~ | ✅ 10/14 Dependabot 管 Action 與基底映像；Trivy 本身的版本在加 `trivy config` 時手動升級（E110） | M4 |
 | CI 加 `trivy config`（E104） | 有 Terraform 之後 | M4 |

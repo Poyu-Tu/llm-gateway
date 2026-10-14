@@ -1,0 +1,68 @@
+# M4 開工前：OpenAI 工作負載身分聯盟探測（scripts/probe_wif.py）
+# 日期：2026-10-14 19:42～20:12（Asia/Taipei）
+# 遮蔽：AWS 帳號 ID → <account-id>；帳號專屬的 issuer 網址 → <issuer>；使用者資料夾 → <user>
+#       OpenAI 的身分提供者 ID、服務帳號 ID、Project ID 不出現在本檔（只存在執行時的環境變數）
+# 證據紀錄：docs/evidence/m4-evidence-log.md 的 E113
+
+## 第 1 次：只設 audience（OpenAI 端尚未設定，預期停在 KeyError）
+
+PS C:\Users\<user>\llm-gateway> aws configure export-credentials --format powershell | iex
+PS C:\Users\<user>\llm-gateway> $env:OPENAI_WIF_AUDIENCE = "llm-gateway-capstone"
+PS C:\Users\<user>\llm-gateway> uv run python -m scripts.probe_wif
+[1] AWS 開出身分證明
+    iss: <issuer>
+    aud: llm-gateway-capstone
+    sub: arn:aws:iam::<account-id>:user/terry-admin
+    有效秒數: 300
+Traceback (most recent call last):
+  ...
+  File "C:\Users\<user>\llm-gateway\scripts\probe_wif.py", line 67, in main
+    "identity_provider_id": os.environ["OPENAI_IDENTITY_PROVIDER_ID"],
+                            ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen os>", line 714, in __getitem__
+KeyError: 'OPENAI_IDENTITY_PROVIDER_ID'
+
+## 第 2 次：OpenAI 端設定完成（身分提供者 aws-outbound-capstone、對應 terry-admin-probe、服務帳號 gateway-wif、權限只開 Chat completions）
+
+PS C:\Users\<user>\llm-gateway> Remove-Item Env:AWS_*
+PS C:\Users\<user>\llm-gateway> aws configure export-credentials --format powershell | iex
+PS C:\Users\<user>\llm-gateway> $env:OPENAI_IDENTITY_PROVIDER_ID = "<遮蔽>"
+PS C:\Users\<user>\llm-gateway> $env:OPENAI_SERVICE_ACCOUNT_ID = "<遮蔽>"
+PS C:\Users\<user>\llm-gateway> uv run python -m scripts.probe_wif
+[1] AWS 開出身分證明
+    iss: <issuer>
+    aud: llm-gateway-capstone
+    sub: arn:aws:iam::<account-id>:user/terry-admin
+    有效秒數: 300
+[2] OpenAI 收下身分證明，chat.completions 有回答
+    回報的模型: gpt-6-luna
+    結束原因: stop
+    輸入 12、輸出 12 個 token
+    回答: Hi there, hope you’re doing well!
+
+## 第 3 次（破壞實驗）：audience 改成 OpenAI 端沒有登記的值
+
+PS C:\Users\<user>\llm-gateway> $env:OPENAI_WIF_AUDIENCE = "llm-gateway-wrong"
+PS C:\Users\<user>\llm-gateway> uv run python -m scripts.probe_wif
+[1] AWS 開出身分證明
+    iss: <issuer>
+    aud: llm-gateway-wrong
+    sub: arn:aws:iam::<account-id>:user/terry-admin
+    有效秒數: 300
+Traceback (most recent call last):
+  ...
+  File "C:\Users\<user>\llm-gateway\scripts\probe_wif.py", line 74, in main
+    response = client.chat.completions.create(
+  ...
+  File "C:\Users\<user>\llm-gateway\.venv\Lib\site-packages\openai\auth\_workload.py", line 268, in _perform_refresh
+    token_data = self._fetch_token_from_exchange()
+  File "C:\Users\<user>\llm-gateway\.venv\Lib\site-packages\openai\auth\_workload.py", line 380, in _fetch_token_from_exchange
+    return self._handle_token_response(response)
+  File "C:\Users\<user>\llm-gateway\.venv\Lib\site-packages\openai\auth\_workload.py", line 290, in _handle_token_response
+    raise OAuthError(response=response, body=body)
+openai.OAuthError: OAuth authentication error.
+
+## 收尾
+
+PS C:\Users\<user>\llm-gateway> Remove-Item Env:AWS_*
+PS C:\Users\<user>\llm-gateway> Remove-Item Env:OPENAI_*
