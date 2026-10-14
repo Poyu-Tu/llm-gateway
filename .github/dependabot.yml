@@ -1,0 +1,27 @@
+# Dependabot：鎖住的版本有新版時，自動開 PR 提醒；PR 一樣要過 CI 才能合併
+# 只管 GitHub Action 與 Dockerfile 的基底映像；Python 套件只收安全性更新，專題期間不追新版
+version: 2
+updates:
+  # .github/workflows/ 裡的 Action（鎖在 commit SHA 的那些）
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # 新版出來至少放 7 天才提醒：2026-03 的 Trivy 事件裡，惡意版本在幾天內就被發現
+    cooldown:
+      default-days: 7
+    # 一次最多 3 個 PR，避免一口氣冒出一堆
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
+
+  # Dockerfile 的基底映像（python:3.12-slim，鎖在指紋上）
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "build"
