@@ -411,6 +411,74 @@ def make_dynamodb_client() -> BaseClient:
 
 ---
 
+## E112. 第 4 項：停用 Key 的腳本 `scripts/disable_key.py`（2026-10-14 15:55～17:11，破壞實驗與三句待補）
+
+**依據：** E91（M2：停用 Key 只能手動改資料庫）；決策書 12.5「停用 Key 的腳本」。
+
+### 定案（15:55，本人選 C）
+
+| 選項 | 做法 | 評估 |
+|---|---|---|
+| A | 輸入要停用的那把 Key → 算雜湊 → 改成 `disabled` | 精準，只停那一把；外流時手上一定有那把 Key |
+| B | 輸入使用者名稱 → 掃整張表 → 停掉他所有的 Key | 緊急時方便；`api_keys` 用雜湊當主鍵，查不到「誰有哪些 Key」，只能掃表 |
+| **C（採用）** | A 與 B 都做 | 最完整；多一個函式與一組測試 |
+
+**兩種做法共同的坑：** DynamoDB 的 `update_item` 在那一筆不存在時會**自己新建一筆**。輸入打錯一個字，不會報錯，而是多出一筆「已停用的、不存在的 Key」，真正外流的那把照樣能用。所以更新時加 `ConditionExpression="attribute_exists(key_hash)"`，不存在就丟 `KeyNotFoundError`。
+
+**生活比喻：** 打電話掛失信用卡，卡號念錯一個數字。好的銀行說「查無此卡」；壞的銀行說「已幫您掛失」，真正的卡繼續被盜刷。
+
+### 程式（Claude 給填空版 11 格，本人填；`main()` 由 Claude 提供）
+
+| 函式 | 做什麼 |
+|---|---|
+| `disable_key_hash(client, key_hash)` | 把那一筆的 `status` 改成 `disabled`；`status` 是 DynamoDB 的保留字，用 `#status` 代稱；不存在 → `KeyNotFoundError`；其他錯誤原封不動往外丟 |
+| `disable_key(client, key)` | 先 `hash_api_key()` 再交給上面那個 |
+| `disable_user_keys(client, user_id, page_size=100)` | 用 `scan` 的翻頁器一頁一頁找這個人的 Key，逐一停用，回傳停了幾把 |
+| `main()` | `--key`（用 `getpass` 輸入，不顯示、不留在指令紀錄）或 `--user alice` |
+
+**填空第一次交出時（17:06）的三個錯：**
+
+| 格 | 寫成 | 應該是 | 沒改的話 |
+|---|---|---|---|
+| ② | `{"#status": "client"}` | `{"#status": "status"}` | DynamoDB 會**新增**一個叫 `client` 的欄位設成 `disabled`，`status` 仍是 `active`：腳本說停用成功，Key 照樣能用 |
+| ④ | （空白） | `"ConditionalCheckFailedException"` | 語法錯誤 |
+| ⑩ | `item.get_item()` | `item["key_hash"]["S"]` | `item` 是已經拿到手的那一筆（字典），`get_item` 是跟資料庫要資料的功能；寫法同 `find_user_id()` 的 `item["user_id"]["S"]` |
+
+### 測試（Claude 整份提供，`tests/test_disable_key.py`，8 個，`integration`；測試數 282 → 290）
+
+| 測試 | 檢查 |
+|---|---|
+| `test_disable_key_stops_the_key_from_working` | 停用後 `find_user_id()` 查不到，`status` 是 `disabled` |
+| `test_disable_key_keeps_the_owner` | `user_id` 留著，事後查得到是誰的 |
+| `test_disable_key_rejects_an_unknown_key_without_creating_one` | 打錯 → `KeyNotFoundError`，表裡仍是 1 筆 |
+| `test_disable_key_leaves_other_keys_working` | 別人的 Key 照常能用 |
+| `test_disable_user_keys_disables_every_key_of_the_user` | alice 的 2 把都停，回傳 2 |
+| `test_disable_user_keys_leaves_other_users_working` | bob 不受影響 |
+| `test_disable_user_keys_returns_zero_for_an_unknown_user` | 回傳 0，表裡沒有多東西 |
+| `test_disable_user_keys_reads_every_page` | 一頁只看 1 筆時，3 把都被停用（翻頁有做） |
+
+**過程（本人執行）：** 只放測試 → `1 error during collection`（`scripts.disable_key` 還不存在）；填完、改正三格 → `290 passed`。
+
+**Claude 在試跑環境做過、本人待做的破壞實驗：**
+
+| # | 改了什麼 | 試跑結果 |
+|---|---|---|
+| 1 | 拿掉 `ConditionExpression` | `1 failed`：`test_disable_key_rejects_an_unknown_key_without_creating_one` |
+| 2 | 改成 `SET status = :disabled`、拿掉 `ExpressionAttributeNames` | `6 failed`：`ValidationException … reserved keyword: status` |
+| 3 | 內圈迴圈之後加 `break`（只看第一頁） | `1 failed`：`test_disable_user_keys_reads_every_page` |
+
+### 限制（誠實記錄）
+
+- **破壞實驗與兩組三句還沒做**（`disable_key_hash()`、`disable_user_keys()`），在合併前補上
+- `disable_user_keys()` 用掃表：表大了會慢、按讀取量計費；之後若常用，要加以 `user_id` 為鍵的索引
+- 停用不可復原（沒有「重新啟用」的指令）；沒有記錄停用時間與操作者
+- 對雲端執行時，操作者需要 `dynamodb:UpdateItem`、`dynamodb:Scan` 的權限，M4 寫 IAM 時處理
+- 只在練習場與 Claude 的替身伺服器上測過
+
+**推送：** 10/14 17:1x 推到分支 `feat/compose-gateway`（commit 見下一筆）；三句修正後才開 PR 合併。
+
+---
+
 ## 決策書 v2.10 待改項目
 
 | # | v2.9 的位置 | 要改什麼 |
@@ -423,10 +491,11 @@ def make_dynamodb_client() -> BaseClient:
 | 6 | 4.5、4.1、3.5、D21 | OpenAI 改用工作負載身分聯盟：Fargate 角色向地區 STS 要 JWT，換成 OpenAI 存取權杖，SSM 不放 OpenAI 金鑰；DNS 防火牆放行清單加 `auth.openai.com`、`sts.ap-northeast-1.amazonaws.com`；`get_client()` 改為共用一個連線物件。退路是 SSM 放金鑰（E110；探測結果待補） |
 | 7 | 10.3、D19 | `.github/dependabot.yml`：GitHub Action 與 Dockerfile 基底映像的版本更新，每週、冷卻 7 天；Python 套件只收安全性更新（E110） |
 | 8 | 12.5「`app/db.py` 怎麼表示連真的 AWS…」、D49、PART 4 應用層 | `DYNAMODB_TARGET`：`aws` 連雲端（IAM 角色）、網址連練習場（假帳密）、沒設或寫錯就報錯；三個讀取強一致；雲端計費模式隨需；12.5 該列劃掉（E111） |
+| 9 | 12.5「停用 Key 的腳本」、D22（repo 結構） | `scripts/disable_key.py`：`--key`（`getpass` 輸入）停一把、`--user` 停一個人的全部；更新加「必須已存在」的條件；`tests/` 加上 `test_disable_key.py`（E112） |
 
 ---
 
-## 目前進度（2026-10-14 15:45）
+## 目前進度（2026-10-14 17:15）
 
 - 第 0 步：分支流程 ✅（E108，PR #2 合併為 `cd9abf6`）
 - 第 1 項：`compose.yaml` 加上 `gateway` 服務（profile）已寫好並推到分支 `feat/compose-gateway`（`b0b0d9c`）；**建映像與容器驗證還沒做**（下一筆證據）
@@ -434,7 +503,8 @@ def make_dynamodb_client() -> BaseClient:
 - 第 7、8 項：身分聯盟（今晚探測）、Dependabot 定案（E110）
 - 分支 `feat/compose-gateway` 的 PR：容器驗證完成後再開
 - 第 3 項：`DYNAMODB_TARGET`、強一致讀取、隨需計費 ✅（E111）；`282 passed`
-- 下一筆證據是 **E112**
+- 第 4 項：停用 Key 的腳本 ✅ 程式與測試（E112）；`290 passed`；破壞實驗與三句待補
+- 下一筆證據是 **E113**
 
 ---
 
@@ -444,7 +514,7 @@ def make_dynamodb_client() -> BaseClient:
 |---|---|---|
 | 稽核搬進 `audit` 表；扣額度失敗的紀錄與告警；`pii_types` 的型別（D52） | — | 10/16 前 |
 | ~~`app/db.py` 連真的 AWS 的表示法；強一致讀取；DynamoDB 計費模式（E89、E90）~~ | ✅ 10/14（E111） | — |
-| 停用 Key 的腳本（E91） | — | 10/16 前 |
+| ~~停用 Key 的腳本（E91）~~ | ✅ 10/14 程式與測試（E112）；破壞實驗與三句待補 | 開 PR 前 |
 | ~~`/docs`、`/openapi.json` 是否在正式環境關閉（12.5）~~ | ✅ 10/14 一律關閉（E109） | — |
 | ~~資料庫故障的 503 要不要附 `Retry-After`（12.5）~~ | ✅ 10/14 不附，測試釘住（E109） | — |
 | ~~便宜模型那次 SDK 的等待與 ALB 閒置逾時（E100）~~ | ✅ 10/14 SDK 一律不重試（E109） | — |
