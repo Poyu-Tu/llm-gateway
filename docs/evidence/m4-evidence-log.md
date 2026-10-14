@@ -565,6 +565,92 @@ def make_dynamodb_client() -> BaseClient:
 
 ---
 
+## E114. 第 1 項：容器驗證（2026-10-14 20:15～20:40；破壞實驗 10/15 01:40）
+
+**依據：** M2 報告、E95（容器裡讀得到 `app/config.toml`、對話流程完整）；E109（每次呼叫 OpenAI 的逾時 30 秒，沒量過）；E111（`DYNAMODB_TARGET`）。
+
+**目的：** M4 要搬上 Fargate 的就是這個映像。上雲前先在本機證明：建得起來、設定檔有打包進去、說明頁關閉、連得到資料庫容器、真實對話完整、稽核寫得進去。
+
+### 1. 建映像與基本檢查
+
+```
+docker compose --profile gateway up -d --build
+```
+
+| 檢查 | 結果 | 證明了 |
+|---|---|---|
+| `docker compose ps` | `gateway`（`llm-gateway-gateway`）`Up`；`dynamodb`、`dynamodb-test` `Up` | 映像建得起來、容器跑得動 |
+| `irm http://127.0.0.1:8000/health` | `status: ok` | 容器裡的 Gateway 正常回應（ALB 的健康檢查靠它） |
+| `docker compose exec gateway ls app` | 清單有 `config.toml` | 設定檔打包進映像，不依賴主機上的檔案 |
+| `curl.exe … /docs` | `404` | 說明頁在容器裡也是關的（E109） |
+
+### 2. 容器連得到資料庫容器
+
+- 種子腳本（`uv run --env-file .env python -m scripts.seed`）從主機經 `127.0.0.1:8001` 塞資料；容器裡的 Gateway 經 `dynamodb:8000` 連同一個資料庫容器
+- 壞 Key：`curl.exe … -H "Authorization: Bearer gw_bad"` → **`401`**（不是 `503`）。Gateway 真的查了資料庫、查不到才拒絕
+
+### 3. 真實對話（bob 的新 Key 以 `Read-Host` 收進變數；`data\demo.ps1` 的 `ask`）
+
+稽核改讀容器裡的檔：`docker compose exec gateway tail -n 1 data/audit.jsonl`（`demo.ps1` 原本的 `last` 讀的是主機上 M3 留下的舊檔）。
+
+| 題目 | 回應 | 稽核 | 手算（micro-USD） |
+|---|---|---|---|
+| `s05-easy` | `200`、`gpt-6-luna` | `routed_model: gpt-6-luna`、`route_reason: default`、輸入 19、輸出 10、`7` | 19 × 0.1 ＋ 10 × 0.5 ＝ 6.9 → 7 ✅ |
+| `s05-hard` | `200`、`gpt-6-sol` | `routed_model: gpt-6-sol`、`route_reason: keyword`、輸入 34、輸出 103、`1098` | 34 × 2 ＋ 103 × 10 ＝ 1,098 ✅ |
+
+**所以證明了：** 容器版的 Gateway 讀得到 `.env` 的金鑰與映像裡的 `config.toml`、連資料庫容器驗 Key 與扣額度、照規則選模型、呼叫真的 OpenAI、把稽核寫進容器裡的 `data/`（`Dockerfile` 事先建好 `data` 並交給 `appuser`，非 root 也寫得進去）。
+
+### 4. 強模型寫長回答要幾秒（E109 的待查項目）
+
+訊息用 M3 測試集最長的 `c07`（319 字，超過字數門檻，走強模型）；`(Measure-Command { ask c07-long | Out-Host }).TotalSeconds`。
+
+| 項目 | 結果 |
+|---|---|
+| 回應 | `200`；`routed_model: gpt-6-sol`、`route_reason: length` |
+| 時間 | **25.6 秒**（整個請求，含查 Key、查額度、寫稽核；本機資料庫這幾步可忽略） |
+| token | 輸入 281、輸出 **1,576**（比 M3 測到的最長 1,372 還長） |
+| 成本 | 281 × 2 ＋ 1,576 × 10 ＝ **16,322** ✅（約 US$0.016） |
+| 速度 | 約每秒 62 個 token |
+
+**發現：30 秒的逾時不夠。** 強模型的輸出上限是 2,000 個 token；以同樣速度推算 2,000 ÷ 62 ≈ 32 秒，**寫滿上限一定逾時**：使用者拿到 502，而 OpenAI 可能已經寫完、已經收費。只有一個樣本，供應商忙碌時會更慢。
+
+**待本人選擇（Claude 的建議是 A）：**
+
+| 選項 | 做法 | 評估 |
+|---|---|---|
+| **A（建議）** | `OPENAI_TIMEOUT_SECONDS` 30 → 60；M4 的 ALB 閒置逾時設 120 秒（強模型 60 ＋ 降級後便宜模型 60） | 改一個常數與一個測試；2,000 個 token 約 32 秒，近一倍餘裕。代價：最壞等 60 秒、慢請求佔連線較久 |
+| B | 強模型輸出上限 2,000 → 1,500 | 不改逾時；但這次 `c07` 的 1,576 就會被截斷，回答品質直接變差 |
+| C | 改成串流回應 | 大改 `chat()`、稽核、成本計算，時程不允許 |
+
+### 5. 破壞實驗：設定檔寫錯，容器起不來（本人執行，10/15 01:40）
+
+`app/config.toml` 的 `strong_model` 改成 `"gpt-6-xxx"`，`docker compose --profile gateway up -d --build`：
+
+| 步驟 | 結果 |
+|---|---|
+| 建映像 | 只有 `COPY app ./app` 之後兩層重做（3.6 秒），其他都是 `CACHED`；`Container llm-gateway-gateway-1 Started` |
+| `docker compose ps -a`（啟動後 1 秒） | `gateway` **`Up Less than a second`** |
+| `docker compose logs gateway --tail 15` | `File "/app/app/main.py", line 24` → `CONFIG = load_config(CONFIG_PATH)` → `check_config(config)` → **`app.config.ConfigError: Routing uses a model with no settings: gpt-6-xxx`** |
+| `git restore app\config.toml` 後重建 | **所有層都是 `CACHED`**（包括 `COPY app ./app`）；`gateway` `Up 8 seconds` |
+
+**判讀：**
+
+- **設定寫錯，程式在載入時就停下：** `main.py` 一載入就呼叫 `load_config()` → `check_config()`，發現路由用到的模型沒有設定，丟 `ConfigError`；uvicorn 載入不到 `app.main:app`，服務不會開始接請求。不會帶著錯的設定上線、等到第一個請求才出錯
+- **改設定一定要重建映像：** 改了 `config.toml`，`COPY app ./app` 那一層就重做；`config.toml` 是打包在映像裡的，不是從主機讀
+- **改回來後所有層都命中快取：** 映像內容與先前驗證過的那一版完全相同，所以不用重測對話流程
+- **`docker compose` 顯示 `Started`、`ps` 顯示 `Up` 都不代表服務可用：** 容器確實啟動了，是裡面的程式載入失敗。M4 的 ECS 不能只看「任務有沒有啟動」，要靠 ALB 打 `/health` 的健康檢查與部署斷路器（deployment circuit breaker）判斷新版本有沒有起來，起不來就自動退回舊版
+
+### 限制（誠實記錄）
+
+- 容器裡的稽核檔沒有掛到外面，容器重建就消失；第 2 項（稽核搬進 `audit` 表）處理，Fargate 上同樣如此
+- 容器讀的是 `.env` 的 OpenAI 金鑰（本機開發的方式）；不用金鑰的身分聯盟（E113）要到 Fargate 才接上
+- 長回答只量了一次
+- **破壞實驗沒有拍到 `Exited`：** `ps -a` 是在啟動後 1 秒打的，當時還是 `Up Less than a second`；`ConfigError` 由日誌證明，但容器之後轉成 `Exited` 的那一刻沒有記錄到。要補證時，改壞設定、重建後等 5 秒再 `docker compose ps -a`
+
+**推送：** 與 E112 的補充、E113、`docs/logs/m4-wif-probe.log` 一起推（commit 見下一筆）。
+
+---
+
 ## 決策書 v2.10 待改項目
 
 | # | v2.9 的位置 | 要改什麼 |
@@ -581,16 +667,16 @@ def make_dynamodb_client() -> BaseClient:
 
 ---
 
-## 目前進度（2026-10-14 20:15）
+## 目前進度（2026-10-15 01:45）
 
 - 第 0 步：分支流程 ✅（E108，PR #2 合併為 `cd9abf6`）
-- 第 1 項：`compose.yaml` 加上 `gateway` 服務（profile）已寫好並推到分支 `feat/compose-gateway`（`b0b0d9c`）；**建映像與容器驗證還沒做**（下一筆證據）
+- 第 1 項：容器驗證 ✅ 建映像、`/health`、說明頁 404、連得到資料庫容器、真實對話兩題、長回答 25.6 秒、設定檔改壞起不來（E114）；**30 秒逾時不夠，A／B／C 待本人選**
+- 分支 `feat/compose-gateway`：容器驗證完成，可以開 PR
 - 第 5、6 項：說明頁關閉、資料庫 503 不附 `Retry-After`、SDK 不重試 ✅（E109，`3864f57`，同一個分支）；`271 passed`（45 個 `integration`）
 - 第 7、8 項：Dependabot 定案（E110）；身分聯盟探測成功，M4 照 A 做 ✅（E113）
-- 分支 `feat/compose-gateway` 的 PR：容器驗證完成後再開
 - 第 3 項：`DYNAMODB_TARGET`、強一致讀取、隨需計費 ✅（E111）；`282 passed`
 - 第 4 項：停用 Key 的腳本 ✅（E112）；`290 passed`；破壞實驗三個與兩組三句 ✅
-- 下一筆證據是 **E114**（容器驗證）
+- 下一筆證據是 **E115**
 
 ---
 
@@ -604,9 +690,10 @@ def make_dynamodb_client() -> BaseClient:
 | ~~`/docs`、`/openapi.json` 是否在正式環境關閉（12.5）~~ | ✅ 10/14 一律關閉（E109） | — |
 | ~~資料庫故障的 503 要不要附 `Retry-After`（12.5）~~ | ✅ 10/14 不附，測試釘住（E109） | — |
 | ~~便宜模型那次 SDK 的等待與 ALB 閒置逾時（E100）~~ | ✅ 10/14 SDK 一律不重試（E109） | — |
-| ALB 閒置逾時的值（E109） | Terraform 明寫；理論最長 2 × 30 = 60 秒，考慮設 75 | M4 寫 Terraform 時 |
-| 30 秒的逾時夠不夠（E109） | 用容器打一次強模型的長回答，記下花了幾秒（約 US$0.015） | 容器驗證時 |
-| 容器驗證：建映像、`/health`、容器裡的說明頁 404、連得到資料庫容器、真實對話、設定檔改壞拒絕啟動 | 分支 `feat/compose-gateway` 已備好 | 10/14 晚上 |
+| ALB 閒置逾時的值（E109、E114） | Terraform 明寫；跟著上一列的逾時決定（選 A 就設 120） | M4 寫 Terraform 時 |
+| 30 秒的逾時夠不夠（E109） | **量到了：不夠**（1,576 token 花 25.6 秒，寫滿 2,000 約 32 秒）；Claude 建議 A：逾時 60 秒、ALB 120 秒（E114） | 10/15 |
+| ~~容器驗證~~ | ✅ 10/15（E114） | — |
+| M4 的 ECS 部署要能判斷新版本起不來（E114） | ALB 健康檢查打 `/health`、開部署斷路器，起不來自動退回 | M4 寫 Terraform 時 |
 | ~~OpenAI 工作負載身分聯盟（4.5、E110）~~ | ✅ 10/14 探測成功（E113）；Fargate 角色的對應在 M4 | — |
 | `m1-gateway` 金鑰 11/2 到期（12.5） | 雲端改用身分聯盟就不需要；**本機開發與 11/2 之後的錄影仍要用金鑰**，到期前在個人電腦換一把新的 | 11/2 前 |
 | ~~Trivy 升級與 Action 的更新方式（E104）~~ | ✅ 10/14 Dependabot 管 Action 與基底映像；Trivy 本身的版本在加 `trivy config` 時手動升級（E110） | M4 |
