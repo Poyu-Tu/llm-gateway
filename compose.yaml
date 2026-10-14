@@ -34,7 +34,7 @@ services:
     # 不是機密的設定直接寫；這裡的值會蓋過 .env 裡的同名設定
     # 容器之間用服務名稱找對方，走資料庫容器自己的 8000 埠（不是主機的 8001）
     environment:
-      DYNAMODB_ENDPOINT_URL: http://dynamodb:8000
+      DYNAMODB_TARGET: http://dynamodb:8000
     # 先把資料庫容器開起來（只保證「開始啟動」，不保證「已經可以用」）
     depends_on:
       - dynamodb

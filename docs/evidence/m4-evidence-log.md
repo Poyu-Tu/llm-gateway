@@ -305,6 +305,112 @@ app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
 ---
 
+## E111. 第 3 項：`make_dynamodb_client()` 能連真的 AWS、三個讀取改成強一致（2026-10-14 14:51～15:42）
+
+**依據：** 決策書 12.5「`app/db.py` 怎麼表示連真的 AWS；計費模式；要不要強一致讀取」；E89、E90（M2）；D49（資料庫逾時與重試）。
+
+### 定案（14:51，本人「照建議」）
+
+| # | 決定 | 定案 | 不選的選項與理由 | 弱點 |
+|---|---|---|---|---|
+| 1 | 怎麼表示連真的 AWS | 環境變數改名 **`DYNAMODB_TARGET`**：`aws` → 東京區真的 DynamoDB（不給網址、不給帳密，身分交給 IAM 角色）；`http://`、`https://` 開頭 → 那個網址的練習場（假帳密 `local`）；沒設 → `KeyError`；其他值 → `ValueError` | 名稱不變、`DYNAMODB_ENDPOINT_URL=aws`：「網址」變數裝的不是網址。加第二個變數：兩個設定可能互相矛盾。沒設就當成雲端：忘了設定時會用這台電腦的 AWS 身分去改雲端資料 | `aws` 要寫對（大寫也報錯）；改名要同步 `.env`、`.env.example`、`compose.yaml`、`tests/conftest.py` |
+| 2 | 強一致讀取 | 查 Key（`find_user_id`）、查額度（`read_limit`）、查已用量（`read_used`）都加 `ConsistentRead=True` | 只有查 Key：額度仍可能多放行一次。都不用：剛停用的 Key、剛扣完的錢可能讀到舊的 | 讀取費用 2 倍（每 1,000 個請求約多 US$0.0002，美東價）；練習場不管這個參數，測試只能檢查「有沒有帶」 |
+| 3 | 雲端 DynamoDB 計費模式（M4 Terraform 用） | **隨需（`PAY_PER_REQUEST`）**，與練習場相同 | 預置容量吃免費額度（25 讀、25 寫單位）：要自己估容量，Demo 時可能被 `ProvisionedThroughputExceeded` 擋下 | 免費額度用不到；估算 1,000 個請求合計不到 US$0.002（美東價；東京價官方頁面未列） |
+
+**試算（美東官方價：寫 $0.625、讀 $0.125 每百萬單位）：** 每個請求約讀 3 次、寫 2 次；1,000 個請求 = 3,000 讀單位（強一致每次 1 單位）≈ $0.0004、2,000 寫單位 ≈ $0.0013。來源：[Amazon DynamoDB on-demand pricing](https://aws.amazon.com/dynamodb/pricing/on-demand/)。
+
+### 程式的修改（本人撰寫）
+
+`app/db.py`（填空 6 格，一次全對）：
+
+```python
+# DYNAMODB_TARGET 寫這個字，就是連上 AWS 上真的 DynamoDB
+AWS_TARGET = "aws"
+
+
+# 要連哪裡一定要明講：寫 aws 連雲端、寫網址連練習場，沒寫或寫錯就報錯（不讓 boto3 自己猜）
+def make_dynamodb_client() -> BaseClient:
+    """Return a DynamoDB client for the target named in the environment."""
+    target = os.environ["DYNAMODB_TARGET"]
+    config = Config(
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
+        read_timeout=READ_TIMEOUT_SECONDS,
+        retries={"total_max_attempts": TOTAL_MAX_ATTEMPTS, "mode": "standard"},
+    )
+
+    # 雲端：不給網址、不給帳密，boto3 就會連東京的 DynamoDB，身分用 Fargate 的 IAM 角色
+    if target == AWS_TARGET:
+        return boto3.client("dynamodb", region_name=REGION, config=config)
+
+    # 練習場：網址照給，帳密用假的（不能讓 boto3 拿這台電腦上真的 AWS 身分）
+    if target.startswith("http://") or target.startswith("https://"):
+        return boto3.client(
+            "dynamodb",
+            endpoint_url=target,
+            region_name=REGION,
+            aws_access_key_id=LOCAL_ACCESS_KEY,
+            aws_secret_access_key=LOCAL_SECRET_KEY,
+            config=config,
+        )
+
+    raise ValueError(f"DYNAMODB_TARGET must be 'aws' or a URL, got: {target!r}")
+```
+
+`app/auth.py` 的 `find_user_id()`、`app/quota.py` 的 `read_limit()`、`read_used()`：`get_item(…)` 結尾加 `ConsistentRead=True`，上面各加一行註解。`compose.yaml` 的 `gateway` 改用 `DYNAMODB_TARGET: http://dynamodb:8000`；`.env.example` 改名並補兩行說明。
+
+### 測試（Claude 整份提供；測試數 271 → 282）
+
+| 檔案 | 內容 |
+|---|---|
+| `tests/test_db.py`（改寫，3 → 11 個） | 沒設 → `KeyError`；網址 → 連那個網址、帳密是 `local`；`aws` → `https://dynamodb.ap-northeast-1.amazonaws.com`、身分是環境裡的那一組（不是 `local`）；`AWS`、空字串、`dynamodb`、`127.0.0.1:8001`（沒有 `http://`）→ `ValueError`；兩種目標都是 2 秒連線、5 秒讀取、最多 2 次。每個測試用假的 AWS 身分，並清掉 boto3 記住的身分 |
+| `tests/test_consistent_reads.py`（新檔，3 個） | 用會記錄參數的假資料庫，確認三個讀取都帶 `ConsistentRead=True` |
+| `tests/conftest.py` | 考場改設 `DYNAMODB_TARGET` |
+
+### 挫折：舊的環境變數把 43 個測試導到練習場，還清空了資料表
+
+| 時間點 | 結果 |
+|---|---|
+| 換好測試與設定檔後第一次跑 | `11 failed, 271 passed`：連資料庫的 43 個測試**全部通過**，與預期（43 個 `ERROR`）不同；`test_make_dynamodb_client_uses_url_from_target` 的訊息出現沒有任何測試設定的 `http://127.0.0.1:8001` |
+| 查 `$env:DYNAMODB_ENDPOINT_URL` | `http://127.0.0.1:8001`：之前跑種子腳本時在這個 PowerShell 視窗設的 |
+| `Remove-Item Env:DYNAMODB_ENDPOINT_URL` 後重跑 | `13 failed, 226 passed, 43 errors`，全部是 `KeyError: 'DYNAMODB_ENDPOINT_URL'`，與預期相同 |
+| 改完三個程式檔 | `282 passed` |
+
+- **發生了什麼：** 新的 `conftest.py` 已經改設 `DYNAMODB_TARGET`，舊的 `db.py` 卻還在讀 `DYNAMODB_ENDPOINT_URL`，結果讀到視窗裡留下的 8001（開發用的練習場），而不是 8002（考場）。考場道具每次會刪掉所有資料表，所以練習場的 alice、bob 被清空
+- **影響：** 只有本機的假資料，重跑種子腳本即可；但它證明了舊寫法的漏洞：**只要電腦上留著一個舊變數，測試就會連到別的資料庫，而且全部綠燈**
+- **改名剛好把這條路斷掉：** 新的 `db.py` 只讀 `DYNAMODB_TARGET`；`tests/test_db.py` 的 `requires_target` 測試在被污染時的訊息是 `DID NOT RAISE KeyError`，也顯示了同一件事
+- **生活比喻：** 消防演習的地址寫在便利貼上，桌上剛好留著上週另一張便利貼，煙霧彈就放到了正在上班的辦公室，演習報告還寫「一切順利」
+
+### 破壞實驗（本人執行，三個；做完改回，最後 `282 passed`）
+
+| # | 改了什麼 | 結果 | 證明了 |
+|---|---|---|---|
+| 1 | 練習場那段拿掉 `aws_access_key_id`、`aws_secret_access_key` | `1 failed, 238 passed, 43 errors`：`uses_dummy_credentials_for_a_url`（`assert 'AKIA-FROM-THE-ROLE' == 'local'`），另外 43 個連資料庫的測試全部 `MissingDependencyException: Using the login credential provider requires an additional dependency` | 沒有假帳密時，boto3 **真的去找這台電腦上 `aws login` 的登入身分**。這正是假帳密要擋的事 |
+| 2 | 最後的 `raise` 換成「當作 `aws`」 | `4 failed, 278 passed`：`rejects_unknown_target` 的 `[AWS]`、`[]`、`[dynamodb]`、`[127.0.0.1:8001]` | 設定打錯（包括忘了 `http://`）不會默默連到雲端 |
+| 3 | `read_used` 拿掉 `ConsistentRead=True` | `1 failed, 281 passed`：`test_read_used_reads_the_latest_usage`（`KeyError: 'ConsistentRead'`） | 三個讀取各有測試守著 |
+
+- **實驗 1 比預期多 43 個 `ERROR`：** Claude 的試跑環境沒有任何 AWS 登入設定，所以只看到 1 個紅；本人電腦有 `aws login`，boto3 照順序找身分時找到了它（需要額外套件才能用，所以報錯）。若那個套件剛好有裝，測試會**用本人真的 AWS 身分**去連練習場
+
+**本人的三句與修正：** 收在「LLM Gateway 程式面試練習本」的 `make_dynamodb_client()` 與「強一致讀取」兩節。要修正的是：第 1 句「寫網址連到 8001」改成「寫網址就連那個網址」，並補「寫錯也報錯」；第 2 句兩組都在講「怎麼做」，改成講風險（boto3 會自己猜、最終一致會讀到舊資料）與代價；第 3 句補破壞實驗與「所以證明了…」，強一致那組另補「練習場證明不了雲端行為」。
+
+### 限制（誠實記錄）
+
+- **連真的 AWS 那條路只檢查了連線物件的設定**（網址、區域、身分來源），沒有真的連線；Fargate 上用任務角色連得到，要到 M4 才驗證
+- **強一致讀取在練習場看不出差別**，測試只證明有帶參數；延遲是否增加，上雲後量
+- 測試讀身分用的是 boto3 的內部欄位（`client._request_signer._credentials`），套件升級時可能要改
+- `scripts/seed.py`、`scripts/create_tables.py` 在本機執行時，要改設 `$env:DYNAMODB_TARGET`；個人電腦的 `.env` 也要把那一行改名
+- 計費試算用的是美東價格
+
+### 面試可用的說法
+
+- 「連資料庫的設定我只收兩種：寫 aws 就連雲端、寫網址就連本機。沒寫或寫錯都直接報錯，因為 boto3 什麼都不給時會自己去連真的 AWS，還會用這台電腦登入的身分。」
+- 「我改這段時真的遇過：PowerShell 視窗裡留著一個舊的環境變數，43 個測試連到了我開發用的資料庫，還把資料表清空，而且全部綠燈。是預期的紅沒有出現，我才回頭查到的。所以我很重視先看到測試為了對的原因而紅。」
+- 「本機練習場一定帶假帳密。我做過實驗把它拿掉，結果 43 個測試跑去找我電腦上 aws login 的身分。這個保護不是想像出來的。」
+- 「三個決定放不放行的讀取我都用強一致讀取。費用是兩倍，但 Demo 的量一個月不到一分錢；預設的最終一致可能讓剛停用的 Key 再用一次。測試只能證明有帶參數，雲端行為上雲後再驗。」
+
+**推送：** 本人修正三句後 commit（見下一則）。
+
+---
+
 ## 決策書 v2.10 待改項目
 
 | # | v2.9 的位置 | 要改什麼 |
@@ -316,17 +422,19 @@ app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 | 5 | D22（repo 結構） | `compose.yaml` 加上 `gateway` 服務（profile `gateway`）；`tests/` 加上 `test_production_settings.py`（E109；容器驗證待補） |
 | 6 | 4.5、4.1、3.5、D21 | OpenAI 改用工作負載身分聯盟：Fargate 角色向地區 STS 要 JWT，換成 OpenAI 存取權杖，SSM 不放 OpenAI 金鑰；DNS 防火牆放行清單加 `auth.openai.com`、`sts.ap-northeast-1.amazonaws.com`；`get_client()` 改為共用一個連線物件。退路是 SSM 放金鑰（E110；探測結果待補） |
 | 7 | 10.3、D19 | `.github/dependabot.yml`：GitHub Action 與 Dockerfile 基底映像的版本更新，每週、冷卻 7 天；Python 套件只收安全性更新（E110） |
+| 8 | 12.5「`app/db.py` 怎麼表示連真的 AWS…」、D49、PART 4 應用層 | `DYNAMODB_TARGET`：`aws` 連雲端（IAM 角色）、網址連練習場（假帳密）、沒設或寫錯就報錯；三個讀取強一致；雲端計費模式隨需；12.5 該列劃掉（E111） |
 
 ---
 
-## 目前進度（2026-10-14 14:40）
+## 目前進度（2026-10-14 15:45）
 
 - 第 0 步：分支流程 ✅（E108，PR #2 合併為 `cd9abf6`）
 - 第 1 項：`compose.yaml` 加上 `gateway` 服務（profile）已寫好並推到分支 `feat/compose-gateway`（`b0b0d9c`）；**建映像與容器驗證還沒做**（下一筆證據）
 - 第 5、6 項：說明頁關閉、資料庫 503 不附 `Retry-After`、SDK 不重試 ✅（E109，`3864f57`，同一個分支）；`271 passed`（45 個 `integration`）
 - 第 7、8 項：身分聯盟（今晚探測）、Dependabot 定案（E110）
 - 分支 `feat/compose-gateway` 的 PR：容器驗證完成後再開
-- 下一筆證據是 **E111**
+- 第 3 項：`DYNAMODB_TARGET`、強一致讀取、隨需計費 ✅（E111）；`282 passed`
+- 下一筆證據是 **E112**
 
 ---
 
@@ -335,7 +443,7 @@ app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 | 項目 | 目前的建議 | 何時定 |
 |---|---|---|
 | 稽核搬進 `audit` 表；扣額度失敗的紀錄與告警；`pii_types` 的型別（D52） | — | 10/16 前 |
-| `app/db.py` 連真的 AWS 的表示法；強一致讀取；DynamoDB 計費模式（E89、E90） | — | 10/16 前 |
+| ~~`app/db.py` 連真的 AWS 的表示法；強一致讀取；DynamoDB 計費模式（E89、E90）~~ | ✅ 10/14（E111） | — |
 | 停用 Key 的腳本（E91） | — | 10/16 前 |
 | ~~`/docs`、`/openapi.json` 是否在正式環境關閉（12.5）~~ | ✅ 10/14 一律關閉（E109） | — |
 | ~~資料庫故障的 503 要不要附 `Retry-After`（12.5）~~ | ✅ 10/14 不附，測試釘住（E109） | — |

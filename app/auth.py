@@ -32,7 +32,8 @@ def extract_bearer_token(header: str | None) -> str | None:
 # 查不到、被停用、狀態欄不存在，一律交回 None：呼叫的人分不出是哪一種，也就不會透露給外面
 def find_user_id(client: BaseClient, key_hash: str) -> str | None:
     """Return the user id for an active API key hash, or None when the key must not be used."""
-    response = client.get_item(TableName=API_KEYS_TABLE, Key={"key_hash": {"S": key_hash}})
+    # 強一致讀取：剛被停用的 Key 下一秒就要擋得住
+    response = client.get_item(TableName=API_KEYS_TABLE, Key={"key_hash": {"S": key_hash}}, ConsistentRead=True)
     if "Item" not in response:
         return None
     item = response["Item"]
