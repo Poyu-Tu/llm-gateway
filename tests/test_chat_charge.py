@@ -125,6 +125,8 @@ def test_chat_returns_503_before_spending_when_usage_cannot_be_written(tmp_path,
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Service temporarily unavailable"}
+    # 資料庫多久恢復無從得知：不附 Retry-After，免得所有客戶端在同一秒一起重試
+    assert "retry-after" not in response.headers
     assert completions.last_request is None
 
 

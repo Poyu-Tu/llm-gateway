@@ -57,8 +57,8 @@ def test_chat_turns_off_the_sdk_retry_for_the_strong_model(tmp_path):
     assert completions.retry_settings == [0]
 
 
-# 便宜模型那一次保留 SDK 的重試
-def test_chat_keeps_the_sdk_retry_for_the_cheap_model(tmp_path):
+# 便宜模型那一次不另外改重試設定，照連線本身的設定（main.py 的 OPENAI_MAX_RETRIES，目前是 0）
+def test_chat_uses_the_client_retry_setting_for_the_cheap_model(tmp_path):
     client, completions, _, _ = make_fallback_test_client(tmp_path)
 
     response = client.post("/v1/chat", json={"message": "Say hi"})
