@@ -19,3 +19,9 @@ data/
 
 # Office lock files
 ~$*
+# Terraform：State 可能含帳號資訊、.terraform 是下載的外掛（很大）、tfvars 放你的 IP
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
