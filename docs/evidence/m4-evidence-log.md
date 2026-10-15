@@ -740,7 +740,168 @@ OPENAI_TIMEOUT_SECONDS = 60
 | `b0bbf21` | 10/15 01:45 前後 | `docs: record the container check and the keyless OpenAI probe`（E112 補充、E113、E114 舊版、`docs/logs/m4-wif-probe.log`） |
 | `3a9ed2b` | 10/15 01:45 前後 | `docs: update the evidence log to the final version` |
 | `dcd76c2` | 10/15 15:2x | `Merge pull request #3 from Poyu-Tu/feat/compose-gateway`（`cd9abf6..dcd76c2`） |
-| （待推） | 10/15 | 逾時改動與本筆，分支 `fix/openai-timeout-60s`，PR #5 |
+| `c0bdaca` | 10/15 15:4x | `Merge pull request #5 from Poyu-Tu/fix/openai-timeout-60s`（逾時改動與本筆） |
+
+---
+
+## E116. 第 2 項：稽核搬進 `audit` 表；寫不進去時印一行日誌（2026-10-15 15:54～20:51）
+
+**依據：** 決策書 3.2（`audit` 表）、7.10（扣額度）、D7（摘要與 HMAC 不外流）、D43（`pii_types` 的意義與順序）、D51（模型回答後照樣交出去）、D52（稽核搬家）；E114（容器重建就丟失的稽核檔）。
+
+**目的：** 稽核原本寫在容器裡的 `data/audit.jsonl`，容器重建就消失，Fargate 上也是一樣。改寫進 DynamoDB 的 `audit` 表；資料庫寫不進去時，使用者照樣拿到回應，那一筆的中繼資料印成一行日誌，M4 由 CloudWatch 告警。
+
+**生活比喻：** 收銀機的流水帳原本寫在店裡的筆記本，店一裝潢就丟了。現在改寄回總公司的帳本；郵差送不到時，店員在白板寫一行「幾號單、誰、多少錢、有沒有收到錢」，客人的餐照樣給，白板上不抄客人點了什麼。
+
+### 定案（15:54，本人「照建議」）
+
+| # | 決定 | 定案 | 不選的選項與理由 | 弱點 |
+|---|---|---|---|---|
+| 1 | 稽核寫不進資料庫時，那一筆放哪裡 | **印一行 JSON 日誌到 stderr**（Fargate 上進 CloudWatch Logs），只有中繼資料：`request_id`、`user_id`、`timestamp`、`status`、`cost_micro_usd`、`charged`、`error_type`；**不放摘要與 HMAC**（D7） | 容器內檔案：容器重建就消失，等於沒記。另開 SQS／S3：等於提前做 M5 | 補收要手動、還原不出完整紀錄；日誌也寫不出去時那一筆就沒了 |
+| 2 | 稽核寫不進去時，使用者拿到什麼 | **照原本的回應**：成功照給、429 照 429、502 照 502，只多一行日誌 | 回 503：成功那條路錢已經付了，違背 D51 | 使用者端完全看不出稽核失敗，只能靠告警 |
+| 3 | `pii_types` 的型別 | **清單（`L`）** | String Set（`SS`）：DynamoDB 不收空的 Set、Set 不保留順序；D43 要求空清單代表「檢查過、沒找到」，順序固定 `EMAIL`、`CARD`、`PHONE`、`TW_ID` | — |
+| 4 | 測試怎麼改 | **稽核改走領用窗口 `get_audit_writer()`**；既有測試把窗口換成「寫暫存檔」的替身，約 110 處斷言不用改；另寫連 DynamoDB Local 的測試 | 所有測試改讀 DynamoDB：全部要連資料庫、改動上百處 | 大部分對話測試走替身，不走真的資料庫 |
+
+### 程式（本人撰寫，填空 11 格）
+
+`app/audit.py`：
+
+| 函式 | 做什麼 |
+|---|---|
+| `write_audit(client, record)` | `TypeSerializer` 把每個值轉成 DynamoDB 格式，`put_item` 加 `ConditionExpression="attribute_not_exists(request_id)"`：同一個 `request_id` 已存在就拒絕，不覆蓋 |
+| `report_audit_failure(record, error)` | 從白名單 `FAILURE_LOG_FIELDS`（6 欄）用 `record.get()` 挑欄位（被額度擋下的紀錄沒有成本欄，拿不到給 `None`），加上 `event`、`error_type`，`print(json.dumps(...), file=sys.stderr, flush=True)` |
+| `save_audit(client, record)` | 先 `write_audit()`；只接 `BotoCoreError`、`ClientError`，交給 `report_audit_failure()`；程式自己的錯（例如 `TypeError`）照樣往外丟 |
+
+舊的 `append_audit()` 刪除（搬到 `tests/fakes.py`，只剩測試在用）。
+
+`app/main.py`：刪除 `get_audit_path()` 與 `Path` 的 import；新增領用窗口 `get_audit_writer()`（向 `get_dynamodb()` 拿連線，交出「收到紀錄就交給 `save_audit()`」的函式）；`chat_endpoint()` 的參數改成 `write_audit_record = Depends(get_audit_writer)`，四處 `append_audit(record, audit_path)` 改成 `write_audit_record(record)`。
+
+**填空時的錯（都在本機改正）：**
+
+| 格 | 寫成 | 應該是 | 沒改的話 |
+|---|---|---|---|
+| ⑤ | `record.get(name) \| None` | `record.get(name)` | `TypeError: unsupported operand type(s) for \|: 'str' and 'NoneType'`：`\|` 不是「拿不到就給預設值」，`.get()` 本身就會給 `None` |
+| ⑥ | `type(ClientError).__name__` | `type(error).__name__` | 日誌永遠寫 `"type"`（類別的類別），看不出這次是什麼錯 |
+| ⑦ | `file=sys` | `file=sys.stderr` | `sys` 是整個模組，`print` 要的是裡面那條錯誤輸出 |
+| ⑪ | `Depends(get_dynamodb)` | `Depends(get_audit_writer)` | `77 failed`，全部是 `TypeError: 'FakeDynamoDB' object is not callable`（或 `'DynamoDB'`）：對話入口領到的是資料庫，不是寫稽核的函式 |
+
+- ①～④（`write_audit()`）、⑧～⑩ 一次就對
+- 這次的寫法照 `python -c "import ..."` 逐支確認能載入；`report_audit_failure()` 另外用只有 `request_id` 的紀錄實際印一行，看到其餘欄位是 `null`、`error_type` 是 `ValueError`
+
+**Claude 的步驟順序錯誤（兩次，同一類）：** 先叫本人拿掉 `from pathlib import Path`，`append_audit()` 卻還在用它（`NameError: name 'Path' is not defined`）；之後又叫本人在 `app/main.py` 的 import 保留 `append_audit`，但它已經從 `app/audit.py` 刪掉（`ImportError`）。之後改成「先把用到舊東西的地方都換掉，最後才刪舊東西」。
+
+### 測試（Claude 整份提供；測試數 290 → 308）
+
+| 檔案 | 內容 |
+|---|---|
+| `tests/test_audit_store.py`（新檔，13 個） | 不連資料庫 7 個：日誌只有一行 JSON、欄位剛好是允許的 8 個（沒有摘要與指紋）、被額度擋下的紀錄也印得出來（成本欄 `null`）、寫得進去時不印、資料庫拒絕或連不上時印、程式的錯（`float` → `TypeError`）不吞。連 DynamoDB Local 6 個：讀得回來、清單順序不變、空清單存得進去、沒值存成 NULL、同一個 `request_id` 第二次被拒（`ConditionalCheckFailedException`）且留下第一筆、表不存在時印日誌（`ResourceNotFoundException`） |
+| `tests/test_chat_audit_store.py`（新檔，5 個，`integration`） | 用真的窗口：成功與被額度擋下的請求都進 `audit` 表；只有寫稽核失敗時回答照給、429 照 429 且附 `Retry-After`；扣額度與寫稽核同時失敗時，日誌記下 `cost_micro_usd: 7`、`charged: false` |
+| `tests/fakes.py` | 新增 `make_file_audit_writer(path)`：寫暫存檔的替身，**寫之前先用 `TypeSerializer` 轉一次**，紀錄混進 DynamoDB 收不下的值時在測試就紅；`append_audit()` 搬來這裡 |
+| 6 個既有測試檔 | `test_chat.py`、`test_chat_auth.py`、`test_chat_routing.py`、`test_chat_fallback.py`、`test_chat_truncation.py`、`test_demo_fallback.py`：`get_audit_path` 換成 `get_audit_writer`，覆寫值換成替身；斷言一行都沒改。另外 4 個檔（`test_chat_quota.py`、`test_chat_charge.py`、`test_message_limit.py`、`test_seed.py`）借用前面的道具，自動跟著換 |
+| `tests/test_audit.py` | `append_audit` 改從 `tests.fakes` import |
+
+**過程（本人執行）：**
+
+| 時間點 | 結果 |
+|---|---|
+| 只套用測試 | `12 errors during collection`，全部是 `ImportError: cannot import name 'get_audit_writer'`（11 個）或 `'report_audit_failure'`（1 個）。有 4 個檔沒改也紅，是借用了紅的檔的道具 |
+| 寫完 `app/audit.py` 三支函式 | `tests/test_audit_store.py`：`13 passed` |
+| ⑪ 填錯 | `77 failed, 231 passed`（78 秒） |
+| 改正 ⑪ | `308 passed`（17 秒） |
+
+### 破壞實驗（本人執行，四個，DynamoDB Local；每個做完 `git restore app\audit.py`；只跑兩個新測試檔）
+
+| # | 改了什麼 | 結果 | 失敗訊息 |
+|---|---|---|---|
+| 1 | 拿掉 `ConditionExpression` | `1 failed, 17 passed` | `test_write_audit_never_overwrites_a_record - Failed: DID NOT RAISE ClientError` |
+| 2 | `FAILURE_LOG_FIELDS` 加 `"summary"` | `1 failed, 17 passed` | `test_report_audit_failure_leaves_out_summary_and_hash - AssertionError`（欄位集合不相等） |
+| 3 | `write_audit()` 裡把 `pii_types` 改成 `set(value)` | `5 failed, 13 passed` | `stores_the_record`（讀回來是 Set）；`keeps_pii_types_as_an_ordered_list`：`{'SS': ['CARD', ..., 'TW_ID']}`；`keeps_an_empty_pii_types_list`：`ClientError ... (ValidationException) ... PutItem`；`test_chat_writes_the_audit_record_to_the_audit_table`：`{'EMAIL'} == ['EMAIL']`；`test_chat_writes_the_blocked_request_to_the_audit_table`：`assert 0 == 1` |
+| 4 | `except` 改成 `except Exception` | `1 failed, 17 passed` | `test_save_audit_does_not_hide_programming_errors - Failed: DID NOT RAISE TypeError` |
+
+四個的數字都與 Claude 事先在試跑環境（替身伺服器 moto）跑的相同。
+
+**判讀：**
+
+- **實驗 1：** `put_item` 預設遇到同一個主鍵直接覆蓋、不報錯。擋住「稽核被改寫」的只有這個條件與這個測試
+- **實驗 2：** 白名單的好處：新欄位要進日誌一定得改白名單，改了測試就紅，逼人想「這欄該不該出去」
+- **實驗 3：** 三種壞法都看得到。**`SS` 以 `CARD` 開頭**，證明 Set 不保留順序；**空 Set 被 DynamoDB Local 以 `ValidationException` 拒收**；最隱密的是 `0 == 1`：被額度擋下的請求（`"Say hi"`，沒有個資，所以是空清單）寫不進去，`save_audit()` 接住、印一行日誌，**使用者照樣拿到 429，但那一筆沒進表**。退路讓服務不倒，也可能把問題藏起來，所以 M4 一定要有告警
+- **實驗 4：** 什麼都接的話，寫錯的程式會被偽裝成「資料庫寫不進去」，值班的人去查好好的資料庫，而每一筆稽核都進不了表
+
+### 查詢工具與 `Dockerfile`（20:15～20:32）
+
+- **`scripts/show_audit.py`**（Claude 提供，查詢用的工具）：`read_audit(client, request_id)` 強一致讀取那一筆、翻回 Python 的值，查不到回 `None`；`main()` 一行一欄印出，查不到印 `No audit record for ...`、結束碼 1。取代 `demo.ps1` 讀容器裡 `data/audit.jsonl` 的 `last`／`clast`
+- **`tests/test_show_audit.py`**（2 個，`integration`）：`write_audit()` 寫、`read_audit()` 讀，內容一模一樣；查不到回 `None`。測試數 308 → **310**
+- **`Dockerfile`**：刪除 `RUN mkdir data && chown appuser:appuser data` 與它的註解。程式已經不在容器裡寫檔，不需要任何「一般使用者寫得進去」的資料夾；M4 的 ECS 可以設 `readonlyRootFilesystem`
+
+### 容器驗證（20:38～20:47）
+
+`docker compose --profile gateway up -d --build`：
+
+| 檢查 | 結果 | 證明了 |
+|---|---|---|
+| `docker compose ps` | `gateway` `Up` | 拿掉 `data` 後映像照樣建得起來 |
+| `irm .../health` | `status: ok` | 服務正常 |
+| `docker compose exec gateway ls` | 只有 `app` | `data` 資料夾真的沒了 |
+| `docker compose exec gateway touch x.txt` | `touch: cannot touch 'x.txt': Permission denied` | 容器裡的 `appuser` 在工作資料夾寫不進任何東西，Gateway 照常回應 |
+
+真實對話（種子腳本重建開發用資料庫，bob 的新 Key 以 `Read-Host` 收進變數）：訊息 `Say hi in one short sentence. My email is amy@example.com`（假信箱）。
+
+- 回應：`200`、`gpt-6-luna`；回答提到「請不要分享信箱」：模型收到的是 `My email is [EMAIL]`，看得出原本有個信箱，看不到信箱本身
+- `uv run --env-file .env python -m scripts.show_audit $r.request_id`：
+
+| 欄位 | 值 | 證明了 |
+|---|---|---|
+| `user_id`、`status`、`charged` | `bob`、`ok`、`True` | 容器裡的 Gateway 把稽核寫進 `audit` 表，扣額度成功 |
+| `input_tokens`、`output_tokens`、`cost_micro_usd` | 19、14、**9** | 手算 19 × 0.1 ＋ 14 × 0.5 ＝ 8.9 → 9 ✅ |
+| `pii_types` | `['EMAIL']` | 清單存進去、讀得回來 |
+| `summary` | `Say hi in one short sentence. My email is [EMAIL]` | 個資沒進資料庫 |
+| `prompt_hash` | 64 個十六進位字元 | HMAC 指紋照記 |
+| `route_reason`、`routed_model`、`model`、`provider_model` | `default`、`gpt-6-luna` ×3 | 路由與計費模型一致 |
+
+- `docker compose logs gateway --tail 5`：只有 `GET /health 200`、`POST /v1/chat 200`，**沒有 `audit_write_failed`**：寫得進去時退路不出聲
+
+### 容器破壞實驗：資料庫裡沒有 `audit` 表（20:50～20:51）
+
+模擬 M4 漏建 `audit` 表或表被誤刪。只動開發用資料庫（8001）。
+
+| 步驟 | 結果 |
+|---|---|
+| `delete_table(TableName='audit')` | 無輸出 |
+| 同一題再問一次 | **`200`**，`request_id` `7485e35d-…`，回答正常 |
+| `docker compose logs gateway --tail 5` | `{"event": "audit_write_failed", "request_id": "7485e35d-…", "user_id": "bob", "timestamp": "…", "status": "ok", "cost_micro_usd": 9, "charged": true, "error_type": "ResourceNotFoundException"}` |
+| `scripts.create_tables` 建回來後 `show_audit` 那個單號 | `No audit record for 7485e35d-…` |
+
+**判讀：**
+
+- 使用者照樣拿到回答（錢已經花了，定案 2）；日誌一行，單號與回應相同、成本 9、`charged: true`，**沒有摘要與指紋**（定案 1、D7）；表建回來後查不到，證明那一筆**真的只留在日誌**
+- 日誌那一行出現在這次請求的 `POST /v1/chat 200` **之前**：稽核在回應交出前就寫（或失敗），uvicorn 的請求紀錄在回應送出後才印
+- 這行就是 M4 告警要抓的東西：`{ $.event = "audit_write_failed" }`
+
+### 限制（誠實記錄）
+
+- **大部分對話測試走替身，不走真的資料庫。** 靠 `test_chat_audit_store.py` 的 5 個與容器驗證補；替身會先轉 DynamoDB 格式，擋得住型別問題，擋不住「資料庫行為不同」
+- **補收是手動的：** 看日誌、自己補扣額度；日誌只有中繼資料，還原不出完整紀錄。正式做法是 M5 的 SQS
+- **日誌也寫不出去時，那一筆就沒了**
+- **CloudWatch 的指標篩選與告警還不存在**，要 M4 的 Terraform 建；本機只在 `docker compose logs` 看得到
+- `user_id` 進日誌：是內部帳號名，補收時要知道扣誰；仍是識別資訊，日誌群組要設保存期限與存取權限（M4）
+- 條件寫入只防「用 `put_item` 覆蓋」；要讓稽核不可竄改，M4 的 IAM 只給 Gateway 對 `audit` 表 `PutItem`，不給 `UpdateItem`、`DeleteItem`
+- 真實對話只做了兩次（成功一次、表不存在一次）；雲端 DynamoDB 的條件寫入與錯誤種類要上雲後確認
+- `readonlyRootFilesystem` 只證明了「不需要寫」，還沒有真的在 ECS 設定
+
+### 面試可用的說法
+
+- 「稽核原本寫在容器裡的檔案，容器一重建就沒了。我改寫進 DynamoDB，寫入時加條件：同一個請求單號已經存在就拒絕。DynamoDB 的 put_item 預設會直接覆蓋、不報錯，我把條件拿掉做過實驗，只有『寫兩次』那個測試會紅。」
+- 「資料庫寫不進稽核時，回答照樣給使用者，因為錢已經付給供應商了。那一筆只印一行 JSON 日誌，用白名單挑欄位，摘要和指紋不會出去。我在容器裡把 audit 表刪掉實測：回應 200、日誌多一行、表建回來後查不到那一筆。M4 會對這行設告警。」
+- 「我只接資料庫的錯，不接所有錯。改成全部都接的話，寫錯的程式會被偽裝成資料庫問題，值班的人會去查一個好好的資料庫。這也有一個破壞實驗守著。」
+- 「pii_types 我用清單不用 Set。實驗把它改成 Set，順序亂了、空的直接被 DynamoDB 拒收，而且被額度擋下的那筆根本沒進表，使用者端什麼都看不出來。」
+- 「程式不再寫檔之後，我把 Dockerfile 裡那個可寫的資料夾也拿掉，在容器裡試著建檔案會被拒絕。上雲可以把容器設成唯讀。」
+
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `96c0658` | 10/15 19:07 前後 | `feat: write audit records to the audit table and log when that fails`（分支 `feat/audit-table`，12 個檔） |
+| `3924348` | 10/15 20:32 | `feat: add show_audit script and drop the writable data folder`（3 個檔） |
+| （待推） | 10/15 | 本筆證據紀錄；分支 `feat/audit-table`（PR 編號開了再補） |
 
 ---
 
@@ -758,21 +919,26 @@ OPENAI_TIMEOUT_SECONDS = 60
 | 8 | 12.5「`app/db.py` 怎麼表示連真的 AWS…」、D49、PART 4 應用層 | `DYNAMODB_TARGET`：`aws` 連雲端（IAM 角色）、網址連練習場（假帳密）、沒設或寫錯就報錯；三個讀取強一致；雲端計費模式隨需；12.5 該列劃掉（E111） |
 | 9 | 12.5「停用 Key 的腳本」、D22（repo 結構） | `scripts/disable_key.py`：`--key`（`getpass` 輸入）停一把、`--user` 停一個人的全部；更新加「必須已存在」的條件；`tests/` 加上 `test_disable_key.py`（E112） |
 | 10 | D10、3.4、12.5「SDK 的等待與 ALB 閒置逾時」 | `OPENAI_TIMEOUT_SECONDS` 由 30 改為 60（強模型 1,576 個 token 實測 25.6 秒，寫滿 2,000 約 32 秒）；M4 的 ALB 閒置逾時設 120 秒（E114、E115） |
+| 11 | 3.2（`audit` 表）、D52、D7、D43、D51、PART 4 應用層 | 稽核寫進 `audit` 表：`write_audit()` 條件寫入（`attribute_not_exists(request_id)`）、`pii_types` 存清單（`L`）；寫不進去時 `save_audit()` 只接資料庫的錯，`report_audit_failure()` 以白名單印一行 JSON 到 stderr（不含摘要與 HMAC），回應不變；領用窗口 `get_audit_writer()` 取代 `get_audit_path()`；12.5 與 D52 該列劃掉（E116） |
+| 12 | D22（repo 結構）、PART 9 安全、4.1 | `scripts/show_audit.py`；`tests/` 加上 `test_audit_store.py`、`test_chat_audit_store.py`、`test_show_audit.py`；`Dockerfile` 不再建可寫的 `data` 資料夾，ECS 設 `readonlyRootFilesystem`；IAM 只給 Gateway 對 `audit` 表 `PutItem`；CloudWatch 指標篩選 `{ $.event = "audit_write_failed" }` ＋告警；日誌群組設保存期限與存取權限（E116） |
 
 ---
 
-## 目前進度（2026-10-15 15:40）
+## 目前進度（2026-10-15 20:51）
+
+**M4 開工前準備全部完成**（10/14～10/15）：
 
 - 第 0 步：分支流程 ✅（E108；PR #3 改用按鈕合併 ✅，E115）
-- 第 1 項：容器驗證 ✅（E114）；逾時改成 60 秒 ✅（E115，分支 `fix/openai-timeout-60s` 待開 PR）
+- 第 1 項：容器驗證 ✅（E114）；逾時改成 60 秒 ✅（E115，PR #5）
+- 第 2 項：稽核搬進 `audit` 表 ✅（E116，分支 `feat/audit-table` 待開 PR）
 - 第 3 項：`DYNAMODB_TARGET`、強一致讀取、隨需計費 ✅（E111）
 - 第 4 項：停用 Key 的腳本 ✅（E112）
 - 第 5、6 項：說明頁關閉、資料庫 503 不附 `Retry-After`、SDK 不重試 ✅（E109）
 - 第 7、8 項：身分聯盟探測成功、Dependabot 運作中 ✅（E110、E113、E115）
-- **PR #3 已合併（`main` = `dcd76c2`）**；Dependabot 的 PR #4（Trivy Action v0.36.0）留到 M4
-- `290 passed`
-- **剩第 2 項：稽核搬進 `audit` 表**
-- 下一筆證據是 **E116**
+- `main` = `c0bdaca`（PR #5）；Dependabot 的 PR #4（Trivy Action v0.36.0）留到 M4
+- `310 passed`
+- **下一步：M4 本體（10/17 起，檢查點 10/25）**
+- 下一筆證據是 **E117**
 
 ---
 
@@ -780,7 +946,9 @@ OPENAI_TIMEOUT_SECONDS = 60
 
 | 項目 | 目前的建議 | 何時定 |
 |---|---|---|
-| 稽核搬進 `audit` 表；扣額度失敗的紀錄與告警；`pii_types` 的型別（D52） | — | 10/16 前 |
+| ~~稽核搬進 `audit` 表；扣額度失敗的紀錄與告警；`pii_types` 的型別（D52）~~ | ✅ 10/15 寫不進去印一行日誌、回應不變、清單（E116） | — |
+| 稽核寫不進去的告警與補收（E116） | CloudWatch 指標篩選 `{ $.event = "audit_write_failed" }` ＋告警；補收手動 | M4 寫 Terraform 時；正式解法 M5（SQS） |
+| Gateway 對 `audit` 表的權限、容器唯讀（E116） | IAM 只給 `PutItem`；ECS `readonlyRootFilesystem: true` | M4 寫 Terraform 時 |
 | ~~`app/db.py` 連真的 AWS 的表示法；強一致讀取；DynamoDB 計費模式（E89、E90）~~ | ✅ 10/14（E111） | — |
 | ~~停用 Key 的腳本（E91）~~ | ✅ 10/14 程式、測試、破壞實驗、三句（E112） | — |
 | ~~`/docs`、`/openapi.json` 是否在正式環境關閉（12.5）~~ | ✅ 10/14 一律關閉（E109） | — |
