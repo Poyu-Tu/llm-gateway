@@ -614,7 +614,7 @@ docker compose --profile gateway up -d --build
 
 **發現：30 秒的逾時不夠。** 強模型的輸出上限是 2,000 個 token；以同樣速度推算 2,000 ÷ 62 ≈ 32 秒，**寫滿上限一定逾時**：使用者拿到 502，而 OpenAI 可能已經寫完、已經收費。只有一個樣本，供應商忙碌時會更慢。
 
-**待本人選擇（Claude 的建議是 A）：**
+**待本人選擇（Claude 的建議是 A；10/15 本人選 A，見 E115）：**
 
 | 選項 | 做法 | 評估 |
 |---|---|---|
@@ -647,7 +647,100 @@ docker compose --profile gateway up -d --build
 - 長回答只量了一次
 - **破壞實驗沒有拍到 `Exited`：** `ps -a` 是在啟動後 1 秒打的，當時還是 `Up Less than a second`；`ConfigError` 由日誌證明，但容器之後轉成 `Exited` 的那一刻沒有記錄到。要補證時，改壞設定、重建後等 5 秒再 `docker compose ps -a`
 
-**推送：** 與 E112 的補充、E113、`docs/logs/m4-wif-probe.log` 一起推（commit 見下一筆）。
+**推送：** 與 E112 的補充、E113、`docs/logs/m4-wif-probe.log` 一起推（commit 見 E115）。
+
+---
+
+## E115. PR #3 合併；逾時改成 60 秒（2026-10-15 15:10～15:40）
+
+**依據：** E108（分支流程）、E109（SDK 不重試、30 秒的逾時沒量過）、E114（強模型 1,576 個 token 花 25.6 秒）；決策書 D10、D67。
+
+### 1. PR #3：`feat/compose-gateway` → `main`
+
+**開 PR 前的檢查（本人執行）：**
+
+| 檢查 | 結果 |
+|---|---|
+| `git status` | `On branch feat/compose-gateway`、`up to date`、`working tree clean` |
+| `git log --oneline -3` | `3a9ed2b`（`docs: update the evidence log to the final version`）、`b0bbf21`（`docs: record the container check and the keyless OpenAI probe`）、`17f7be9` |
+| 證據紀錄是最終版 | `git grep -c gpt-6-xxx origin/feat/compose-gateway -- docs/evidence/m4-evidence-log.md` → `:2`（只有最終版有設定檔改壞的實驗） |
+| 檔案清單 | `git diff --stat origin/main...origin/feat/compose-gateway`：22 個檔、`+1,329 -39`；只有 `.env.example`、沒有 `.env`；沒有 `docs/handoff/` |
+
+**檢查與合併：**
+
+| 檢查 | 結果 | 必要 |
+|---|---|---|
+| `ci / Tests` | ✅ 24 秒 | Required |
+| `ci / Image scan` | ✅ 46 秒；1 個警告（見下） | Required |
+| `CodeQL / Analyze (actions)`、`Analyze (python)` | ✅ | — |
+
+- 本人按 **Merge pull request**（Create a merge commit），GitHub 上刪除分支
+- 本機：`git pull` → `cd9abf6..dcd76c2`，`Fast-forward`；`git fetch --prune` → `[deleted] origin/feat/compose-gateway`；`git branch -d` → `Deleted branch feat/compose-gateway (was 3a9ed2b)`
+- `main` 現在是 `dcd76c2`（`Merge pull request #3 from Poyu-Tu/feat/compose-gateway`）
+- 這次用按鈕合併，補上 E108「PR #2 是在終端機合併的」那一項
+
+**`Image scan` 的警告：**
+
+```
+Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0400d5f644dc74513175e3c…
+```
+
+- **來源（Claude 查證）：** `ci.yml` 本身沒有用 `actions/cache`；它在 `aquasecurity/trivy-action` v0.35.0 的 `action.yaml` 裡（`actions/cache@0400d5f…`，v4.2.4，用來快取 Trivy 的漏洞資料庫）
+- **Dependabot 第一個 PR（#4）：** 合併後幾分鐘內開出，把 Trivy 的 Action 升到 v0.36.0；v0.36.0 的 `action.yaml` 改用 `actions/cache@27d5ce7…`（v5.0.5）、`setup-trivy` v0.2.6。**推定合併 #4 就會消除這個警告**，尚未驗證
+- 處理：#4 先不合併。它改的是擋漏洞的那一關，M4 加 `trivy config` 時一起看變更內容再決定
+- 證明了 E110 的 Dependabot 設定有效：合併進 `main` 後立刻開始運作
+
+### 2. 定案：逾時 30 → 60 秒（15:37，本人選 A）
+
+| 選項 | 做法 | 評估 |
+|---|---|---|
+| **A（採用）** | `OPENAI_TIMEOUT_SECONDS` 30 → 60；M4 的 ALB 閒置逾時設 120 秒 | 只改一個常數與一個測試。2,000 個 token 只要速度不低於每秒約 33 個就不會逾時（E114 量到每秒約 62 個） |
+| B | 強模型輸出上限 2,000 → 1,500 | E114 量到的 1,576 個 token 就會被截斷；供應商忙碌、速度掉到每秒 50 個時，1,500 個仍要 30 秒，一樣撞線 |
+| C | 串流回應 | `chat()`、稽核、成本計算都要重寫，M4 前做不完 |
+| （另一個做法） | 只給強模型 60 秒、便宜模型維持 30 秒 | 較精準，但要改 `app/fallback.py` 的函式與測試；現在不值得 |
+
+**生活比喻：** 外送平台 30 分鐘沒送到就自動取消，但大份餐要做 32 分鐘：菜做好了、錢也扣了，客人卻收到「訂單取消」。改成等 60 分鐘。
+
+### 3. 修改與測試（本人執行，先改測試、再改常數）
+
+`tests/test_production_settings.py`：`test_openai_client_gives_up_after_30_seconds` 改名為 `test_openai_client_gives_up_after_60_seconds`，比對的數字改成 60。
+
+`app/main.py`：
+
+```python
+OPENAI_TIMEOUT_SECONDS = 60
+```
+
+上方補一行註解說明理由（強模型寫滿 2,000 個 token 約 32 秒）。只改常數，沒有三句。
+
+| 時間點 | 指令 | 結果 |
+|---|---|---|
+| 只改測試 | `uv run pytest tests/test_production_settings.py -q` | `1 failed, 3 passed`：`test_openai_client_gives_up_after_60_seconds - assert 30 == 60` |
+| 改完常數 | `uv run pytest -q` | `290 passed`（9.35 秒，含 DynamoDB Local 的測試） |
+
+- `assert 30 == 60`：測試先看到程式裡還是 30，紅的原因是對的；改完常數才綠
+
+### 限制（誠實記錄）
+
+- **60 秒是用一個樣本推出來的。** E114 只量了一次長回答；供應商忙碌時速度若低於每秒約 33 個，寫滿 2,000 個 token 仍會逾時
+- **逾時後 OpenAI 仍可能已經收費**，這個風險沒有消失，只是機率變小
+- **理論最長等待變成 120 秒**（強模型 60 ＋ 降級後的便宜模型 60），使用者等得久、連線佔得久；ALB 的 120 秒還不存在，要在 M4 的 Terraform 明寫並上雲實測
+- 測試只確認連線物件的逾時是 60，沒有真的等 60 秒
+- `Image scan` 的警告「合併 #4 就會消失」只是對照兩版 `action.yaml` 的推定
+
+### 面試可用的說法
+
+- 「我原本給 OpenAI 30 秒逾時，上雲前量了一次最長的回答：強模型寫 1,576 個 token 花了 25.6 秒，換算寫滿上限 2,000 個要 32 秒，一定逾時，而且供應商那邊可能已經收費。所以改成 60 秒，負載平衡器配合設 120 秒。我沒選縮短輸出上限，因為量到的那題就會被截斷，而且供應商一慢照樣撞線。」
+- 「合併後 CI 出現一個警告，我追到它不是我的 workflow 用的，是 Trivy 的 Action 內部用的快取套件太舊。Dependabot 幾分鐘後就開了升級的 PR，新版剛好換掉那個套件；但它改的是擋漏洞的那一關，我刻意先不合併，上雲前一起看。」
+
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `b0bbf21` | 10/15 01:45 前後 | `docs: record the container check and the keyless OpenAI probe`（E112 補充、E113、E114 舊版、`docs/logs/m4-wif-probe.log`） |
+| `3a9ed2b` | 10/15 01:45 前後 | `docs: update the evidence log to the final version` |
+| `dcd76c2` | 10/15 15:2x | `Merge pull request #3 from Poyu-Tu/feat/compose-gateway`（`cd9abf6..dcd76c2`） |
+| （待推） | 10/15 | 逾時改動與本筆，分支 `fix/openai-timeout-60s`，PR #5 |
 
 ---
 
@@ -664,19 +757,22 @@ docker compose --profile gateway up -d --build
 | 7 | 10.3、D19 | `.github/dependabot.yml`：GitHub Action 與 Dockerfile 基底映像的版本更新，每週、冷卻 7 天；Python 套件只收安全性更新（E110） |
 | 8 | 12.5「`app/db.py` 怎麼表示連真的 AWS…」、D49、PART 4 應用層 | `DYNAMODB_TARGET`：`aws` 連雲端（IAM 角色）、網址連練習場（假帳密）、沒設或寫錯就報錯；三個讀取強一致；雲端計費模式隨需；12.5 該列劃掉（E111） |
 | 9 | 12.5「停用 Key 的腳本」、D22（repo 結構） | `scripts/disable_key.py`：`--key`（`getpass` 輸入）停一把、`--user` 停一個人的全部；更新加「必須已存在」的條件；`tests/` 加上 `test_disable_key.py`（E112） |
+| 10 | D10、3.4、12.5「SDK 的等待與 ALB 閒置逾時」 | `OPENAI_TIMEOUT_SECONDS` 由 30 改為 60（強模型 1,576 個 token 實測 25.6 秒，寫滿 2,000 約 32 秒）；M4 的 ALB 閒置逾時設 120 秒（E114、E115） |
 
 ---
 
-## 目前進度（2026-10-15 01:45）
+## 目前進度（2026-10-15 15:40）
 
-- 第 0 步：分支流程 ✅（E108，PR #2 合併為 `cd9abf6`）
-- 第 1 項：容器驗證 ✅ 建映像、`/health`、說明頁 404、連得到資料庫容器、真實對話兩題、長回答 25.6 秒、設定檔改壞起不來（E114）；**30 秒逾時不夠，A／B／C 待本人選**
-- 分支 `feat/compose-gateway`：容器驗證完成，可以開 PR
-- 第 5、6 項：說明頁關閉、資料庫 503 不附 `Retry-After`、SDK 不重試 ✅（E109，`3864f57`，同一個分支）；`271 passed`（45 個 `integration`）
-- 第 7、8 項：Dependabot 定案（E110）；身分聯盟探測成功，M4 照 A 做 ✅（E113）
-- 第 3 項：`DYNAMODB_TARGET`、強一致讀取、隨需計費 ✅（E111）；`282 passed`
-- 第 4 項：停用 Key 的腳本 ✅（E112）；`290 passed`；破壞實驗三個與兩組三句 ✅
-- 下一筆證據是 **E115**
+- 第 0 步：分支流程 ✅（E108；PR #3 改用按鈕合併 ✅，E115）
+- 第 1 項：容器驗證 ✅（E114）；逾時改成 60 秒 ✅（E115，分支 `fix/openai-timeout-60s` 待開 PR）
+- 第 3 項：`DYNAMODB_TARGET`、強一致讀取、隨需計費 ✅（E111）
+- 第 4 項：停用 Key 的腳本 ✅（E112）
+- 第 5、6 項：說明頁關閉、資料庫 503 不附 `Retry-After`、SDK 不重試 ✅（E109）
+- 第 7、8 項：身分聯盟探測成功、Dependabot 運作中 ✅（E110、E113、E115）
+- **PR #3 已合併（`main` = `dcd76c2`）**；Dependabot 的 PR #4（Trivy Action v0.36.0）留到 M4
+- `290 passed`
+- **剩第 2 項：稽核搬進 `audit` 表**
+- 下一筆證據是 **E116**
 
 ---
 
@@ -690,14 +786,14 @@ docker compose --profile gateway up -d --build
 | ~~`/docs`、`/openapi.json` 是否在正式環境關閉（12.5）~~ | ✅ 10/14 一律關閉（E109） | — |
 | ~~資料庫故障的 503 要不要附 `Retry-After`（12.5）~~ | ✅ 10/14 不附，測試釘住（E109） | — |
 | ~~便宜模型那次 SDK 的等待與 ALB 閒置逾時（E100）~~ | ✅ 10/14 SDK 一律不重試（E109） | — |
-| ALB 閒置逾時的值（E109、E114） | Terraform 明寫；跟著上一列的逾時決定（選 A 就設 120） | M4 寫 Terraform 時 |
-| 30 秒的逾時夠不夠（E109） | **量到了：不夠**（1,576 token 花 25.6 秒，寫滿 2,000 約 32 秒）；Claude 建議 A：逾時 60 秒、ALB 120 秒（E114） | 10/15 |
+| ALB 閒置逾時的值（E109、E114、E115） | **120 秒**（逾時已改 60 秒）；Terraform 明寫 | M4 寫 Terraform 時 |
+| ~~30 秒的逾時夠不夠（E109）~~ | ✅ 10/15 不夠，改 60 秒（E114、E115） | — |
 | ~~容器驗證~~ | ✅ 10/15（E114） | — |
 | M4 的 ECS 部署要能判斷新版本起不來（E114） | ALB 健康檢查打 `/health`、開部署斷路器，起不來自動退回 | M4 寫 Terraform 時 |
 | ~~OpenAI 工作負載身分聯盟（4.5、E110）~~ | ✅ 10/14 探測成功（E113）；Fargate 角色的對應在 M4 | — |
 | `m1-gateway` 金鑰 11/2 到期（12.5） | 雲端改用身分聯盟就不需要；**本機開發與 11/2 之後的錄影仍要用金鑰**，到期前在個人電腦換一把新的 | 11/2 前 |
 | ~~Trivy 升級與 Action 的更新方式（E104）~~ | ✅ 10/14 Dependabot 管 Action 與基底映像；Trivy 本身的版本在加 `trivy config` 時手動升級（E110） | M4 |
-| CI 加 `trivy config`（E104） | 有 Terraform 之後 | M4 |
+| CI 加 `trivy config`（E104） | 有 Terraform 之後；同時看 Dependabot 的 PR #4（Trivy Action v0.36.0，推定可消除 Node.js 20 警告，E115） | M4 |
 | 供應商預算用完的告警（D32、E100） | M3 只記稽核的 `error_code` | M4～M6 |
 | 預扣（7.10） | M3 不做 | M5 |
 | A 能不能擋住「沒進 PR、但有綠勾的 commit」（E108） | 目前的 `ci.yml` 做不出這種 commit；不另外測 | — |
