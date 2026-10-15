@@ -26,7 +26,8 @@ CONFIG = load_config(CONFIG_PATH)
 # OpenAI 連線設定：重試和逾時都調小，避免重複花錢、卡住連線（D10）
 # 不讓 SDK 自己重試：被限流時直接回 503 與 Retry-After，不在背後等到負載平衡器先斷線
 OPENAI_MAX_RETRIES = 0
-OPENAI_TIMEOUT_SECONDS = 30
+# 強模型寫滿輸出上限 2,000 個 tokens 約 32 秒（實測每秒約 62 個），30 秒會逾時
+OPENAI_TIMEOUT_SECONDS = 60
 
 # 說明頁（/docs、/redoc、/openapi.json）一律關閉：使用者用不到，只會把 API 的地圖交給想攻擊的人
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)

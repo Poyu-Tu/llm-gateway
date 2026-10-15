@@ -37,11 +37,11 @@ def test_openai_client_does_not_retry(monkeypatch):
     assert client.max_retries == 0
 
 
-# 每次呼叫最多等 30 秒
-def test_openai_client_gives_up_after_30_seconds(monkeypatch):
+# 每次呼叫最多等 60 秒
+def test_openai_client_gives_up_after_60_seconds(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-a-real-key")
 
     client = get_client()
 
-    assert client.timeout == 30
+    assert client.timeout == 60
 
