@@ -76,7 +76,7 @@ jobs:
       # trivy-action 用 v0.35.0：2026-03 供應鏈事件後，Aqua 公告點名安全的版本與 SHA；
       # 它內建的 Trivy 是 v0.69.3（同一份公告列為安全），這裡再明寫一次
       - name: Scan the image with Trivy
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: llm-gateway:ci
           version: v0.69.3
