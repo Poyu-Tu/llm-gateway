@@ -8,9 +8,9 @@ from openai import RateLimitError
 
 from app.config import CONFIG_PATH, load_config
 from app.main import app as gateway
-from app.main import get_audit_path, get_client, get_dynamodb, get_hmac_key, get_quota, get_user_id
+from app.main import get_audit_writer, get_client, get_dynamodb, get_hmac_key, get_quota, get_user_id
 from scripts.demo_fallback import SimulatedLimitClient
-from tests.fakes import FakeDynamoDB, make_fake_client
+from tests.fakes import FakeDynamoDB, make_fake_client, make_file_audit_writer
 
 ROUTING = load_config(CONFIG_PATH).routing
 # 含關鍵字 debug、又不到 300 字：正式規則一定選強模型
@@ -61,7 +61,7 @@ def test_gateway_falls_back_to_the_cheap_model(tmp_path):
     audit_path = tmp_path / "audit.jsonl"
     gateway.dependency_overrides[get_client] = lambda: SimulatedLimitClient(real_client)
     gateway.dependency_overrides[get_hmac_key] = lambda: b"test-key"
-    gateway.dependency_overrides[get_audit_path] = lambda: audit_path
+    gateway.dependency_overrides[get_audit_writer] = lambda: make_file_audit_writer(audit_path)
     gateway.dependency_overrides[get_user_id] = lambda: "bob"
     gateway.dependency_overrides[get_quota] = lambda: (1_000_000, 0)
     gateway.dependency_overrides[get_dynamodb] = lambda: FakeDynamoDB()

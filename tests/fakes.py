@@ -1,8 +1,11 @@
 """Fake objects shared by tests."""
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx2
+from boto3.dynamodb.types import TypeSerializer
 from openai import RateLimitError
 
 
@@ -117,3 +120,27 @@ class FakeDynamoDB:
 
     def update_item(self, **kwargs):
         self.updates.append(kwargs)
+
+
+# 寫入一筆稽核紀錄到檔案（從 app/audit.py 搬來，只剩測試在用）：附加模式，不能覆蓋舊紀錄
+def append_audit(record: dict, path: Path) -> None:
+    """Append one record as a JSON line. Never overwrite earlier records."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        text = json.dumps(record)
+        f.write(text + "\n")
+
+
+# 替身：取代正式環境「寫進 audit 表」的那支函式，改寫進暫存檔，讓既有的斷言照樣讀檔檢查
+# 寫之前先照 DynamoDB 的規則轉一次格式：紀錄裡出現 DynamoDB 收不下的型別（例如 float），
+# 這裡就和正式環境一樣報錯，不會在測試裡綠、上雲才壞
+def make_file_audit_writer(path: Path):
+    """Return a stand-in audit writer that appends to a file instead of DynamoDB."""
+    serializer = TypeSerializer()
+
+    def write(record: dict) -> None:
+        for value in record.values():
+            serializer.serialize(value)
+        append_audit(record, path)
+
+    return write
