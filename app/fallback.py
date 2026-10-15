@@ -70,7 +70,7 @@ def chat_with_fallback(client, messages: list[dict], model: str, settings: Model
     """Call the routed model; when the strong model is rate limited, try the cheap model once."""
     cheap_model = config.routing.cheap_model
 
-    # 路由選的就是便宜模型：沒有備胎，保留 SDK 自己的那一次重試
+    # 路由選的就是便宜模型：沒有備胎，照連線本身的重試設定（main.py 的 OPENAI_MAX_RETRIES）
     if model == cheap_model:
         return call_once(client, messages, model, settings, False, None)
 

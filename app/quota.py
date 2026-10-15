@@ -55,7 +55,8 @@ def read_limit(client: BaseClient, user_id: str) -> int:
         "user_id": {"S": user_id},
         "period": {"S": LIMIT_SORT_KEY},
     }
-    response = client.get_item(TableName=QUOTAS_TABLE, Key=key)
+    # 強一致讀取：剛扣完的錢、剛改的額度，下一個請求就要看得到
+    response = client.get_item(TableName=QUOTAS_TABLE, Key=key, ConsistentRead=True)
     if "Item" not in response:
         return 0
     item = response["Item"]
@@ -71,7 +72,8 @@ def read_used(client: BaseClient, user_id: str, period: str) -> int:
         "user_id": {"S": user_id},
         "period": {"S": period},
     }
-    response = client.get_item(TableName=QUOTAS_TABLE, Key=key)
+    # 強一致讀取：剛扣完的錢、剛改的額度，下一個請求就要看得到
+    response = client.get_item(TableName=QUOTAS_TABLE, Key=key, ConsistentRead=True)
     if "Item" not in response:
         return 0
     item = response["Item"]

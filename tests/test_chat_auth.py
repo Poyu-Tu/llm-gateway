@@ -113,6 +113,8 @@ def test_chat_returns_503_when_database_is_unreachable(tmp_path, dynamodb):
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Service temporarily unavailable"}
+    # 資料庫多久恢復無從得知：不附 Retry-After，免得所有客戶端在同一秒一起重試
+    assert "retry-after" not in response.headers
     assert completions.last_request is None
     assert not audit_path.exists()
 
@@ -126,3 +128,5 @@ def test_chat_returns_503_when_key_table_is_missing(tmp_path, dynamodb):
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Service temporarily unavailable"}
+    # 資料庫多久恢復無從得知：不附 Retry-After，免得所有客戶端在同一秒一起重試
+    assert "retry-after" not in response.headers

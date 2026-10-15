@@ -39,8 +39,8 @@ def test_cheap_route_calls_the_cheap_model_once():
     assert completions.models_called() == ["small"]
 
 
-# 便宜模型後面沒有備胎：保留 SDK 自己的那一次重試（用連線原本的設定）
-def test_cheap_route_keeps_the_sdk_retry():
+# 便宜模型那一次不另外改重試設定，照連線本身的設定（main.py 的 OPENAI_MAX_RETRIES，目前是 0）
+def test_cheap_route_uses_the_client_retry_setting():
     client, completions = make_fake_client()
 
     call(client, "small")
@@ -117,8 +117,8 @@ def test_fallback_sends_the_same_messages():
     assert completions.requests[1]["messages"] == MESSAGES
 
 
-# 強模型那一次不重試；降級後的便宜模型沒有備胎了，保留 SDK 的重試
-def test_fallback_call_keeps_the_sdk_retry():
+# 強模型那一次明確設成不重試；降級後的便宜模型照連線本身的設定
+def test_fallback_call_uses_the_client_retry_setting():
     client, completions = make_fake_client(errors={"big": make_rate_limit_error()})
 
     call(client, "big")
