@@ -8,8 +8,8 @@ from fastapi.testclient import TestClient
 import app.main
 from app.config import GatewayConfig, ModelConfig, RoutingConfig
 from app.main import app as gateway
-from app.main import get_audit_path, get_client, get_config, get_dynamodb, get_hmac_key, get_quota, get_user_id
-from tests.fakes import FakeDynamoDB, make_fake_client
+from app.main import get_audit_writer, get_client, get_config, get_dynamodb, get_hmac_key, get_quota, get_user_id
+from tests.fakes import FakeDynamoDB, make_fake_client, make_file_audit_writer
 
 # 測試用的設定：模型名稱故意不用正式的，主程式偷用寫死的名稱時才會被抓到
 # 門檻設成 18 個字，測試的句子才不用寫到 300 字
@@ -38,7 +38,7 @@ def make_routing_test_client(tmp_path, config=TEST_CONFIG, reported_model=None):
     database = FakeDynamoDB()
     gateway.dependency_overrides[get_client] = lambda: fake_client
     gateway.dependency_overrides[get_hmac_key] = lambda: b"test-key"
-    gateway.dependency_overrides[get_audit_path] = lambda: audit_path
+    gateway.dependency_overrides[get_audit_writer] = lambda: make_file_audit_writer(audit_path)
     gateway.dependency_overrides[get_user_id] = lambda: "alice"
     gateway.dependency_overrides[get_quota] = lambda: (1_000_000, 0)
     gateway.dependency_overrides[get_dynamodb] = lambda: database

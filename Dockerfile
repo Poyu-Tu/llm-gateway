@@ -29,9 +29,6 @@ COPY --from=builder /app/.venv /app/.venv
 # 複製程式碼
 COPY app ./app
 
-# 稽核紀錄的資料夾，交給一般使用者才寫得進去
-RUN mkdir data && chown appuser:appuser data
-
 # 讓系統找得到套件；日誌即時輸出；不產生暫存檔
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \

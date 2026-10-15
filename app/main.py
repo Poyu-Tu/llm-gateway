@@ -2,8 +2,8 @@
 
 import os
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
-from pathlib import Path
 
 from botocore.client import BaseClient
 from botocore.exceptions import BotoCoreError, ClientError
@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from openai import APIError, OpenAI, RateLimitError
 from pydantic import BaseModel, Field
 
-from app.audit import append_audit, hash_prompt, make_summary, mask, detect_pii_types
+from app.audit import save_audit, hash_prompt, make_summary, mask, detect_pii_types
 from app.auth import extract_bearer_token, find_user_id, hash_api_key
 from app.db import make_dynamodb_client
 from app.config import CONFIG_PATH, GatewayConfig, load_config
@@ -50,11 +50,6 @@ def get_hmac_key() -> bytes:
     return os.environ["AUDIT_HMAC_KEY"].encode("utf-8")
 
 
-# 領用窗口：稽核紀錄檔的位置
-def get_audit_path() -> Path:
-    return Path("data/audit.jsonl")
-
-
 # 領用窗口：模型、單價與路由規則（測試時會換成測試用的設定）
 def get_config() -> GatewayConfig:
     return CONFIG
@@ -63,6 +58,13 @@ def get_config() -> GatewayConfig:
 # 領用窗口：資料庫連線（測試時會換成考場的）
 def get_dynamodb() -> BaseClient:
     return make_dynamodb_client()
+
+# 領用窗口：寫稽核的方式。正式環境寫進 audit 表、寫不進去就印一行日誌；測試時換成寫暫存檔
+def get_audit_writer(dynamodb: BaseClient = Depends(get_dynamodb)) -> Callable[[dict], None]:
+    def write(record: dict) -> None:
+        save_audit(dynamodb, record)
+
+    return write
 
 
 # 驗票口：通過才交出「這個請求是誰」；沒通過在這裡就結束，進不了對話入口
@@ -131,7 +133,7 @@ def chat_endpoint(
     request: ChatRequest,
     client: OpenAI = Depends(get_client),
     hmac_key: bytes = Depends(get_hmac_key),
-    audit_path: Path = Depends(get_audit_path),
+    write_audit_record: Callable[[dict], None] = Depends(get_audit_writer),
     user_id: str = Depends(get_user_id),
     quota: tuple[int, int] = Depends(get_quota),
     now: datetime = Depends(get_now),
@@ -156,7 +158,7 @@ def chat_endpoint(
     limit_micro_usd, used_micro_usd = quota
     if is_over_quota(limit_micro_usd, used_micro_usd):
         record["status"] = "quota_exceeded"
-        append_audit(record, audit_path)
+        write_audit_record(record)
         raise HTTPException(
             status_code=429,
             detail="Monthly quota exceeded",
@@ -180,7 +182,7 @@ def chat_endpoint(
     except ModelNotConfiguredError as exc:
         record["status"] = "error"
         record["error_type"] = type(exc).__name__
-        append_audit(record, audit_path)
+        write_audit_record(record)
         raise HTTPException(status_code=500, detail="Internal server error")
 
     # 呼叫模型：強模型被限流時改用便宜模型一次；不論成功失敗，都交回一個結果（不往外丟錯誤）
@@ -205,7 +207,7 @@ def chat_endpoint(
         # 只記這個短代碼、不記錯誤訊息，事後才分得出是哪一種問題
         if isinstance(outcome.error, APIError):
             record["error_code"] = outcome.error.code
-        append_audit(record, audit_path)
+        write_audit_record(record)
         # 供應商回 429（限流或預算用完）：回 503
         if isinstance(outcome.error, RateLimitError):
             # 供應商的預算用完：多久會恢復無從得知，要有人處理，所以不附 Retry-After
@@ -240,7 +242,7 @@ def chat_endpoint(
     except (BotoCoreError, ClientError):
         record["charged"] = False
         
-    append_audit(record, audit_path)
+    write_audit_record(record)
     return {
         "request_id": request_id,
         "reply": result.text,

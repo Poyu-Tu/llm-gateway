@@ -2,7 +2,8 @@
 
 import json
 
-from app.audit import append_audit, hash_prompt, make_summary, mask, luhn_valid, detect_pii_types
+from app.audit import hash_prompt, make_summary, mask, luhn_valid, detect_pii_types
+from tests.fakes import append_audit
 
 
 # 指紋長度固定是 64 個字元

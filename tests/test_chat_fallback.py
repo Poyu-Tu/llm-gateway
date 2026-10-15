@@ -6,8 +6,8 @@ from fastapi.testclient import TestClient
 from openai import NotFoundError, OpenAIError
 
 from app.main import app as gateway
-from app.main import get_audit_path, get_client, get_config, get_dynamodb, get_hmac_key, get_quota, get_user_id
-from tests.fakes import FakeDynamoDB, make_fake_client, make_rate_limit_error
+from app.main import get_audit_writer, get_client, get_config, get_dynamodb, get_hmac_key, get_quota, get_user_id
+from tests.fakes import FakeDynamoDB, make_fake_client, make_file_audit_writer, make_rate_limit_error
 from tests.test_chat_routing import BROKEN_CONFIG, TEST_CONFIG, read_audit
 
 # 含關鍵字 debug、又不到 18 個字：路由一定選強模型 big
@@ -30,7 +30,7 @@ def make_fallback_test_client(tmp_path, errors=None):
     database = FakeDynamoDB()
     gateway.dependency_overrides[get_client] = lambda: fake_client
     gateway.dependency_overrides[get_hmac_key] = lambda: b"test-key"
-    gateway.dependency_overrides[get_audit_path] = lambda: audit_path
+    gateway.dependency_overrides[get_audit_writer] = lambda: make_file_audit_writer(audit_path)
     gateway.dependency_overrides[get_user_id] = lambda: "alice"
     gateway.dependency_overrides[get_quota] = lambda: (1_000_000, 0)
     gateway.dependency_overrides[get_dynamodb] = lambda: database

@@ -4,10 +4,18 @@ import re
 import hmac
 import hashlib
 import json
-from pathlib import Path
+import sys
+
+from boto3.dynamodb.types import TypeSerializer
+from botocore.client import BaseClient
+from botocore.exceptions import BotoCoreError, ClientError
+
+from app.db import AUDIT_TABLE
 
 # 摘要長度上限（D6）
 SUMMARY_LENGTH = 50
+# 稽核寫不進資料庫時，日誌只留這幾欄：夠事後補收、對帳；摘要與指紋不出資料庫（D7）
+FAILURE_LOG_FIELDS = ("request_id", "user_id", "timestamp", "status", "cost_micro_usd", "charged")
 # 信箱的形狀：名字 @ 網域 . 結尾；名字只能從「前一個字不是信箱的字」的地方開始找
 # （CodeQL 10/13：沒有這個限制時，一長串字母會從每個位置各重掃一次，時間隨長度平方變長）
 EMAIL_PATTERN = r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
@@ -97,10 +105,34 @@ def make_summary(text: str) -> str:
     return summary
 
 
-# 寫入一筆稽核紀錄：用附加模式，不能覆蓋舊紀錄
-def append_audit(record: dict, path: Path) -> None:
-    """Append one record as a JSON line. Never overwrite earlier records."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        text = json.dumps(record)
-        f.write(text + "\n")
+# 寫進 audit 表：Python 的值先轉成 DynamoDB 的格式；同一個 request_id 已經有了就拒絕，不覆蓋舊紀錄
+def write_audit(client: BaseClient, record: dict) -> None:
+    """Put one record into the audit table. Never overwrite an existing record."""
+    serializer = TypeSerializer()
+    item = {}
+    for name, value in record.items():
+        item[name] = serializer.serialize(value)
+    client.put_item(
+        TableName=AUDIT_TABLE,
+        Item=item,
+        ConditionExpression="attribute_not_exists(request_id)",
+    )
+
+
+# 寫不進資料庫時的退路：印一行 JSON 到 stderr（Fargate 會送進 CloudWatch Logs），只留中繼資料
+def report_audit_failure(record: dict, error: Exception) -> None:
+    """Print one JSON line with the record's metadata, without the summary or hash."""
+    entry = {"event": "audit_write_failed"}
+    for name in FAILURE_LOG_FIELDS:
+        entry[name] = record.get(name)
+    entry["error_type"] = type(error).__name__
+    print(json.dumps(entry), file=sys.stderr, flush=True)
+
+
+# 先寫資料庫，資料庫的錯才改印日誌；程式自己的錯照樣往外丟，讓測試抓到
+def save_audit(client: BaseClient, record: dict) -> None:
+    """Write the record to the audit table, or log its metadata if the database fails."""
+    try:
+        write_audit(client, record)
+    except (BotoCoreError, ClientError) as exc:
+        report_audit_failure(record, exc)
