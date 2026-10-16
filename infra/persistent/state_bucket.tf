@@ -29,7 +29,7 @@ resource "aws_s3_bucket_versioning" "tfstate" {
 # 存進去就加密；用 S3 自己管的金鑰（免費），帳本裡沒有密碼，不需要另付 KMS
 # Trivy AWS-0132（HIGH）要求改用自管的 KMS 金鑰：刻意接受。存取已由 IAM 與 bucket 政策管住，
 # 自管金鑰每月約 US$1、所有讀寫帳本的角色都要多給 KMS 權限；專題結束前（12/31 到期）再檢討
-#trivy:ignore:AWS-0132:exp:2026-12-31
+
 resource "aws_s3_bucket_server_side_encryption_configuration" "tfstate" {
   bucket = aws_s3_bucket.tfstate.id
   rule {
