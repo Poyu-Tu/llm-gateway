@@ -1149,7 +1149,7 @@ OPENAI_TIMEOUT_SECONDS = 60
 
 ---
 
-## E120. A 段後半：GitHub OIDC 與 destroy 角色（定案、`sub` 新格式、apply、權限模擬器）（2026-10-17 11:02～15:21）
+## E120. A 段後半：GitHub OIDC 與 destroy 角色（定案、`sub` 新格式、apply、權限模擬器、GitHub 端驗證）（2026-10-17 11:02～16:12）
 
 **依據：** E117（OIDC 角色先只給 destroy workflow；施工順序 A～E）、E119；決策書 4.2（CI/CD 層）、5.1、6.4、D20；11.4 的 S11。
 
@@ -1246,7 +1246,85 @@ OPENAI_TIMEOUT_SECONDS = 60
 - 只驗身分的 workflow 要有一個「沒掛 environment」的工作，用來證明它借不到角色。environment 的 secret **只有掛了那個 environment 的工作讀得到**；放在 environment 裡，沒掛的工作拿到的是空字串，被拒的原因會變成「參數不對」，而不是「信任條件對不上」，證明不了想證明的事
 - ARN 不是密碼，知道它也借不到角色（要通過信任條件）；放 secret 只是為了讓公開的 log 不露出帳號 ID
 
-**接下來：** GitHub 建 environment `destroy`（只准 `main`）、加 repository secret；`.github/workflows/oidc-check.yml` 進分支、開 PR、CI 綠了合併；從 `main` 手動觸發，看 GitHub 實際發的 `sub`；再從別的分支觸發一次，預期被 environment 擋下。結果補在本筆。
+**5. GitHub 端設定（本人在主控台操作，15:30～15:45）**
+
+| 設定 | 內容 | 截圖 |
+|---|---|---|
+| environment `destroy` | Required reviewers、Wait timer 不勾；Deployment branches and tags 改 **Selected branches and tags**，規則 `main`（`1 branch and 0 tags allowed`） | `m4-oidc-env-branch-rule.png` |
+| 取消管理員略過 | `Allow administrators to bypass configured protection rules` 預設是勾的，**取消勾**（`Environment "destroy" updated.`） | `m4-oidc-env-no-admin-bypass.png` |
+| repository secret | `AWS_DESTROY_ROLE_ARN`（Environment secrets 維持空的） | — |
+
+**定案 6（15:45，Claude 提出、本人照做）：取消管理員略過。** 這個 repo 會按「Run workflow」的只有本人，而本人就是管理員；勾著的話，管理員可能可以繞過這個 environment 的保護規則。它會不會連「只准 `main`」也繞過，GitHub 文件寫得不夠清楚，所以不猜、直接關掉：沒有審核人與等待時間，關掉不會卡到任何事。實測結果見第 7 節。
+
+**生活比喻：** 門口貼「只有走正門的人能領拆除證」，旁邊又貼「店長不用管上面那條」。店裡唯一會去領證的就是店長，第一條等於沒貼。
+
+**6. PR #9 與從 `main` 執行 `oidc-check`**
+
+| 項目 | 結果 |
+|---|---|
+| PR #9（`be59adf`、`c9c3b6c`、`1cd5f15`） | 6 個檢查全綠：`Config scan` 11 秒（第一次掃到 IAM 政策，沒有 HIGH）、`Image scan` 46 秒、`Tests` 27 秒、CodeQL ×3；按 Merge pull request → `e08f48e`；本機 `92b7aa4..e08f48e`、刪分支 |
+| Dependabot PR #4 | `git fetch --prune` 顯示 `[deleted] origin/dependabot/github_actions/aquasecurity/trivy-action-0.36.0`：Dependabot 已自行關閉（PR #7 已含同樣的升級） |
+
+`oidc-check #1`（從 `main` 手動觸發；截圖 `m4-oidc-check-claims-with-env.png`、`m4-oidc-check-assumed-role.png`、`m4-oidc-check-denied-without-env.png`）：
+
+| 工作 | 印出的 `sub` | `environment` | 結果 |
+|---|---|---|---|
+| `Assume the destroy role (environment destroy)` | `repo:Poyu-Tu@62129723/llm-gateway@1394630828:environment:destroy` | `destroy` | ✅ 7 秒；借到 `arn:aws:sts::<account-id>:assumed-role/llm-gateway-destroy/oidc-check-39015190287` |
+| `Try the destroy role without the environment (must be denied)` | `repo:Poyu-Tu@62129723/llm-gateway@1394630828:ref:refs/heads/main` | `None` | ✅ 9 秒；`An error occurred (AccessDenied) when calling the AssumeRoleWithWebIdentity operation: Not authorized to perform sts:AssumeRoleWithWebIdentity`、`Denied as expected` |
+
+- 兩個工作的 `aud` 都是 `sts.amazonaws.com`；`repository_id` `1394630828`、`repository_owner_id` `62129723`，與瀏覽器查到的一致
+- **新格式的推定成立：** environment 的 `sub` 就是 `名字@編號` 加 `:environment:destroy`，信任政策第一次就對
+- **兩個工作的唯一差別是有沒有掛 environment：** 同一個 repo、同一個 `main`、同一次執行，`sub` 的結尾因此不同，AWS 只認 `environment:destroy` 那一張
+- 帳號 ID 的遮罩有效：公開 log 裡只看得到 `<account-id>`
+
+**7. 破壞實驗：從別的分支執行（16:00 前後）**
+
+`git switch -c test/oidc-from-branch`、推上 GitHub（內容與 `main` 相同，`e08f48e`），Actions 選這個分支執行 `oidc-check #2`（截圖 `m4-oidc-check-branch-blocked.png`）：
+
+| 工作 | 結果 |
+|---|---|
+| `Assume the destroy role (environment destroy)` | ❌ 2 秒，**一個步驟都沒跑**：`Branch "test/oidc-from-branch" is not allowed to deploy to destroy due to environment protection rules.` |
+| `Try the destroy role without the environment (must be denied)` | ✅ 6 秒（沒掛 environment，不受這條規則管，照樣被 AWS 拒絕） |
+
+- **所以證明了：** 「只准 `main`」在 GitHub 這一層就擋下，工作根本沒開始、拿不到身分證明，更碰不到 AWS；取消管理員略過之後，管理員本人從分支觸發也被擋
+- 收尾：本機 `git branch -D`、GitHub `git push origin --delete test/oidc-from-branch`
+
+**生活比喻：** 拆除組的人從後門進來，櫃台連工作證都不發給他，警衛那關根本不用出場。
+
+### 證明了什麼（E120 全部）
+
+| 想擋的情況 | 誰擋 | 證據 |
+|---|---|---|
+| 沒掛 environment 的工作（CI、別的 workflow）借角色 | AWS 的信任條件（`sub` 對不上） | `oidc-check #1` 第二個工作的 `AccessDenied` |
+| 從 `main` 以外的分支掛 environment 借角色 | GitHub environment 的分支規則 | `oidc-check #2` 的 `not allowed to deploy` |
+| 借到角色後碰長期層 | 角色上的明文 Deny | 權限模擬器 `explicitDeny`（第 3 節） |
+| 借到角色後碰沒給的東西 | 沒給就沒有 | 權限模擬器 `implicitDeny` |
+
+### 限制（誠實記錄）
+
+- **信任條件與環境規則分屬兩個系統：** AWS 只看得到 `sub`，「只准 `main`」在 GitHub 的設定裡，不在 repo、沒有版本紀錄；有人把 environment 的分支規則刪掉，AWS 端不會知道
+- 有 repo 管理權限的人可以改 environment、改 workflow，等於能拆每日層；個人專題只有本人一個管理員
+- 權限模擬器只算角色身上的政策，不含 bucket 政策（只准 HTTPS 那條）；真的寫帳本要等 C 段的 destroy workflow
+- 刪除權限還沒有給，「借到角色就能拆每日層」要到 C 段才成立
+- `oidc-check.yml` 的 environment 新格式只在 `main` 驗過；`pull_request` 等其他觸發方式的 `sub` 沒有看
+- 截圖由 Claude 遮蔽：裁掉最上方一列（頭像）、執行摘要的頭像改成灰色方塊
+
+### 面試可用的說法
+
+- 「destroy workflow 用 GitHub OIDC 借 AWS 的角色，repo 裡沒有任何長期金鑰。信任條件只認 environment destroy，environment 又只准 main。我做了兩個破壞實驗：沒掛 environment 的工作被 AWS 拒絕，從別的分支觸發則在 GitHub 那層就被擋，連身分證明都拿不到。」
+- 「設定時我發現 GitHub 今年 7 月起，新 repo 的身分證明格式改成名字加編號，網路上大部分範例還是舊格式，照抄會永遠借不到。我先寫一支只印證明欄位、不印證明本身的 workflow，確認格式之後才去寫真的 destroy。」
+- 「權限我分批給，這次只開帳本的兩個檔，但先把長期層的明文 Deny 寫好。我用 IAM 的權限模擬器逐一驗證，還意外發現打錯的動作名稱不會報錯，只會變成沒給，所以 Deny 寫完一定要用模擬器問一次。」
+- 「GitHub environment 預設允許管理員略過保護規則，而這個 repo 唯一會觸發 workflow 的就是我這個管理員，所以我把它關掉，再從別的分支實測確認被擋。」
+
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `be59adf` | 10/17 15:4x | `feat: add the GitHub OIDC provider and the destroy role` |
+| `c9c3b6c` | 10/17 15:4x | `ci: add a workflow that checks who can assume the destroy role` |
+| `1cd5f15` | 10/17 15:4x | `docs: record the OIDC decisions, the apply and the policy simulator` |
+| `e08f48e` | 10/17 15:5x | `Merge pull request #9 from Poyu-Tu/feat/m4-github-oidc`（`92b7aa4..e08f48e`；6 個檢查全綠） |
+| （待推） | — | 本筆的 GitHub 端驗證與截圖 |
 
 ---
 
@@ -1272,11 +1350,11 @@ OPENAI_TIMEOUT_SECONDS = 60
 | 16 | D19、D62、5.1、PART 10 第 11 環節 | CI 第三個工作 `Config scan`（`trivy config .`，HIGH／CRITICAL 擋），已列入 `protect-main` 必要檢查；trivy-action v0.36.0、Trivy v0.74.0（兩個掃描都明寫）；刻意接受的項目用 `#trivy:ignore:<ID>:exp:<日期>` 寫在該行上方並附理由（目前只有 `AWS-0132`，12/31 到期）（E118） |
 | 17 | 3.2、3.6、D16、D19 | 雲端 DynamoDB 先建三張表（`usage` 留 M5）：`PAY_PER_REQUEST`、`deletion_protection_enabled`、PITR；ECR `llm-gateway`：`IMMUTABLE`、`scan_on_push`、生命週期（沒標籤 1 天、最多 10 個）；State bucket：`bucket_prefix`、`prevent_destroy`、封鎖公開、版本控制、`AES256`、只准 HTTPS；Terraform 1.16.5、AWS provider 6.68.0（E118） |
 | 18 | 5.1（State 管理）、PART 9「IaC」 | 實作：State 放 `llm-gateway-tfstate-<亂碼>` bucket 的 `persistent/terraform.tfstate`，`use_lockfile`；本機用 `aws login`（Terraform 1.15 起支援）；中斷的操作會留下 `.tflock`，以 `force-unlock` 收拾前要確認主人與沒有程序在跑（E119） |
-| 19 | 4.2（CI/CD 層）、5.1、D20、11.4 的 S11 | GitHub OIDC 提供者與 `llm-gateway-destroy` 角色放長期層；只有 environment `destroy`（只准 `main`）借得到，`sub` 用 2026/7/15 後的新格式（`repo:Poyu-Tu@<owner-id>/llm-gateway@<repo-id>:environment:destroy`）；權限分批長，第一批只有每日層帳本兩個檔，並先寫明文 Deny 擋長期層（E120） |
+| 19 | 4.2（CI/CD 層）、5.1、D20、11.4 的 S11 | GitHub OIDC 提供者與 `llm-gateway-destroy` 角色放長期層；只有 environment `destroy`（只准 `main`）借得到，`sub` 用 2026/7/15 後的新格式（`repo:Poyu-Tu@<owner-id>/llm-gateway@<repo-id>:environment:destroy`）；權限分批長，第一批只有每日層帳本兩個檔，並先寫明文 Deny 擋長期層；environment 取消管理員略過；`oidc-check.yml` 實測：沒掛 environment 被 AWS 拒、從分支觸發被 GitHub 擋（E120） |
 
 ---
 
-## 目前進度（2026-10-17 15:30）
+## 目前進度（2026-10-17 16:15）
 
 **M4 開工前準備全部完成**（10/14～10/15）：
 
@@ -1294,9 +1372,9 @@ OPENAI_TIMEOUT_SECONDS = 60
 - **長期層上雲（E119）：** 10 個資源 apply、帳本在 S3（`use_lockfile`）、`destroy` 被 `prevent_destroy` 擋、CLI 刪表被刪除保護擋；`23e190b`
 - **PR #7 合併（10/17 10:40）：** `main` = `92b7aa4`，6 個檢查全綠
 - **A 段後半開工（E120）：** OIDC 與 destroy 角色五項定案；發現 GitHub 新 repo 的 `sub` 改成「名字@編號」；帳號裡沒有既有的 OIDC 提供者
-- **OIDC 提供者與 destroy 角色已上雲（E120）：** 3 個資源 apply（免費）；權限模擬器 5 題與預期相同（允許 1、明文 Deny 2、沒給 2）
-- 下一步：environment `destroy`、repository secret → `oidc-check.yml` 進分支、PR、合併 → 從 `main` 觸發看實際的 `sub`、從別的分支觸發看被擋
-- 下一筆證據是 **E121**（E120 的施工結果補在 E120 本筆）
+- **A 段完成（E120）：** OIDC 提供者與 destroy 角色上雲（免費）；權限模擬器 5 題、`oidc-check` 從 `main` 借到角色、沒掛 environment 被拒、從分支觸發被擋；PR #9 合併，`main` = `e08f48e`
+- 下一步：本筆與截圖進 repo（docs PR）→ **C 段**每日層骨架（`infra/daily/`，帳本 `daily/terraform.tfstate`）→ destroy workflow 第一次實測
+- 下一筆證據是 **E121**
 
 ---
 
@@ -1320,8 +1398,8 @@ OPENAI_TIMEOUT_SECONDS = 60
 | `m1-gateway` 金鑰 11/2 到期（12.5） | 雲端改用身分聯盟就不需要；**本機開發與 11/2 之後的錄影仍要用金鑰**，到期前在個人電腦換一把新的 | 11/2 前 |
 | ~~Trivy 升級與 Action 的更新方式（E104）~~ | ✅ 10/14 Dependabot 管 Action 與基底映像；Trivy 本身的版本在加 `trivy config` 時手動升級（E110） | M4 |
 | ~~CI 加 `trivy config`（E104）~~ | ✅ 10/16 `Config scan`，必要檢查；trivy-action v0.36.0 已包含 PR #4 的升級，Node.js 20 警告消失（E118） | — |
-| Dependabot 的 PR #4 | PR #7 合併後應自動關閉；沒關就手動關，註明被 PR #7 取代 | 下次開 GitHub（PR #7 已合併，本人尚未確認） |
-| environment 的新 `sub` 格式（E120） | 推定 `repo:Poyu-Tu@62129723/llm-gateway@1394630828:environment:destroy`；只驗身分的 workflow 印出來確認，不同就改信任政策再 apply | 本分支 |
+| ~~Dependabot 的 PR #4~~ | ✅ 10/17 Dependabot 自行關閉（分支已刪，E120） | — |
+| ~~environment 的新 `sub` 格式（E120）~~ | ✅ 10/17 `oidc-check` 印出 `repo:Poyu-Tu@62129723/llm-gateway@1394630828:environment:destroy`，與推定相同 | — |
 | 每日層的 destroy 要不要讀長期層的資料（E120） | C 段決定：用 `terraform_remote_state` 讀 `persistent/` 帳本（角色要多 `GetObject`），或用 data source（角色要多 `Describe*`），或寫死名稱 | C 段 |
 | `AWS-0132` 豁免（E118） | 12/31 到期，到期前決定改用 KMS 或延長 | 12/31 前 |
 | `usage` 表（E118） | M5 建；Endpoint Policy、IAM 要補 | M5 |
