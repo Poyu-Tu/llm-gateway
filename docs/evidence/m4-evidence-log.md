@@ -1144,6 +1144,109 @@ OPENAI_TIMEOUT_SECONDS = 60
 | commit | 時間 | 訊息 |
 |---|---|---|
 | `23e190b` | 10/17 10:2x | `feat: store the persistent layer state in the S3 bucket`（`11d5925..23e190b`） |
+| `763634e` | 10/17 10:3x | `docs: record the persistent layer, the config scan and the first apply`（本筆與 E117、E118） |
+| `92b7aa4` | 10/17 10:40 | `Merge pull request #7 from Poyu-Tu/feat/m4-persistent-layer`（`8e2ce32..92b7aa4`；6 個檢查全綠） |
+
+---
+
+## E120. A 段後半：GitHub OIDC 與 destroy 角色（定案、`sub` 新格式、apply、權限模擬器）（2026-10-17 11:02～15:21）
+
+**依據：** E117（OIDC 角色先只給 destroy workflow；施工順序 A～E）、E119；決策書 4.2（CI/CD 層）、5.1、6.4、D20；11.4 的 S11。
+
+**生活比喻：** 拆除組要進工地收東西，不發他萬用鑰匙。他每次到門口出示「拆除組、從正門進來」的工作證（GitHub 開的身分證明），警衛核對後給一張一小時的臨時通行證（AWS 的臨時憑證），通行證上寫明哪些房間能進、哪些房間（長期層）絕對不准進。
+
+### 定案（本人：設計題 AAA，10/17 11:02；追加兩題「11」，14:21）
+
+| # | 決定 | 定案 | 不選的選項與理由 | 弱點 |
+|---|---|---|---|---|
+| 1 | 誰能借 destroy 角色 | **A：GitHub environment `destroy`**；environment 只准 `main`；`sub` 與 `aud`（`sts.amazonaws.com`）都用完全相等比對；不設審核人（拆是省錢的動作，不該卡住） | B：只限 `main` 分支（`sub` 結尾 `ref:refs/heads/main`）：`main` 上任何 workflow 的任何工作都借得到，包括 CI | 掛了 environment 之後，證明上**只寫 environment、不寫分支**，「只准 `main`」完全靠 GitHub 的 environment 設定，那個設定不在 repo 裡、沒有版本紀錄；能在 `main` 手動觸發的人就能拆 |
+| 2 | 權限怎麼給 | **A：分批長出來。** 這次只建 OIDC 提供者、角色、讀寫每日層帳本；刪除權限跟每日層一起寫（標籤條件只准刪 `Layer=daily`）。帳本只開兩個檔：`daily/terraform.tfstate` 與 `daily/terraform.tfstate.tflock`（比交接寫的 `daily/*` 更窄） | B：現在照文件猜一整份刪除權限：猜錯的要到每日層才知道，猜多了就是多給 | 每加一批刪除權限都要 apply 一次長期層 |
+| 3 | destroy workflow 第一次實測 | **A：C 段（免費的 VPC、子網、安全群組、Gateway Endpoint）建好就實測**，驗過才開 D 段會跳錶的東西 | B：照原順序到 E 段：第一次拆就是在跳錶的時候 | — |
+| 4 | 追加：先做一支只驗身分的 workflow | **要。** 手動觸發、掛 environment `destroy`；向 GitHub 要一張證明，**只印 `sub`、`aud` 等欄位，不印證明本身**；再用 AWS CLI 借一次角色、跑 `aws sts get-caller-identity`；不用第三方 Action | 不做：C 段第一次 destroy 失敗時，「`sub` 寫錯」和「刪除權限不夠」兩種原因混在一起 | 多一個 workflow 檔 |
+| 5 | 追加：明文 Deny 什麼時候寫 | **這次就寫**：護欄比權限先到，之後每加一條允許都已經有 Deny 墊著；用 AWS 的權限模擬器就能驗證，不用真的刪東西 | 等刪除權限一起寫 | Deny 只擋列出來的動作；漏列的靠「沒給就沒有」（目前除了帳本兩個檔，什麼都沒給） |
+
+### 發現：GitHub 2026/7/15 之後建立的 repo，`sub` 改成「名字@編號」的新格式
+
+- **官方文件（Claude 查證）：** 7/15 之後建立的 repo，`sub` 改為 `repo:OWNER@OWNER-ID/REPO@REPO-ID:...`；之前建立的維持舊格式（可自行改用新格式）。理由：舊格式只有名字，帳號或 repo 名稱被別人重新註冊後，對方可以做出一模一樣的 `sub`。來源：[GitHub Docs〈OpenID Connect reference〉](https://docs.github.com/en/actions/reference/security/oidc)
+- **本 repo（本人以瀏覽器查 `https://api.github.com/repos/Poyu-Tu/llm-gateway`）：** `created_at` `2026-09-29T07:32:30Z` → 新格式；repo 編號 `1394630828`、帳號編號 `62129723`（公開資訊，寫進 Terraform）
+- **交接檔原本寫的 `repo:Poyu-Tu/llm-gateway:environment:destroy` 是舊格式：** 照寫的話角色永遠借不到，錯誤只會是「沒有權限」，很難查
+- **推定的新寫法：** `repo:Poyu-Tu@62129723/llm-gateway@1394630828:environment:destroy`。官方只示範了分支的新格式，**environment 的新格式是照推的、未證實**，由定案 4 的 workflow 實際印出來確認
+
+**生活比喻：** 門禁卡以前只印「公司名／部門名」，公司倒了、別人註冊同名公司，就能做出一樣的卡；現在卡上加印統一編號。警衛的名單要照新卡的樣子寫。
+
+### 開工前檢查（本人執行）
+
+| 指令 | 結果 | 證明了 |
+|---|---|---|
+| `Get-ChildItem Env:AWS_*` | 無輸出 | 沒有會過期的舊憑證蓋過 `aws login` |
+| `aws login` | `Updated profile default to use arn:aws:iam::<account-id>:user/terry-admin credentials.` | 已登入 |
+| `aws iam list-open-id-connect-providers` | `"OpenIDConnectProviderList": []` | 帳號裡沒有 GitHub 的 OIDC 提供者，apply 不會撞名（同一個網址一個帳號只能有一個） |
+
+### 設計（`infra/persistent/github_oidc.tf`，Claude 給骨架；`outputs.tf` 加 `destroy_role_arn`）
+
+| 資源 | 內容 |
+|---|---|
+| `aws_iam_openid_connect_provider.github` | `https://token.actions.githubusercontent.com`、`client_id_list = ["sts.amazonaws.com"]`；不寫 `thumbprint_list`（AWS 驗證 GitHub 的證明已改用自己信任的憑證機構） |
+| `aws_iam_role.destroy` | 名稱 `llm-gateway-destroy`；信任政策只有一條 `sts:AssumeRoleWithWebIdentity`，條件 `aud`、`sub` 都是 `StringEquals`；一次最多 1 小時 |
+| `aws_iam_role_policy.destroy`（inline） | 允許 3 條：`s3:ListBucket`（bucket，不加前綴條件）、每日層帳本 `GetObject`／`PutObject`、鎖檔 `GetObject`／`PutObject`／`DeleteObject`。明文 Deny 6 條：三張表（刪表、`UpdateTable`、關 PITR、寫資料）、帳本 bucket 的設定、`persistent/` 帳本與鎖檔（寫、刪、刪舊版本）、ECR（刪倉庫、刪映像、改政策與生命週期、改標籤可覆蓋）、角色自己（改權限、改信任、刪除）、OIDC 提供者 |
+
+- 政策裡**沒有任何萬用字元**（`*`）：Claude 以 HCL 解析器逐條檢查
+- 帳本權限照 Terraform 官方文件：帳本本身要讀寫、不需要刪；鎖檔要讀、寫、刪。來源：[Terraform Docs〈S3 backend〉](https://developer.hashicorp.com/terraform/language/backend/s3)
+- `ListBucket` 不加前綴條件：只會看到 bucket 裡的檔名（`persistent/…`、`daily/…`），不是秘密；前綴寫錯的話 `terraform init` 會失敗，而那要到 GitHub Actions 上才看得到
+- 角色的 ARN 含帳號 ID：放進 GitHub 的 **repository secret** `AWS_DESTROY_ROLE_ARN`（不是 variable），GitHub 會在公開的 log 裡遮掉。原本想放 environment `destroy` 的 secret，改成 repository secret 的理由見下方「施工」第 4 節
+
+### 限制（目前為止）
+
+- **Claude 的試跑環境裝不了 Terraform**（HashiCorp 的下載站不在允許清單），骨架只用 HCL 解析器檢查語法與萬用字元；`fmt`、`validate`、`plan` 以本人電腦為準
+- environment 的新 `sub` 格式未證實（見上）
+- 信任條件只認 `sub` 與 `aud`；`sub` 裡已有 repo 與帳號編號，所以名稱被重新註冊的風險已由新格式處理
+
+### 施工（本人執行，個人電腦，10/17 14:30～15:21）
+
+**1. 分支與檢查**
+
+| 指令 | 結果 |
+|---|---|
+| `git switch -c feat/m4-github-oidc`（`main` 已是最新） | 新分支 |
+| `git status` | `modified` 兩個（`outputs.tf`、`m4-evidence-log.md`）、`Untracked` 一個（`github_oidc.tf`） |
+| `terraform fmt -check` | 無輸出 |
+| `terraform validate` | `Success! The configuration is valid.`：不寫 `thumbprint_list` 也通過，計畫中顯示 `(known after apply)`（由 AWS 補上） |
+
+**2. plan 與 apply**
+
+| 步驟 | 結果 |
+|---|---|
+| `terraform plan` | `Plan: 3 to add, 0 to change, 0 to destroy.`；既有 10 個只有 `Refreshing state`，沒有任何變動 |
+| 計畫裡的信任政策 | `"token.actions.githubusercontent.com:sub"` = `repo:Poyu-Tu@62129723/llm-gateway@1394630828:environment:destroy`、`aud` = `sts.amazonaws.com`，兩個都是 `StringEquals` |
+| 兩份政策 `will be read during apply` | 政策裡要填角色與 OIDC 提供者的 ARN，要等那兩個建好才知道，所以 Terraform 在 apply 中途才組政策 |
+| `terraform apply` → `yes`（答之前確認重印的計畫仍是 `3 to add`） | 順序：OIDC 提供者（2 秒）→ 組信任政策 → 角色（1 秒）→ 組權限政策 → 角色上的權限；`Apply complete! Resources: 3 added, 0 changed, 0 destroyed.` |
+| outputs | `destroy_role_arn = "arn:aws:iam::<account-id>:role/llm-gateway-destroy"` |
+
+- 沒有用 `plan -out` 存計畫檔：計畫檔含帳本內容，而 `.gitignore` 沒有擋 `*.tfplan`；`apply` 本身會重算一次計畫並等 `yes`
+- 費用：三個都是 IAM，免費
+
+**3. 權限模擬器（`aws iam simulate-principal-policy`，只用角色身上的政策計算，不真的借角色、不真的刪東西）**
+
+| # | 問題 | 結果 | 證明了 |
+|---|---|---|---|
+| 1 | `s3:PutObject` `daily/terraform.tfstate` | `allowed` | 寫得了每日層帳本 |
+| 2 | `s3:PutObject` `persistent/terraform.tfstate` | `explicitDeny` | 長期層帳本被明文 Deny 擋 |
+| 3 | `dynamodb:DeleteTable` `audit` 表 | `explicitDeny` | 刪 `audit` 表被明文 Deny 擋 |
+| 4 | `s3:PutObject` `daily/other.tfstate` | `implicitDeny` | 只開了那兩個檔，旁邊的檔不行 |
+| 5 | `s3:GetObject` `persistent/terraform.tfstate` | `implicitDeny` | 長期層帳本連讀都沒給 |
+
+- 5 個都與 Claude 事先寫的預期相同
+- **`implicitDeny` 與 `explicitDeny` 的差別：** 前者是「沒給」，之後加一條允許就會變成可以；後者是「明文禁止」，之後不管加什麼允許都照樣擋（IAM 的規則：Deny 一定贏過 Allow）
+- **意外發現（打錯字）：** 第 3 題第一次打成 `sim dynamodb:Delete $audit`，結果是 `implicitDeny`，**沒有報錯**。模擬器不檢查動作名稱存不存在，不存在的動作只會得到「沒給」。反過來說：**Deny 清單裡若把動作名稱打錯，Terraform 與 AWS 都不會報錯，那一條就默默失效。** 所以 Deny 寫完一定要用模擬器逐一問一次「該擋的有沒有擋」，不能只看政策長得對不對
+
+**生活比喻（打錯字那題）：** 問警衛「拆除組能不能進『刪』這間？」大樓根本沒有叫「刪」的房間，警衛也不會說「沒這間」，只會說「你的名單上沒有」。黑名單上的房間名寫錯，也是一樣：警衛照名單擋，名單上那間不存在，真正的房間就沒擋到。
+
+**4. 角色 ARN 放 repository secret，不放 environment secret（Claude 修正設計）**
+
+- 只驗身分的 workflow 要有一個「沒掛 environment」的工作，用來證明它借不到角色。environment 的 secret **只有掛了那個 environment 的工作讀得到**；放在 environment 裡，沒掛的工作拿到的是空字串，被拒的原因會變成「參數不對」，而不是「信任條件對不上」，證明不了想證明的事
+- ARN 不是密碼，知道它也借不到角色（要通過信任條件）；放 secret 只是為了讓公開的 log 不露出帳號 ID
+
+**接下來：** GitHub 建 environment `destroy`（只准 `main`）、加 repository secret；`.github/workflows/oidc-check.yml` 進分支、開 PR、CI 綠了合併；從 `main` 手動觸發，看 GitHub 實際發的 `sub`；再從別的分支觸發一次，預期被 environment 擋下。結果補在本筆。
 
 ---
 
@@ -1169,10 +1272,11 @@ OPENAI_TIMEOUT_SECONDS = 60
 | 16 | D19、D62、5.1、PART 10 第 11 環節 | CI 第三個工作 `Config scan`（`trivy config .`，HIGH／CRITICAL 擋），已列入 `protect-main` 必要檢查；trivy-action v0.36.0、Trivy v0.74.0（兩個掃描都明寫）；刻意接受的項目用 `#trivy:ignore:<ID>:exp:<日期>` 寫在該行上方並附理由（目前只有 `AWS-0132`，12/31 到期）（E118） |
 | 17 | 3.2、3.6、D16、D19 | 雲端 DynamoDB 先建三張表（`usage` 留 M5）：`PAY_PER_REQUEST`、`deletion_protection_enabled`、PITR；ECR `llm-gateway`：`IMMUTABLE`、`scan_on_push`、生命週期（沒標籤 1 天、最多 10 個）；State bucket：`bucket_prefix`、`prevent_destroy`、封鎖公開、版本控制、`AES256`、只准 HTTPS；Terraform 1.16.5、AWS provider 6.68.0（E118） |
 | 18 | 5.1（State 管理）、PART 9「IaC」 | 實作：State 放 `llm-gateway-tfstate-<亂碼>` bucket 的 `persistent/terraform.tfstate`，`use_lockfile`；本機用 `aws login`（Terraform 1.15 起支援）；中斷的操作會留下 `.tflock`，以 `force-unlock` 收拾前要確認主人與沒有程序在跑（E119） |
+| 19 | 4.2（CI/CD 層）、5.1、D20、11.4 的 S11 | GitHub OIDC 提供者與 `llm-gateway-destroy` 角色放長期層；只有 environment `destroy`（只准 `main`）借得到，`sub` 用 2026/7/15 後的新格式（`repo:Poyu-Tu@<owner-id>/llm-gateway@<repo-id>:environment:destroy`）；權限分批長，第一批只有每日層帳本兩個檔，並先寫明文 Deny 擋長期層（E120） |
 
 ---
 
-## 目前進度（2026-10-17 10:24）
+## 目前進度（2026-10-17 15:30）
 
 **M4 開工前準備全部完成**（10/14～10/15）：
 
@@ -1188,8 +1292,11 @@ OPENAI_TIMEOUT_SECONDS = 60
 - **M4 本體開工（E117）：** 四項定案、施工順序 A～E
 - **長期層骨架與 Config scan（E118）：** State bucket、ECR、三張表寫好並 `validate`；CI 加 `Config scan` 並列為必要檢查；草稿 PR #7 6 個檢查全綠
 - **長期層上雲（E119）：** 10 個資源 apply、帳本在 S3（`use_lockfile`）、`destroy` 被 `prevent_destroy` 擋、CLI 刪表被刪除保護擋；`23e190b`
-- 下一步：新版證據紀錄放進分支 → PR #7 轉正式、合併；之後 A 段後半（GitHub OIDC 與 destroy 用的角色）
-- 下一筆證據是 **E120**
+- **PR #7 合併（10/17 10:40）：** `main` = `92b7aa4`，6 個檢查全綠
+- **A 段後半開工（E120）：** OIDC 與 destroy 角色五項定案；發現 GitHub 新 repo 的 `sub` 改成「名字@編號」；帳號裡沒有既有的 OIDC 提供者
+- **OIDC 提供者與 destroy 角色已上雲（E120）：** 3 個資源 apply（免費）；權限模擬器 5 題與預期相同（允許 1、明文 Deny 2、沒給 2）
+- 下一步：environment `destroy`、repository secret → `oidc-check.yml` 進分支、PR、合併 → 從 `main` 觸發看實際的 `sub`、從別的分支觸發看被擋
+- 下一筆證據是 **E121**（E120 的施工結果補在 E120 本筆）
 
 ---
 
@@ -1213,7 +1320,9 @@ OPENAI_TIMEOUT_SECONDS = 60
 | `m1-gateway` 金鑰 11/2 到期（12.5） | 雲端改用身分聯盟就不需要；**本機開發與 11/2 之後的錄影仍要用金鑰**，到期前在個人電腦換一把新的 | 11/2 前 |
 | ~~Trivy 升級與 Action 的更新方式（E104）~~ | ✅ 10/14 Dependabot 管 Action 與基底映像；Trivy 本身的版本在加 `trivy config` 時手動升級（E110） | M4 |
 | ~~CI 加 `trivy config`（E104）~~ | ✅ 10/16 `Config scan`，必要檢查；trivy-action v0.36.0 已包含 PR #4 的升級，Node.js 20 警告消失（E118） | — |
-| Dependabot 的 PR #4 | PR #7 合併後應自動關閉；沒關就手動關，註明被 PR #7 取代 | PR #7 合併時 |
+| Dependabot 的 PR #4 | PR #7 合併後應自動關閉；沒關就手動關，註明被 PR #7 取代 | 下次開 GitHub（PR #7 已合併，本人尚未確認） |
+| environment 的新 `sub` 格式（E120） | 推定 `repo:Poyu-Tu@62129723/llm-gateway@1394630828:environment:destroy`；只驗身分的 workflow 印出來確認，不同就改信任政策再 apply | 本分支 |
+| 每日層的 destroy 要不要讀長期層的資料（E120） | C 段決定：用 `terraform_remote_state` 讀 `persistent/` 帳本（角色要多 `GetObject`），或用 data source（角色要多 `Describe*`），或寫死名稱 | C 段 |
 | `AWS-0132` 豁免（E118） | 12/31 到期，到期前決定改用 KMS 或延長 | 12/31 前 |
 | `usage` 表（E118） | M5 建；Endpoint Policy、IAM 要補 | M5 |
 | 供應商預算用完的告警（D32、E100） | M3 只記稽核的 `error_code` | M4～M6 |
