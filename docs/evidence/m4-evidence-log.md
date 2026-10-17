@@ -489,7 +489,7 @@ def make_dynamodb_client() -> BaseClient:
 | commit | 時間 | 訊息 |
 |---|---|---|
 | `17f7be9` | 10/14 17:1x | `feat: add a script that disables one key or every key of a user`（分支 `feat/compose-gateway`，`cae6354..17f7be9`） |
-| （待推） | 10/14 晚上 | 本筆補上破壞實驗與三句，隨容器驗證的 commit 一起推 |
+| `b0bbf21` | 10/15 01:45 前後 | 本筆補上破壞實驗與三句，隨容器驗證的 commit 一起推（見 E115） |
 
 ---
 
@@ -901,7 +901,249 @@ OPENAI_TIMEOUT_SECONDS = 60
 |---|---|---|
 | `96c0658` | 10/15 19:07 前後 | `feat: write audit records to the audit table and log when that fails`（分支 `feat/audit-table`，12 個檔） |
 | `3924348` | 10/15 20:32 | `feat: add show_audit script and drop the writable data folder`（3 個檔） |
-| （待推） | 10/15 | 本筆證據紀錄；分支 `feat/audit-table`（PR 編號開了再補） |
+| `f3624cb` | 10/15 20:55 | `docs: record moving the audit log into the audit table`（本筆證據紀錄） |
+| `8e2ce32` | 10/15 21:01 | `Merge pull request #6 from Poyu-Tu/feat/audit-table`（`c0bdaca..8e2ce32`；5/5 檢查綠） |
+
+---
+
+## E117. M4 本體開工：四項定案與施工順序（2026-10-15 21:13～21:25）
+
+**依據：** 決策書 8.2（M4）、3.5、4.1、4.4、5.1、6.4、D13、D20、D40；`m4-body-start-handoff.md`。
+
+### 開工前檢查
+
+| 項目 | 結果 |
+|---|---|
+| 本機同步 | `git pull` → `c0bdaca..8e2ce32`（PR #6）；`git branch -d feat/audit-table`；`docker compose --profile gateway down` 後 `docker compose ps` 為空 |
+| PR #6 的 CI 附註（本人截圖） | `CodeQL` 2 則通知（notice）：`ubuntu-latest` 自 10/19 起改指 Ubuntu 26。`ci` 1 則警告：已知的 Node.js 20（Trivy Action 內部的 `actions/cache`，見 E115） |
+| 判讀 | `ci.yml` 的 `Tests`、`Image scan` 都鎖 `ubuntu-24.04`，不受影響；CodeQL 預設設定的機器由 GitHub 管理，10/19 後看第一次結果；M4 新增的 workflow 一樣鎖 `ubuntu-24.04` |
+
+### 定案（21:25，本人四題都選 A）
+
+| # | 決定 | 定案 | 不選的選項與理由 | 弱點 |
+|---|---|---|---|---|
+| 1 | Terraform State 的鎖 | **只用 S3 本身的鎖檔（`use_lockfile = true`），不建 DynamoDB 鎖表** | 照決策書 5.1 另建 DynamoDB 鎖表：Terraform 官方文件已標示 DynamoDB 鎖為淘汰（deprecated），未來的小版本會移除 | 需要較新的 Terraform；修訂決策書 5.1 與 PART 9 |
+| 2 | 拆幾層 | **兩層：長期層**（State bucket、GitHub OIDC、ECR、DynamoDB 四張表）平常不拆；**每日層**（VPC、子網、安全群組、Gateway Endpoint、NAT、DNS 防火牆、ALB、ECS、告警）測完就 destroy，destroy workflow 只拆這層 | 全部一層、一鍵全拆：每次都要重建表、重跑種子腳本、所有 Key 換新 | 兩層分開 apply；長期層的東西要另外記得清（結案時） |
+| 3 | M4 從哪裡執行 | **本人電腦**（`aws login`）跑 `terraform plan`／`apply`、`docker push`；GitHub OIDC 角色先只給 destroy workflow 用，CD 留到 M6（D20） | M4 就全部走 GitHub Actions：每次除錯都要推、等 CI，M4 會慢很多 | M4 期間部署是手動的 |
+| 4 | ALB 開給誰 | **安全群組只放行本人的公開 IP**（Terraform 變數）；HTTP 80（7.8） | 開給全世界：誰掃到都能打 Gateway，灌日誌、吃 ALB 費用 | 換網路要改變數再 apply；公開 IP 屬 11.5 的遮蔽項目，變數值不進 repo |
+
+**生活比喻（第 2 項）：** 搬家時，戶籍和存摺（State、表、映像）放在固定的保險箱；冷氣和保全（NAT、ALB、Fargate）按小時計費，出門就關。
+
+### 施工順序（Claude 提出，本人同意）
+
+| 段 | 內容 | 費用 |
+|---|---|---|
+| A | 長期層的地基：State bucket（加密、封鎖公開、版本控制）、GitHub OIDC 角色 | 幾乎免費 |
+| B | 長期層的住戶：ECR、DynamoDB 四張表（隨需計費） | 閒置幾乎免費 |
+| C | 每日層的骨架：VPC、公有子網 × 2 AZ、私有子網 × 1、安全群組、Gateway Endpoint（含 Endpoint Policy） | 免費 |
+| D | 每日層會跳錶的：NAT（單 AZ）、DNS 防火牆（先告警後阻擋）、ALB、ECS Fargate | 約 US$2.8／天，測完當天 destroy |
+| E | 驗收 S08～S11、錄影、destroy workflow 實測 | 同 D |
+
+---
+
+## E118. 長期層骨架（State bucket、ECR、三張表）與 CI 的 Trivy 設定掃描（2026-10-15 21:46～10-16 16:03）
+
+**依據：** E117（兩層、施工順序 A、B 段）；決策書 3.2、3.6、5.1、D19、D62；E104、E110、E115（Trivy 升級與 PR #4）。
+
+**範圍：** 只寫檔、`terraform init`／`validate`／`fmt`、推分支、跑 CI。**沒有登入 AWS、沒有 `plan`／`apply`**，AWS 上還沒有任何東西。
+
+### 1. 工具版本（冷卻期：上架滿 3 天）
+
+| 工具 | 版本 | 理由 |
+|---|---|---|
+| Terraform | **1.16.5**（10/2 發佈）；`required_version = "~> 1.16.5"` | 1.16.6 是 10/14 發佈，未過冷卻期。winget 安裝檔 SHA256 `01700102…38ef` 與 HashiCorp 官方 `terraform_1.16.5_SHA256SUMS` 一致（GPG 簽章沒驗） |
+| AWS provider | **6.68.0**（10/7 發佈）；`version = "= 6.68.0"` | 6.69.0 是 10/14 發佈。查發佈頁時看到 6.57.0 曾因嚴重 bug 被下架，佐證冷卻期 |
+| trivy-action | **v0.36.0**（`ed142fd…`，2026-04 發佈） | 與 Dependabot PR #4 相同；以 `git ls-remote` 確認 `refs/tags/v0.36.0^{}` = `ed142fd0673e97e23eac54620cfb913e5ce36c25` |
+| Trivy | **v0.74.0**（2026-08-14 發佈），兩個掃描工作都明寫 | 不寫會用 action 內建的 v0.70.0；10/16 CI 提示 0.76.0 已出，未過冷卻期，不升 |
+
+### 2. 長期層 `infra/persistent/` 的內容（Claude 給骨架、本人建檔）
+
+| 檔 | 內容 |
+|---|---|
+| `versions.tf`、`providers.tf` | 版本如上；東京區；`default_tags`：`Project`、`Layer = persistent`、`ManagedBy = terraform`；不寫任何帳密 |
+| `state_bucket.tf` | `bucket_prefix = "llm-gateway-tfstate-"`、`prevent_destroy`；封鎖公開四開關；版本控制；`AES256` 加密；bucket 政策 Deny 非 HTTPS（`aws:SecureTransport = false`，用 `data "aws_iam_policy_document"` 組），`depends_on` 封鎖公開 |
+| `ecr.tf` | 倉庫 `llm-gateway`：`IMMUTABLE`、`scan_on_push`、`AES256`；生命週期：沒標籤 1 天後刪、全部最多留 10 個 |
+| `dynamodb.tf` | `api_keys`（`key_hash`）、`quotas`（`user_id` + `period`）、`audit`（`request_id`）；表名對齊 `app/db.py`、主鍵對齊 `scripts/create_tables.py`；`PAY_PER_REQUEST`、`deletion_protection_enabled = true`、PITR 開啟 |
+| `outputs.tf` | `tfstate_bucket`、`ecr_repository_url`、`dynamodb_table_arns`（三張表的 ARN 對照） |
+| `.terraform.lock.hcl` | `init` 產生，16 組 `zh:` 平台指紋，進 Git |
+| `.gitignore` | 加 `.terraform/`、`*.tfstate`、`*.tfstate.*`、`*.tfvars`、`crash.log`；**在第一次 apply 之前**加 |
+
+**定案（Claude 提出、本人照做）：**
+
+| # | 決定 | 定案 | 不選的選項與理由 |
+|---|---|---|---|
+| 1 | 雲端先建幾張表 | **三張**（`api_keys`、`quotas`、`audit`），`usage` 等 M5 的 Worker | 現在建四張：`usage` 的欄位 M5 才定。代價：Endpoint Policy 與 IAM 之後要補一張 |
+| 2 | 表的防刪 | `deletion_protection_enabled`（AWS 層級，主控台與 CLI 也刪不掉） | 只用 `prevent_destroy`：只擋 Terraform，擋不住主控台 |
+| 3 | 映像標籤 | `IMMUTABLE`，之後用 git commit 編號當標籤 | `MUTABLE` 加 `latest`：出事時查不到當時跑的是哪一份 |
+
+### 3. 本機檢查
+
+| 指令 | 結果 |
+|---|---|
+| `terraform init` | `Installed hashicorp/aws v6.68.0 (signed by HashiCorp)`；產生 `.terraform.lock.hcl` |
+| `terraform validate`（bucket 時、加 ECR 與表後各一次） | `Success! The configuration is valid.` |
+| `terraform fmt -check` | 加 ECR 與表後印出 `ecr.tf`（生命週期規則的等號沒對齊）；`terraform fmt` 自動修正後再檢查無輸出 |
+| `git status`（init 後） | 只多出 `.terraform.lock.hcl`，`.terraform/` 有被擋 |
+
+### 4. CI 加 Config scan（Trivy `config`）
+
+**發現：** Claude 在試跑環境用 Trivy v0.74.0（內建規則）掃分支：HIGH 1 個 `AWS-0132`（State bucket 沒用自管 KMS 金鑰）；LOW 5 個（三張表與 ECR 沒用自管金鑰 `AWS-0025`×3、`AWS-0033`；bucket 沒開存取日誌 `AWS-0089`；Dockerfile 沒有 `HEALTHCHECK` `DS-0026`）。CI 只擋 HIGH、CRITICAL。
+
+**定案（本人照建議選 B）：**
+
+| 選項 | 做法 | 評估 |
+|---|---|---|
+| A | State bucket 改用自管 KMS 金鑰 | 每月約 US$1；所有讀寫帳本的角色都要多給 KMS 權限；金鑰刪除有 7～30 天等待期 |
+| **B（採用）** | 刻意接受：`state_bucket.tf` 的加密資源上方加 `#trivy:ignore:AWS-0132:exp:2026-12-31`，上面兩行寫理由 | 帳本沒有密碼；存取由 IAM 與 HTTPS-only 政策管住；理由與程式碼放一起；**到期日過了豁免自動失效** |
+| C | CI 只擋 CRITICAL | 為了過關降低門檻 |
+
+- 試跑環境實測：加註解 → HIGH 0 個；把到期日改成過去 → `AWS-0132` 又出現、Trivy 失敗。`#` 後面不能有空格、要緊貼 `resource` 那行
+- 不另開 `.trivyignore`：理由跟程式碼放在一起，改到這段的人一定看得到
+
+**`ci.yml` 的修改：** `Image scan` 的 trivy-action 換成 v0.36.0、Trivy 升到 v0.74.0；新增工作 `config-scan`（名稱 `Config scan`，`scan-type: config`、`scan-ref: .`、HIGH／CRITICAL、`exit-code: "1"`）。Claude 以 YAML 解析確認三個工作都在。
+
+### 5. CI 結果（草稿 PR #7）
+
+| 檢查 | 結果 |
+|---|---|
+| `ci / Config scan` | ✅ 19 秒；log 的表列出 `Dockerfile`、`infra/persistent`、`dynamodb.tf`、`ecr.tf`、`state_bucket.tf`，全部 0（真的掃到檔案，不是空掃）；CI 下載了最新規則包（234.57 KiB） |
+| `ci / Image scan` | ✅ 50 秒；**Summary 沒有 Annotations**：PR #3 起一直出現的 Node.js 20 警告（`actions/cache@0400d5f…`）消失，E115 的推定成立 |
+| `ci / Tests` | ✅ 25 秒 |
+| CodeQL ×3 | ✅ |
+
+### 6. 破壞實驗：拿掉豁免（草稿 PR #8，分支 `ci-break-test-trivy`，`c4f689b`）
+
+只刪 `#trivy:ignore:AWS-0132:exp:2026-12-31` 一行（兩行中文註解留著）：
+
+| 檢查 | 結果 |
+|---|---|
+| `ci / Config scan` | ❌ 20 秒：`state_bucket.tf` 1 個，`AWS-0132 (HIGH): Bucket does not encrypt data with a customer managed key.`、`infra/persistent/state_bucket.tf:33-40`、`Error: Process completed with exit code 1` |
+| 其他 5 個 | ✅ |
+
+- 行號 33-40（試跑環境是 30-37）：兩行註解把資源往下推了 3 行，對得上
+- CI 用最新規則包仍只抓到這一個 HIGH，與試跑環境（內建規則）一致
+- **所以證明了：** 豁免靠的就是那一行，拿掉就擋；Config scan 會擋
+- 收尾：PR #8 關閉（未合併），本機與 GitHub 上的 `ci-break-test-trivy` 刪除
+
+### 7. `protect-main` 加第三個必要檢查（本人截圖）
+
+- Rulesets → `protect-main` → Required status checks 加 `Config scan`（來源 GitHub Actions）→ **Ruleset updated**
+- 必要檢查變成 `Tests`、`Image scan`、`Config scan`；PR #7 的 `ci / Config scan` 旁出現 **Required**
+
+### 8. 分支整理
+
+- GitHub 上刪除已合併的 `feat/audit-table`、`fix/openai-timeout-60s`（PR #5、#6 合併後沒刪）
+- Dependabot 的 PR #4 保留：PR #7 合併後應會自動關閉（未驗證）
+
+### 限制（誠實記錄）
+
+- **全部沒有上雲：** `plan` 預期 `10 to add`（bucket 5、ECR 2、表 3），要 `aws login` 後才知道；表名、ECR 名稱有沒有撞到既有資源、權限夠不夠都還不知道
+- 豁免 `AWS-0132` 是接受風險，不是解決：State bucket 沒有「誰能用金鑰」這一層；12/31 到期要重新檢討
+- LOW 的 5 個沒有處理，CI 也不擋
+- `trivy config .` 掃整個 repo：之後若有範例或實驗用的設定檔（例如 `scripts/litellm-lab/`）被抓到，要決定排除還是修
+- Config scan 擋得住「寫錯的設定」，擋不住「設定沒錯、但用法錯」（例如政策給太多權限但符合規則）；IAM 的最小權限要人審
+- Terraform 安裝檔的 GPG 簽章沒驗；provider 的簽章由 `init` 自動驗（`signed by HashiCorp`）
+
+### 面試可用的說法
+
+- 「Terraform 的 State 我放在 S3：封鎖公開、版本控制、加密、只准 HTTPS，加上 prevent_destroy。資料表用的是 AWS 自己的刪除保護，因為 prevent_destroy 只擋 Terraform，擋不住有人在主控台按刪除。」
+- 「CI 加了 Trivy 掃 Terraform，第一次就抓到 State bucket 沒用自管 KMS 金鑰。我評估後選擇接受：帳本裡沒有密碼，存取已經由 IAM 和只准 HTTPS 的政策管住，自管金鑰要多付錢、所有角色都要多一組權限。我把理由寫在那一行旁邊，還設了到期日，過期 CI 會自己變紅、逼我重新檢討。」
+- 「我做了破壞實驗：把豁免拿掉開一個測試 PR，Config scan 20 秒內就紅了，其他檢查照樣綠，證明它真的會擋。之後才把它加進 main 的必要檢查。」
+- 「綠燈我也會打開 log 看一次，確認它真的掃到我的檔案，不是掃了一個空資料夾。」
+
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `7a9ca6f` | 10/16 02:08 | `feat: add the Terraform state bucket skeleton for the persistent layer` |
+| `a0f714b` | 10/16 12:05 前後 | `chore: lock the AWS provider for the persistent layer` |
+| `8aad4de` | 10/16 15:3x | `feat: add the ECR repository and DynamoDB tables to the persistent layer` |
+| `11d5925` | 10/16 15:4x | `ci: add a Trivy config scan and upgrade Trivy to v0.74.0` |
+| （草稿 PR #7） | 10/16 15:4x | 分支 `feat/m4-persistent-layer`；apply、帳本搬進 S3 之後才轉正式 PR |
+
+---
+
+## E119. 長期層上雲：apply、帳本搬進 S3、卡鎖與解鎖、兩個防刪的破壞實驗（2026-10-17 09:39～10:24）
+
+**依據：** E117（兩層、State 鎖用 `use_lockfile`）、E118（長期層骨架、`plan` 預期 10 個）；決策書 5.1、3.2、3.6。
+
+**目的：** 把長期層真的建在 AWS 上；帳本（State）從本機搬進自己建的 bucket；證明鎖、`prevent_destroy`、DynamoDB 刪除保護都會擋。
+
+### 1. 登入方式
+
+- Terraform 1.16.5 加 AWS provider 6.68.0 直接讀 `aws login` 的快取，不用另外匯出憑證（Terraform 1.15 起支援，查證來源：[Classmethod 實測](https://dev.classmethod.jp/articles/terraform-s3-backend-aws-login/)；1.14 會 `No valid credential sources found`）
+- 先 `Get-ChildItem Env:AWS_*` 確認沒有 E113 那次留下的環境變數（環境變數比登入狀態優先，而且會過期）
+
+### 2. plan 與 apply
+
+| 步驟 | 結果 |
+|---|---|
+| `terraform init`（這台第一次） | 照鎖檔下載 `hashicorp/aws v6.68.0`，沒有新建鎖檔 |
+| `terraform plan` | 剛好 10 個 `will be created`；`Plan: 10 to add, 0 to change, 0 to destroy.`，與 E118 的預測一致 |
+| 費用說明（apply 前） | bucket、三張表（隨需）、PITR、空的 ECR 閒置合計每月不到 US$0.01；會跳錶的 NAT、ALB、Fargate 都在每日層 |
+| `terraform apply` → `yes` | `Apply complete! Resources: 10 added, 0 changed, 0 destroyed.` |
+| outputs | `tfstate_bucket = "llm-gateway-tfstate-629ceebfae70aa842b70303422"`；`ecr_repository_url = "<account-id>.dkr.ecr.ap-northeast-1.amazonaws.com/llm-gateway"`；三張表的 ARN（`arn:aws:dynamodb:ap-northeast-1:<account-id>:table/...`） |
+| 本機帳本 | `terraform.tfstate` 21,692 bytes；`git status` 仍是 `working tree clean`（`.gitignore` 擋住了） |
+
+### 3. 帳本搬進 S3
+
+`infra/persistent/backend.tf`：`backend "s3"`，`bucket` = 上面的名字（直接寫進 repo：名字裡沒有帳號 ID；bucket 已封鎖公開、只准 HTTPS；之後 destroy workflow 也要知道去哪讀）、`key = "persistent/terraform.tfstate"`、`region`、`encrypt = true`、`use_lockfile = true`。
+
+| 步驟 | 結果 |
+|---|---|
+| `terraform init -migrate-state` → `yes` | `Successfully configured the backend "s3"!` |
+| `aws s3 ls s3://<bucket>/persistent/` | `terraform.tfstate` 21,691 bytes（10:05:36） |
+| `terraform state list` | 10 個資源加 1 個 `data`（試算單，不是資源） |
+| `terraform plan` | `No changes. Your infrastructure matches the configuration.` |
+| 本機剩下的 | `terraform.tfstate` 0 bytes（搬家後被清空）、`terraform.tfstate.backup` 21,692 bytes（搬家前的副本，有帳號 ID 與 ARN）→ 兩個都刪；刪後（解鎖後）`plan` 仍 `No changes`，證明帳本是從 S3 讀的 |
+
+**一個小錯（Claude 的範例）：** 範例寫「`llm-gateway-tfstate-貼上第5步的名字`」，而印出的名字本身已含前綴，照字面貼成 `llm-gateway-tfstate-llm-gateway-tfstate-629ce…`，`aws s3 ls` 得到 `NoSuchBucket`。`backend.tf` 本人寫對（前綴一次），重打指令後正常。
+
+### 4. 卡鎖與解鎖（意外，但剛好證明鎖有效）
+
+| 時間（台北） | 發生的事 |
+|---|---|
+| 10:12:58 | 一次 `plan` 開始，在 S3 放了鎖檔 `terraform.tfstate.tflock`（263 bytes），之後沒有正常跑完（什麼都沒印），鎖沒收回 |
+| 之後兩次 `plan` | `Error: Error acquiring the state lock`；`S3: PutObject … StatusCode: 412 … PreconditionFailed: At least one of the pre-conditions you specified did not hold`；Lock Info：`Operation: OperationTypePlan`、`Who: <user>@<host>`、`Version: 1.16.5`、`Created: 2026-10-17 02:12:59 UTC` |
+| 解鎖前檢查 | `Get-Process terraform` 無輸出（沒有背景程序）；`aws s3 ls` 看到 `terraform.tfstate.tflock` |
+| `terraform force-unlock 8ae18006-…` → `yes` | `Terraform state has been successfully unlocked!`；`.tflock` 消失；`plan` 恢復 `No changes` |
+
+**判讀：**
+- **`412` 就是鎖：** Terraform 寫鎖檔時用「只有不存在才寫入」的條件；檔已存在，S3 拒絕。這就是不需要 DynamoDB 鎖表也能鎖的原理（E117 定案 1）
+- **中斷的操作會留下鎖**，要 `force-unlock` 收拾；收拾前要確認鎖的主人、沒有程序在跑。之後有 GitHub Actions 碰帳本時，還要先確認 Actions 沒有工作在跑
+- 那次 `plan` 為什麼沒跑完，沒有查到原因（推定是中途被打斷）
+
+### 5. 破壞實驗（本人執行，兩個）
+
+| # | 做了什麼 | 結果 | 證明了 |
+|---|---|---|---|
+| 1 | `terraform destroy` | 先算出完整計畫 `Plan: 0 to add, 0 to change, 10 to destroy.`，接著 `Error: Instance cannot be destroyed`、`on state_bucket.tf line 2`、`Resource aws_s3_bucket.tfstate has lifecycle.prevent_destroy set, but the plan calls for this resource to be destroyed.`；**沒有問 yes、10 個一個都沒拆**；事後 `aws s3 ls` 沒有殘留 `.tflock` | 只要計畫裡有一個受保護的資源，整份拆除計畫作廢 |
+| 2 | 先 `describe-table --query "Table.DeletionProtectionEnabled"` → `true`；再 `aws dynamodb delete-table --table-name audit` | `An error occurred (ValidationException) when calling the DeleteTable operation: Resource cannot be deleted as it is currently protected against deletion. Disable deletion protection first.` | 刪除保護是 AWS 層級的，連 CLI 都擋；`prevent_destroy` 只擋 Terraform（E118 定案 2） |
+
+**順帶看到的（destroy 的計畫印出了每個資源的完整屬性）：**
+- PITR：`recovery_period_in_days = 35`
+- State bucket 的加密設定多了 `blocked_encryption_types = ["SSE-C"]`：AWS 對新 bucket 的預設（禁止用戶自帶金鑰加密），不是我們寫的
+- **計畫輸出裡的 ARN、ECR 網址都有完整帳號 ID**：存日誌或截圖時要遮
+
+### 限制（誠實記錄）
+
+- `prevent_destroy` 只要有人把那一行刪掉再 apply 就失效；刪除保護有 `dynamodb:UpdateTable` 權限的人可以先關掉再刪。兩者擋的是「手滑」，不是「有權限的惡意」
+- bucket 名字寫在公開 repo：知道名字也進不去，但等於公開了它存在
+- 卡鎖那次沒查到原因；`force-unlock` 是手動判斷，判斷錯（別人真的在跑）會讓兩個操作同時寫帳本
+- 還沒有 OIDC 角色，destroy workflow 還不存在；長期層之後若要改，目前只有本人電腦能 apply
+- 沒有用 CloudTrail 確認 apply 呼叫了哪些 API
+
+### 面試可用的說法
+
+- 「Terraform 的帳本先放本機建出 S3 bucket，再用 init -migrate-state 搬進去。.gitignore 在 apply 之前就擋好 tfstate，帳本在本機那幾分鐘 git status 是乾淨的。」
+- 「State 鎖我用 S3 的條件寫入，不用 DynamoDB。我真的遇過一次中斷的 plan 留下鎖，下一個 plan 被 412 擋下。我先確認鎖是我自己留的、沒有程序在跑，才 force-unlock。」
+- 「我做了兩個防刪實驗：terraform destroy 會先算出拆 10 個，但因為 State bucket 有 prevent_destroy，整份計畫作廢、一個都沒拆；用 AWS CLI 直接刪表，被 DynamoDB 的刪除保護擋下。前者只擋 Terraform，後者連主控台都擋。」
+
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `23e190b` | 10/17 10:2x | `feat: store the persistent layer state in the S3 bucket`（`11d5925..23e190b`） |
 
 ---
 
@@ -921,24 +1163,33 @@ OPENAI_TIMEOUT_SECONDS = 60
 | 10 | D10、3.4、12.5「SDK 的等待與 ALB 閒置逾時」 | `OPENAI_TIMEOUT_SECONDS` 由 30 改為 60（強模型 1,576 個 token 實測 25.6 秒，寫滿 2,000 約 32 秒）；M4 的 ALB 閒置逾時設 120 秒（E114、E115） |
 | 11 | 3.2（`audit` 表）、D52、D7、D43、D51、PART 4 應用層 | 稽核寫進 `audit` 表：`write_audit()` 條件寫入（`attribute_not_exists(request_id)`）、`pii_types` 存清單（`L`）；寫不進去時 `save_audit()` 只接資料庫的錯，`report_audit_failure()` 以白名單印一行 JSON 到 stderr（不含摘要與 HMAC），回應不變；領用窗口 `get_audit_writer()` 取代 `get_audit_path()`；12.5 與 D52 該列劃掉（E116） |
 | 12 | D22（repo 結構）、PART 9 安全、4.1 | `scripts/show_audit.py`；`tests/` 加上 `test_audit_store.py`、`test_chat_audit_store.py`、`test_show_audit.py`；`Dockerfile` 不再建可寫的 `data` 資料夾，ECS 設 `readonlyRootFilesystem`；IAM 只給 Gateway 對 `audit` 表 `PutItem`；CloudWatch 指標篩選 `{ $.event = "audit_write_failed" }` ＋告警；日誌群組設保存期限與存取權限（E116） |
+| 13 | 5.1（State 管理）、PART 9「IaC」 | State 鎖改用 S3 鎖檔（`use_lockfile`），不建 DynamoDB 鎖表（DynamoDB 鎖已被 Terraform 標為淘汰）（E117） |
+| 14 | 5.1、6.1、D20 | Terraform 分兩層：長期層（State、OIDC、ECR、四張表）與每日層（網路、NAT、DNS 防火牆、ALB、ECS）；destroy workflow 只拆每日層；M4 由本人電腦 apply，OIDC 角色先只給 destroy workflow（E117） |
+| 15 | 4.4、7.8 | ALB 安全群組只放行本人公開 IP（Terraform 變數，值不進 repo）（E117） |
+| 16 | D19、D62、5.1、PART 10 第 11 環節 | CI 第三個工作 `Config scan`（`trivy config .`，HIGH／CRITICAL 擋），已列入 `protect-main` 必要檢查；trivy-action v0.36.0、Trivy v0.74.0（兩個掃描都明寫）；刻意接受的項目用 `#trivy:ignore:<ID>:exp:<日期>` 寫在該行上方並附理由（目前只有 `AWS-0132`，12/31 到期）（E118） |
+| 17 | 3.2、3.6、D16、D19 | 雲端 DynamoDB 先建三張表（`usage` 留 M5）：`PAY_PER_REQUEST`、`deletion_protection_enabled`、PITR；ECR `llm-gateway`：`IMMUTABLE`、`scan_on_push`、生命週期（沒標籤 1 天、最多 10 個）；State bucket：`bucket_prefix`、`prevent_destroy`、封鎖公開、版本控制、`AES256`、只准 HTTPS；Terraform 1.16.5、AWS provider 6.68.0（E118） |
+| 18 | 5.1（State 管理）、PART 9「IaC」 | 實作：State 放 `llm-gateway-tfstate-<亂碼>` bucket 的 `persistent/terraform.tfstate`，`use_lockfile`；本機用 `aws login`（Terraform 1.15 起支援）；中斷的操作會留下 `.tflock`，以 `force-unlock` 收拾前要確認主人與沒有程序在跑（E119） |
 
 ---
 
-## 目前進度（2026-10-15 20:51）
+## 目前進度（2026-10-17 10:24）
 
 **M4 開工前準備全部完成**（10/14～10/15）：
 
 - 第 0 步：分支流程 ✅（E108；PR #3 改用按鈕合併 ✅，E115）
 - 第 1 項：容器驗證 ✅（E114）；逾時改成 60 秒 ✅（E115，PR #5）
-- 第 2 項：稽核搬進 `audit` 表 ✅（E116，分支 `feat/audit-table` 待開 PR）
+- 第 2 項：稽核搬進 `audit` 表 ✅（E116，PR #6）
 - 第 3 項：`DYNAMODB_TARGET`、強一致讀取、隨需計費 ✅（E111）
 - 第 4 項：停用 Key 的腳本 ✅（E112）
 - 第 5、6 項：說明頁關閉、資料庫 503 不附 `Retry-After`、SDK 不重試 ✅（E109）
 - 第 7、8 項：身分聯盟探測成功、Dependabot 運作中 ✅（E110、E113、E115）
-- `main` = `c0bdaca`（PR #5）；Dependabot 的 PR #4（Trivy Action v0.36.0）留到 M4
+- `main` = `8e2ce32`（PR #6）；Dependabot 的 PR #4（Trivy Action v0.36.0）留到 M4
 - `310 passed`
-- **下一步：M4 本體（10/17 起，檢查點 10/25）**
-- 下一筆證據是 **E117**
+- **M4 本體開工（E117）：** 四項定案、施工順序 A～E
+- **長期層骨架與 Config scan（E118）：** State bucket、ECR、三張表寫好並 `validate`；CI 加 `Config scan` 並列為必要檢查；草稿 PR #7 6 個檢查全綠
+- **長期層上雲（E119）：** 10 個資源 apply、帳本在 S3（`use_lockfile`）、`destroy` 被 `prevent_destroy` 擋、CLI 刪表被刪除保護擋；`23e190b`
+- 下一步：新版證據紀錄放進分支 → PR #7 轉正式、合併；之後 A 段後半（GitHub OIDC 與 destroy 用的角色）
+- 下一筆證據是 **E120**
 
 ---
 
@@ -961,7 +1212,11 @@ OPENAI_TIMEOUT_SECONDS = 60
 | ~~OpenAI 工作負載身分聯盟（4.5、E110）~~ | ✅ 10/14 探測成功（E113）；Fargate 角色的對應在 M4 | — |
 | `m1-gateway` 金鑰 11/2 到期（12.5） | 雲端改用身分聯盟就不需要；**本機開發與 11/2 之後的錄影仍要用金鑰**，到期前在個人電腦換一把新的 | 11/2 前 |
 | ~~Trivy 升級與 Action 的更新方式（E104）~~ | ✅ 10/14 Dependabot 管 Action 與基底映像；Trivy 本身的版本在加 `trivy config` 時手動升級（E110） | M4 |
-| CI 加 `trivy config`（E104） | 有 Terraform 之後；同時看 Dependabot 的 PR #4（Trivy Action v0.36.0，推定可消除 Node.js 20 警告，E115） | M4 |
+| ~~CI 加 `trivy config`（E104）~~ | ✅ 10/16 `Config scan`，必要檢查；trivy-action v0.36.0 已包含 PR #4 的升級，Node.js 20 警告消失（E118） | — |
+| Dependabot 的 PR #4 | PR #7 合併後應自動關閉；沒關就手動關，註明被 PR #7 取代 | PR #7 合併時 |
+| `AWS-0132` 豁免（E118） | 12/31 到期，到期前決定改用 KMS 或延長 | 12/31 前 |
+| `usage` 表（E118） | M5 建；Endpoint Policy、IAM 要補 | M5 |
 | 供應商預算用完的告警（D32、E100） | M3 只記稽核的 `error_code` | M4～M6 |
 | 預扣（7.10） | M3 不做 | M5 |
+| PR #6 的 CI 附註（10/15 21:18 本人截圖） | `CodeQL` 2 則是通知（notice）：`ubuntu-latest` 自 **10/19** 起改指 Ubuntu 26；`ci` 1 則是已知的 Node.js 20 警告（Trivy Action 內部的 `actions/cache`）。`ci.yml` 兩個工作都鎖 `ubuntu-24.04`，不受影響；CodeQL 預設設定的機器由 GitHub 管，10/19 後看第一次 CodeQL 結果有沒有變；M4 新增的 workflow（destroy）也鎖 `ubuntu-24.04` | 10/19 後第一個 PR |
 | A 能不能擋住「沒進 PR、但有綠勾的 commit」（E108） | 目前的 `ci.yml` 做不出這種 commit；不另外測 | — |

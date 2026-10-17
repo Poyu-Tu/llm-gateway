@@ -73,14 +73,37 @@ jobs:
         run: docker build -t llm-gateway:ci .
 
       # 有修補版可以升級的 HIGH、CRITICAL 弱點就讓 CI 失敗；還沒有修補版的先不算（只能等上游修）
-      # trivy-action 用 v0.35.0：2026-03 供應鏈事件後，Aqua 公告點名安全的版本與 SHA；
-      # 它內建的 Trivy 是 v0.69.3（同一份公告列為安全），這裡再明寫一次
+      # trivy-action v0.36.0（2026-04 發佈，Dependabot PR #4）：內部的 actions/cache 換成 v5，消除 Node.js 20 警告
+      # Trivy 本身明寫 v0.74.0（2026-08-14 發佈，已過冷卻期）；不寫的話會用 action 內建的 v0.70.0
       - name: Scan the image with Trivy
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: llm-gateway:ci
-          version: v0.69.3
+          version: v0.74.0
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+  # 掃設定檔寫錯的地方（Terraform、Dockerfile）：不用建映像、不用連 AWS，只讀檔案
+  config-scan:
+    name: Config scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # 整個 repo 都掃（scan-ref: .），HIGH、CRITICAL 就讓 CI 失敗
+      # 刻意接受的項目寫在該行上方的 #trivy:ignore 註解，附理由與到期日，不另開 .trivyignore
+      - name: Scan Terraform and Dockerfile settings with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          version: v0.74.0
+          severity: HIGH,CRITICAL
           exit-code: "1"
           format: table
