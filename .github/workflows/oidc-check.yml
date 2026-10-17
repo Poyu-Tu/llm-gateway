@@ -1,0 +1,95 @@
+name: oidc-check
+
+# 只驗身分、不拆任何東西（E120 定案 4）：
+# 1. 看 GitHub 實際發的身分證明 sub 長什麼樣（只印欄位，不印證明本身）
+# 2. 掛 environment destroy 的工作要借得到 destroy 角色；沒掛的要被拒絕
+# 不用任何第三方 Action：用 runner 內建的 curl、python3、AWS CLI
+on:
+  workflow_dispatch:
+
+# 整個 workflow 預設什麼權限都沒有；需要的工作自己開
+permissions: {}
+
+env:
+  AWS_REGION: ap-northeast-1
+
+jobs:
+  with-environment:
+    name: Assume the destroy role (environment destroy)
+    runs-on: ubuntu-24.04
+    environment: destroy
+    permissions:
+      id-token: write # 只開「跟 GitHub 要身分證明」這一項
+    steps:
+      - name: Get an OIDC token and show its claims
+        run: |
+          set -euo pipefail
+          # 向 GitHub 要一張給 AWS STS 用的證明（aud = sts.amazonaws.com），存成檔案給下一步用
+          curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' > "$RUNNER_TEMP/token"
+          echo "::add-mask::$(cat "$RUNNER_TEMP/token")"
+          # 只解開中間那段（內容），印幾個欄位；證明本身不印
+          python3 - <<'EOF'
+          import base64, json, os
+          token = open(os.path.join(os.environ["RUNNER_TEMP"], "token")).read().strip()
+          body = token.split(".")[1]
+          claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+          for name in ("sub", "aud", "repository", "repository_id", "repository_owner_id", "environment", "ref"):
+              print(f"{name}: {claims.get(name)}")
+          EOF
+
+      - name: Assume the destroy role
+        env:
+          ROLE_ARN: ${{ secrets.AWS_DESTROY_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          # 拿證明換 15 分鐘的臨時憑證，只印借到的身分；帳號 ID 遮掉（log 是公開的）
+          aws sts assume-role-with-web-identity \
+            --role-arn "$ROLE_ARN" \
+            --role-session-name "oidc-check-$GITHUB_RUN_ID" \
+            --web-identity-token "file://$RUNNER_TEMP/token" \
+            --duration-seconds 900 \
+            --query "AssumedRoleUser.Arn" --output text \
+            | sed -E 's/[0-9]{12}/<account-id>/g'
+
+  without-environment:
+    name: Try the destroy role without the environment (must be denied)
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+    steps:
+      - name: Get an OIDC token and show its claims
+        run: |
+          set -euo pipefail
+          curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' > "$RUNNER_TEMP/token"
+          echo "::add-mask::$(cat "$RUNNER_TEMP/token")"
+          python3 - <<'EOF'
+          import base64, json, os
+          token = open(os.path.join(os.environ["RUNNER_TEMP"], "token")).read().strip()
+          body = token.split(".")[1]
+          claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+          for name in ("sub", "aud", "repository", "repository_id", "repository_owner_id", "environment", "ref"):
+              print(f"{name}: {claims.get(name)}")
+          EOF
+
+      - name: Try the destroy role and expect AccessDenied
+        env:
+          ROLE_ARN: ${{ secrets.AWS_DESTROY_ROLE_ARN }}
+        run: |
+          set -uo pipefail
+          # 沒掛 environment，sub 結尾是分支而不是 environment:destroy，信任條件對不上，一定要被拒絕
+          if out=$(aws sts assume-role-with-web-identity \
+              --role-arn "$ROLE_ARN" \
+              --role-session-name "oidc-check-$GITHUB_RUN_ID" \
+              --web-identity-token "file://$RUNNER_TEMP/token" \
+              --duration-seconds 900 \
+              --query "AssumedRoleUser.Arn" --output text 2>&1); then
+            echo "UNEXPECTED: the role was assumed without the environment"
+            exit 1
+          fi
+          echo "$out" | sed -E 's/[0-9]{12}/<account-id>/g'
+          # 被拒的原因一定要是 AccessDenied；其他錯誤（例如 secret 沒設）不算過
+          echo "$out" | grep -q "AccessDenied" && echo "Denied as expected"

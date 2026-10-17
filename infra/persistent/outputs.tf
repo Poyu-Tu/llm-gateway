@@ -19,3 +19,9 @@ output "dynamodb_table_arns" {
     audit    = aws_dynamodb_table.audit.arn
   }
 }
+
+# destroy workflow 要借的角色；值含帳號 ID，存進 GitHub 的 repository secret（公開的 log 會遮掉）
+output "destroy_role_arn" {
+  description = "ARN of the role the GitHub destroy workflow assumes"
+  value       = aws_iam_role.destroy.arn
+}
