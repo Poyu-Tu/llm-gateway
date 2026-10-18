@@ -1418,6 +1418,112 @@ OPENAI_TIMEOUT_SECONDS = 60
 
 ---
 
+## E122. C 段完成：PR #11 合併、長期層 apply、權限模擬器、每日層 apply、destroy workflow 第一次實測（2026-10-18 12:04～13:42）
+
+**依據：** E121（六項定案與設計）；E120 定案 3（C 段建好就實測 destroy）。
+
+**生活比喻：** 樣品屋蓋好、請拆除組來拆一次。拆除組自己帶工具（核對過序號的 Terraform）、拿工作證去櫃台換一小時的通行證（OIDC）、只拆貼「每日」標籤的東西、拆完巡一圈確認全空。第一次進場就拆乾淨，沒有回去拿扳手。
+
+### 推送與 PR #11（本人執行，Claude 截圖讀結果）
+
+| 步驟 | 結果 |
+|---|---|
+| `git add`（`infra/daily`、`destroy.yml`、`github_oidc.tf`、證據紀錄，四次）→ `git status` | `Changes to be committed` 剛好 11 個檔：9 個 `new file`、2 個 `modified`；沒有 `.terraform/`、`.tfstate`、`.tfvars` |
+| `git commit` | `4099590`，`11 files changed, 565 insertions(+), 6 deletions(-)` |
+| `git log --oneline -3`、`git diff --stat origin/main...HEAD` | `4099590` 接在 `8c36ed3`（`origin/main`）之後；diff 一樣是 11 個檔、565／6 |
+| `git push -u origin feat/m4-daily-network` | `[new branch]` |
+| PR #11（說明由 Claude 用 Claude in Chrome 填寫，本人按 Create） | 6 個檢查全綠（`Tests`、`Image scan`、`Config scan`、CodeQL ×3）；`Config scan` 綠燈 = `#trivy:ignore:AWS-0104` 的位置與寫法有效，其他新資源沒有 HIGH／CRITICAL |
+| 合併（本人按 Merge） | `main` = `6fcb525`（12:43）；本機 `8c36ed3..6fcb525`、刪本機與遠端分支 |
+
+- 填 PR 說明時發現：GitHub 的編輯器打字換行會自動補清單符號，逐字輸入會變成 `- -`；改成整段設定欄位的值才正確
+- Claude 開的 Chrome 分頁在另一個視窗，本人一開始找不到；之後要提醒「在 Claude 的分頁群組裡」
+
+### 長期層 apply（12:50）
+
+| 項目 | 結果 |
+|---|---|
+| `terraform -chdir=infra/persistent apply` | 答 `yes` 前的計畫 `0 to add, 1 to change, 0 to destroy`；`aws_iam_role_policy.destroy: Modifications complete after 2s`；`Apply complete! Resources: 0 added, 1 changed, 0 destroyed.` |
+| Outputs | 5 個值與 10/17 相同（帳號 ID 遮成 `<account-id>`） |
+| 費用 | IAM，免費 |
+
+### 權限模擬器（12:59～13:06）
+
+捷徑：`$role` = 長期層 output `destroy_role_arn`；`$vpc` = 同帳號的假 VPC ARN（`vpc/vpc-test`）；`sim 動作 資源 標籤`（標籤用 `--context-entries` 餵 `aws:ResourceTag/Layer`，不寫就是沒標籤）。
+
+| # | 問題 | 結果 | 證明了 |
+|---|---|---|---|
+| 1 | `sim ec2:DeleteVpc $vpc daily` | `allowed` | 貼 `daily` 的拆得掉 |
+| 2 | `sim ec2:DeleteVpc $vpc persistent` | `implicitDeny` | 標籤不對拆不掉 |
+| 3 | `sim ec2:DeleteVpc $vpc` | `implicitDeny` | 沒標籤（例如帳號預設 VPC）拆不掉 |
+| 4 | `sim ec2:CreateTags $vpc daily` | `implicitDeny` | 不能把別的東西改貼成 `daily` 再拆 |
+| 5 | `sim ec2:DescribeVpcs "*"` | `allowed` | 拆之前看得到現況 |
+
+- 5 題都與 Claude 事先寫的預期相同
+- 第 2～4 題是 `implicitDeny` 不是 `explicitDeny`：EC2 沒有寫 Deny，是 Allow 的條件不符合
+- **限制：** 模擬器不看資源身上真正的標籤（標籤是參數餵的）；標籤條件「真的有效」靠下方 destroy 實測
+
+### 每日層 apply（13:10）
+
+| 項目 | 結果 |
+|---|---|
+| 確認 `$env:TF_VAR_admin_cidr` | 有值（`/32`） |
+| `terraform -chdir=infra/daily apply` | 計畫 `19 to add`；VPC 3 秒 → 子網、大門、路由表、安全群組同時建 → 路由、綁定、規則 → 兩條 Gateway Endpoint 各 9 秒；`Apply complete! Resources: 19 added, 0 changed, 0 destroyed.` |
+| 費用 | 全部免費 |
+
+**主控台資源地圖（本人截圖，13:19～13:22）：** `m4-daily-resource-map-private.png`（私有子網 → `llm-gateway-private` → 只連 S3、DynamoDB 兩條 Endpoint）、`m4-daily-resource-map-public.png`（公有子網 1a、1c → `llm-gateway-public` → 網際網路閘道；大門底下寫「網際網路路由至 2 個公有子網路，0 個私有子網路路由至網際網路」）。兩張只有資源 ID，沒有帳號 ID。
+
+**發現：路由表有 3 張，多一張沒有名字的 `rtb-…`。** 那是 AWS 建 VPC 時自動附送的**主路由表**：只有「本機」一條路、沒有子網關聯（三個子網都明確關聯了自己的路由表）。不是 Terraform 建的，所以沒有 `Name`、`Layer` 標籤；刪 VPC 時 AWS 一起刪，destroy 不需要額外權限。同樣附送的還有預設安全群組（`default`）與預設網路 ACL。
+
+**生活比喻：** 建商在管理室放的預設指路牌，哪一棟沒掛自己的指路牌就照它走。三棟都掛了自己的，所以它沒人用；而且它只寫「社區內部」，有人忘了掛也只會出不去，不會意外通外面。
+
+### destroy workflow 第一次實測（13:25～13:28，`destroy #1`）
+
+本人在 Actions 的 `destroy` 頁面按 Run workflow（`main`）；Claude 用 Claude in Chrome 讀 log。截圖 `m4-destroy-first-run.png`。
+
+| 步驟 | 結果 |
+|---|---|
+| 整體 | `Success`，51 秒（工作 44 秒）；`6fcb525`、`main`、`Manually triggered` |
+| `Install Terraform and check its fingerprint`（2 秒） | `/home/runner/work/_temp/terraform.zip: OK`、`Terraform v1.16.5 on linux_amd64`；另印 `The latest version is 1.16.6` |
+| `Hide the account ID` | 之後所有帳號 ID 都是 `***`（例如 `arn:aws:ec2:ap-northeast-1:***:internet-gateway/…`、`data.aws_caller_identity.current: Read complete after 0s [id=***]`） |
+| `Destroy with Terraform`（37 秒） | `init` → 19 個 `Refreshing state`（**11 個 `Describe` 一個都沒漏**）→ 計畫 19 個 `destroy` → 拆：路由、規則、綁定 → 子網、安全群組、大門 → 兩條 Endpoint（各 11 秒）→ 私有路由表 → VPC；`Destroy complete! Resources: 19 destroyed.`、`The daily state is empty` |
+
+**本人電腦再確認（13:42）：** `aws ec2 describe-vpcs --filters Name=tag:Layer,Values=daily --query "Vpcs[].VpcId"` → `[]`。
+
+### 證明了什麼（C 段全部）
+
+| 想證明的 | 證據 |
+|---|---|
+| repo 裡沒有長期金鑰，destroy 用 GitHub OIDC 借一小時的角色 | `destroy #1` 從 `main` 借到角色並完成拆除 |
+| 安裝的 Terraform 是原廠的 | `sha256sum --check` 印 `OK` |
+| 臨時憑證與帳號 ID 不出現在公開 log | log 裡帳號 ID 全是 `***`；workflow 沒有任何一步印出憑證 |
+| 角色的讀取權限夠拆每日層 | 19 個 `Refreshing state` 沒有 `UnauthorizedOperation` |
+| 刪除只限 `Layer=daily` | 模擬器 5 題；實際拆掉 19 個（含「卸大門要大門與 VPC 兩邊都有標籤」的 `DetachInternetGateway`） |
+| 拆完沒有殘留 | workflow 自我驗收 `The daily state is empty`；本人 CLI 查 `Layer=daily` 的 VPC 為 `[]` |
+
+### 限制（誠實記錄）
+
+- 這次只拆了 C 段的 7 種資源；D 段的 NAT、彈性 IP、DNS 防火牆、ALB、ECS、CloudWatch 告警，要再加刪除權限，第一次拆時一樣可能缺權限
+- 「標籤條件擋得住不該拆的東西」只用模擬器驗過，沒有在真的資源上做破壞實驗（例如手動建一個沒標籤的 VPC 讓 workflow 去拆）
+- 公有子網、私有子網沒有被任何東西使用就拆了，C 段沒有驗證「網路通不通」；要到 D 段 Fargate 拉映像才證明 Endpoint Policy 寫對
+- 主路由表、預設安全群組、預設 ACL 沒有被 Terraform 認領，沒有名字與標籤；預設安全群組的規則也沒有清空（見待決）
+- Terraform 1.16.6 已發佈，這次沒升級（冷卻期與三處要一起改）
+
+### 面試可用的說法
+
+- 「我的 destroy workflow 從頭到尾不用第三方 Action：自己下載 Terraform、比對寫死在 repo 裡的 SHA256，再把 GitHub 的 OIDC 證明存成檔案，讓 Terraform 自己去換一小時的臨時憑證，憑證本身從來不出現在環境變數或 log 裡。」
+- 「拆除角色的刪除權限只認 `Layer=daily` 這張標籤，而且刻意不給 `CreateTags`，否則就能把長期層的東西改貼標籤再刪。我先用 IAM 權限模擬器問了 5 題，再拿免費的網路骨架真的拆一次，第一次就拆乾淨，最後 workflow 自己檢查帳本是空的。」
+- 「我把會跳錶的 NAT、ALB、Fargate 留到驗過拆除之後才建，所以如果拆除有問題，是在不花錢的地方撞到。」
+
+**推送：**
+
+| commit | 時間 | 訊息 |
+|---|---|---|
+| `4099590` | 10/18 12:05 | `feat: add the daily network skeleton and the destroy workflow` |
+| `6fcb525` | 10/18 12:43 | `Merge pull request #11 from Poyu-Tu/feat/m4-daily-network`（`8c36ed3..6fcb525`；6 個檢查全綠） |
+| （待推） | — | 本筆與 3 張截圖 |
+
+---
+
 ## 決策書 v2.10 待改項目
 
 | # | v2.9 的位置 | 要改什麼 |
@@ -1442,10 +1548,11 @@ OPENAI_TIMEOUT_SECONDS = 60
 | 18 | 5.1（State 管理）、PART 9「IaC」 | 實作：State 放 `llm-gateway-tfstate-<亂碼>` bucket 的 `persistent/terraform.tfstate`，`use_lockfile`；本機用 `aws login`（Terraform 1.15 起支援）；中斷的操作會留下 `.tflock`，以 `force-unlock` 收拾前要確認主人與沒有程序在跑（E119） |
 | 19 | 4.2（CI/CD 層）、5.1、D20、11.4 的 S11 | GitHub OIDC 提供者與 `llm-gateway-destroy` 角色放長期層；只有 environment `destroy`（只准 `main`）借得到，`sub` 用 2026/7/15 後的新格式（`repo:Poyu-Tu@<owner-id>/llm-gateway@<repo-id>:environment:destroy`）；權限分批長，第一批只有每日層帳本兩個檔，並先寫明文 Deny 擋長期層；environment 取消管理員略過；`oidc-check.yml` 實測：沒掛 environment 被 AWS 拒、從分支觸發被 GitHub 擋（E120） |
 | 20 | 3.5、D13、D16、5.1、PART 9「IaC」 | 每日層骨架：VPC `10.0.0.0/16`、公有子網 1a／1c（不自動發公開 IP）、私有子網 1a、網際網路閘道放 C 段；安全群組 `alb`（80 只准本人 IP）、`gateway`（8000 只准從 ALB、出 443）；AWS-0104 以 `trivy:ignore` 刻意接受（12/31）；Endpoint Policy：S3 只准 ECR 映像層 bucket 的 `GetObject`、DynamoDB 只准三張表的 `GetItem`／`PutItem`／`UpdateItem`；跨層資料用寫死的表名加 `aws_caller_identity`；destroy workflow 下載官方 zip 比對 SHA256、證明存檔交給 Terraform 換憑證、`admin_cidr` 填 RFC 5737 位址；destroy 角色第二批：逐一列出的 `Describe` 與限 `Layer=daily` 標籤的刪除（E121） |
+| 21 | 5.1、D20、6.4、11.4 的 S11 | destroy workflow 實測：從 `main` 手動觸發，51 秒拆光每日層骨架 19 個資源，`state list` 為空；Terraform 不用第三方 Action（官方 zip＋SHA256）、OIDC 證明存檔交給 Terraform 換憑證、帳號 ID 以 `::add-mask::` 遮罩；destroy 角色的刪除權限限 `Layer=daily`，模擬器 5 題（E122） |
 
 ---
 
-## 目前進度（2026-10-17 18:55）
+## 目前進度（2026-10-18 13:45）
 
 **M4 開工前準備全部完成**（10/14～10/15）：
 
@@ -1466,8 +1573,9 @@ OPENAI_TIMEOUT_SECONDS = 60
 - **A 段完成（E120）：** OIDC 提供者與 destroy 角色上雲（免費）；權限模擬器 5 題、`oidc-check` 從 `main` 借到角色、沒掛 environment 被拒、從分支觸發被擋；PR #9 合併，`main` = `e08f48e`
 - **E120 後半與截圖進 repo：** PR #10 合併，`main` = `8c36ed3`
 - **C 段開工（E121）：** 六項定案；`infra/daily/` 骨架、`destroy.yml`、destroy 角色第二批權限寫好（HCL 解析器檢查通過）
-- 下一步：本人電腦 `fmt`／`validate`／`plan` → PR → 合併 → apply 長期層（只改權限）→ 權限模擬器 → apply 每日層 → 從 `main` 跑 destroy workflow
-- 下一筆證據是 **E122**
+- **C 段完成（E122）：** PR #11 合併（`main` = `6fcb525`）；長期層 apply（角色第二批權限）；模擬器 5 題；每日層 apply 19 個；`destroy #1` 51 秒拆光、帳本為空；**AWS 上只剩長期層 13 個資源，沒有在跳錶的東西**
+- 下一步：本筆與 3 張截圖進 repo（docs PR）→ **D 段**（NAT、DNS 防火牆、ALB、ECS Fargate，約 US$2.8／天，測完當天 destroy）
+- 下一筆證據是 **E123**
 
 ---
 
@@ -1494,6 +1602,9 @@ OPENAI_TIMEOUT_SECONDS = 60
 | ~~Dependabot 的 PR #4~~ | ✅ 10/17 Dependabot 自行關閉（分支已刪，E120） | — |
 | ~~environment 的新 `sub` 格式（E120）~~ | ✅ 10/17 `oidc-check` 印出 `repo:Poyu-Tu@62129723/llm-gateway@1394630828:environment:destroy`，與推定相同 | — |
 | ~~每日層的 destroy 要不要讀長期層的資料（E120）~~ | ✅ 10/17 表名寫死、帳號 ID 用 `aws_caller_identity`，角色不多開權限（E121） | — |
+| 主路由表、預設安全群組、預設網路 ACL（E122） | 用 `aws_default_route_table`、`aws_default_security_group`、`aws_default_network_acl` 認領：貼名字與 `Layer=daily`，預設安全群組規則清空（Trivy AWS-0173，LOW）；不認領也不影響 destroy | D 段 |
+| Terraform 1.16.6（E122） | 過冷卻期後一起升：兩層 `versions.tf`、`destroy.yml` 的 `TF_VERSION` 與指紋 | M4 內 |
+| D 段的 destroy 權限（E122） | NAT、彈性 IP、DNS 防火牆、ALB、ECS、日誌群組、告警的刪除與 `Describe`，一樣限 `Layer=daily`；先模擬器再實測 | D 段 |
 | `AWS-0132` 豁免（E118） | 12/31 到期，到期前決定改用 KMS 或延長 | 12/31 前 |
 | `usage` 表（E118） | M5 建；Endpoint Policy、IAM 要補 | M5 |
 | 供應商預算用完的告警（D32、E100） | M3 只記稽核的 `error_code` | M4～M6 |
