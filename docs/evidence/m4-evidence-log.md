@@ -1324,7 +1324,97 @@ OPENAI_TIMEOUT_SECONDS = 60
 | `c9c3b6c` | 10/17 15:4x | `ci: add a workflow that checks who can assume the destroy role` |
 | `1cd5f15` | 10/17 15:4x | `docs: record the OIDC decisions, the apply and the policy simulator` |
 | `e08f48e` | 10/17 15:5x | `Merge pull request #9 from Poyu-Tu/feat/m4-github-oidc`（`92b7aa4..e08f48e`；6 個檢查全綠） |
-| （待推） | — | 本筆的 GitHub 端驗證與截圖 |
+| `f0c2776` | 10/17 16:2x | `docs: record the GitHub side of the OIDC check`（本筆後半與 6 張截圖） |
+| `8c36ed3` | 10/17 16:2x | `Merge pull request #10 from Poyu-Tu/docs/m4-oidc-results`（`e08f48e..8c36ed3`；6 個檢查全綠） |
+
+---
+
+## E121. C 段開工：每日層骨架與 destroy workflow 的六項定案；fmt、validate、plan（2026-10-17 18:37～10-18 11:47）
+
+**依據：** E117（施工順序 C、兩層）、E120（定案 2 權限分批長、定案 3 C 段建好就實測 destroy）；決策書 3.5、4.1、5.1、7.1、D13、D16、D20；`m4-daily-layer-start-handoff.md` 第 4 節。
+
+**生活比喻：** 這一段是蓋圍牆、隔間、門禁，再鋪兩條通往倉庫的專用走廊，但還不接水電。按小時計費的 NAT、ALB、Fargate 留到 D 段。蓋好就先請拆除組來拆一次：免費的東西拆壞了不心疼，等於把 D 段跳錶時才會遇到的錯誤先撞出來。
+
+### 開工前檢查
+
+| 項目 | 結果 |
+|---|---|
+| 本機同步 | `git pull` → `e08f48e..8c36ed3`（PR #10：E120 後半與 6 張截圖）；`git branch -d docs/m4-oidc-results`（`was f0c2776`）；`git push origin --delete docs/m4-oidc-results` → `[deleted]` |
+
+### 定案（本人逐題作答，18:39～18:49）
+
+| # | 決定 | 定案 | 不選的選項與理由 | 弱點 |
+|---|---|---|---|---|
+| 1 | 每日層怎麼拿長期層的資料（表的 ARN） | **C：表名寫死，帳號 ID 用 `aws_caller_identity` 問出來** | A `terraform_remote_state`：destroy 角色要能讀整份長期層帳本（E120 模擬器驗過是 `implicitDeny` 的門）；B data source：角色要多開三張表的 `DescribeTable`。**每日層讀什麼，destroy 拆之前也要讀什麼**，多讀一處就多一項權限 | 表改名要改三處（長期層、每日層、`app/db.py`），Terraform 不會提醒 |
+| 2 | destroy 角色的讀取權限 | **A：逐一列出 `Describe` 動作（先列 11 個）**；`Resource` 依 AWS 規定寫 `"*"`（EC2 的 `Describe` 不支援指定資源） | B `ec2:Describe*`：一次就過，但動作欄有萬用字元（EC2 的 `Describe` 有上百個） | 列漏的要等第一次 destroy 失敗才知道；每補一次要 apply 長期層再重跑，一輪約 5 分鐘。C 段免費，這正是定案在這裡實測的理由 |
+| 3 | destroy workflow 怎麼裝 Terraform | **B：curl 下載官方 zip，比對寫死的 SHA256**（`terraform_1.16.5_linux_amd64.zip` = `2bc2fcff…a9b2a49a3294b9e49eaab5e4`，本人從官方 `SHA256SUMS` 取得） | A `hashicorp/setup-terraform`：多信任一個外部 Action，每次更新都要再審 | 指紋第一次是從官網抄的，抄的那一刻官網若已被入侵就擋不住（選 A 也擋不住）；升級時版本、指紋、`versions.tf` 三處一起改 |
+| 4 | destroy workflow 怎麼借角色 | **C：只把身分證明存成檔案，設 `AWS_ROLE_ARN`、`AWS_WEB_IDENTITY_TOKEN_FILE`，讓 Terraform 自己換臨時憑證**（Terraform 官方 S3 backend 文件寫明支援這兩個環境變數） | A `aws-actions/configure-aws-credentials`：多信任一個外部 Action；B 沿用 `oidc-check.yml` 的 CLI 寫法再把三個值寫進環境變數：三個值都要自己遮，漏一行就進公開 log | 換憑證失敗時錯誤藏在 Terraform 的輸出裡，比 CLI 難讀；證明約 5 分鐘過期，所以每個 Terraform 指令前重新要一張（見設計） |
+| 5 | 網際網路閘道放哪一段 | **A：C 段**（免費） | B D 段：C 段的公有子網暫時名不副實；「卸大門」要到跳錶時才第一次驗 | C 段多 3 個資源；公有子網接了大門，但裡面什麼都沒放、也不自動發公開 IP |
+| 6 | destroy 時，`admin_cidr`（本人 IP）怎麼給值 | **A：workflow 填 RFC 5737 文件專用位址 `192.0.2.1/32`**；變數加檢查，只收 `/32` 單一位址（`0.0.0.0/0` 被擋） | B 存成 GitHub secret：個人 IP 多存一處、換網路要改兩處；C `alb` 安全群組留 D 段：只是把問題往後延 | workflow 裡出現假位址，要靠註解說明（拆除只照帳本拆，不會用到這個值） |
+
+### 設計（Claude 給骨架）
+
+**`infra/daily/`（19 個資源，全部免費）**
+
+| 檔案 | 內容 |
+|---|---|
+| `versions.tf`、`.terraform.lock.hcl` | 照抄長期層：Terraform `~> 1.16.5`、AWS provider `= 6.68.0` |
+| `providers.tf` | 東京；`default_tags` 的 `Layer = "daily"`：destroy 角色的刪除權限只認這張標籤 |
+| `backend.tf` | 同一個 bucket，`key = "daily/terraform.tfstate"`、`use_lockfile = true` |
+| `variables.tf` | `admin_cidr`，檢查只收 `/32` |
+| `network.tf` | VPC `10.0.0.0/16`（開 DNS 支援與主機名稱）；公有子網 `10.0.0.0/24`（1a）、`10.0.1.0/24`（1c），`map_public_ip_on_launch = false`；私有子網 `10.0.10.0/24`（1a，與 D 段的 NAT 同 AZ）；網際網路閘道、公有路由表（`0.0.0.0/0` → 閘道）、私有路由表（沒有對外的路，NAT 那條 D 段加） |
+| `security_groups.tf` | `alb`：入 80 只准 `var.admin_cidr`，出 8000 只到 `gateway`；`gateway`：入 8000 只准從 `alb`，出 443 到 `0.0.0.0/0`。每條規則一個資源（兩個群組互相參照也不會繞圈） |
+| `endpoints.tf` | S3：只准 `s3:GetObject` `prod-ap-northeast-1-starport-layer-bucket/*`（AWS ECR 文件的寫法）；DynamoDB：只准 `GetItem`、`PutItem`、`UpdateItem`，範圍限三張表（`app/` 只用這三種呼叫）；兩條都只接私有路由表 |
+
+**Trivy：** `gateway` 的出口 `0.0.0.0/0:443` 是 AWS-0104（CRITICAL），以 `#trivy:ignore:AWS-0104:exp:2026-12-31` 刻意接受，理由寫在該行上方（OpenAI 的 IP 不固定，只能用網域管，網域由 DNS 防火牆管）。公有子網不自動發公開 IP，避開 AWS-0164（HIGH）。VPC Flow Logs（MEDIUM，不擋）這次不開，S08 的證據用 D 段的 DNS 查詢日誌。IAM 的萬用字元檢查 AWS-0057 已被 Trivy 標為淘汰，預設不跑（Claude 查 `trivy-checks` 原始碼）。
+
+**`infra/persistent/github_oidc.tf`（destroy 角色第二批權限）**
+
+- `DescribeDailyNetwork`：11 個 `Describe` 動作，`Resource "*"`
+- `DeleteDailyNetwork`：11 個刪除動作（含 `DetachInternetGateway`、`RevokeSecurityGroupIngress`／`Egress`、`DeleteVpcEndpoints`）；資源限「本帳號、東京、7 種 EC2 資源」的 ARN（`vpc/*`、`subnet/*`……ID 每次 apply 都不同，所以種類後面是 `*`），再加條件 `aws:ResourceTag/Layer = daily`
+- 刻意不給任何 `Create*`、`CreateTags`：不能蓋東西，也不能把別的東西改貼成 `daily` 再刪
+- 帳號 ID 用 `aws_caller_identity`（長期層新增這個 data source，不是資源）
+- 多一層保險：workflow 就算被改成指向 `infra/persistent/`，角色連長期層帳本都讀不到（E120 模擬器 `implicitDeny`），寫入有明文 Deny
+
+**`.github/workflows/destroy.yml`**
+
+| 項目 | 內容 |
+|---|---|
+| 觸發與權限 | `workflow_dispatch`；`permissions: {}`，工作上才開 `id-token: write`、`contents: read`；`environment: destroy`；`runs-on: ubuntu-24.04`；`timeout-minutes: 30` |
+| `concurrency` | `destroy-daily`，`cancel-in-progress: false`：第二次排隊，不取消正在拆的（拆到一半被取消，帳本會留下鎖） |
+| 裝 Terraform | curl 官方 zip → `sha256sum --check --strict` → 解壓到 `$RUNNER_TEMP/bin` |
+| 遮帳號 ID | 從 secret 的角色 ARN 取第 5 段，`::add-mask::`：之後每個步驟、每一行都遮成 `***`（比 `oidc-check.yml` 的 `sed` 全面） |
+| 拆 | `init` → `destroy -auto-approve -var=admin_cidr=192.0.2.1/32` → `state list` 必須是空的，有剩就失敗 |
+| 證明過期 | GitHub 的證明約 5 分鐘過期，而 `init`、`destroy`、`state list` 是三個各自換憑證的程式，所以每個指令前都重新要一張；同一個程式內換到的臨時憑證可用 1 小時 |
+
+### 施工（本人執行，個人電腦，10/18 11:13～11:47）
+
+**工作方式改變（11:23）：** 本人開啟 Claude 桌面版的 Computer use，授權 VS Code、Windows PowerShell（只能看與點擊，不能打字）、Chrome（Claude in Chrome 擴充功能），以及 repo 資料夾的存取。之後本人打指令、Claude 自己截圖讀結果，不再複製貼上；按 Merge、Run workflow 等收不回來的動作，每次都先問本人。
+
+| 步驟 | 指令 | 結果 |
+|---|---|---|
+| 1 | `git switch -c feat/m4-daily-network`；`Expand-Archive`（Claude 給的 zip） | `git status`：`modified` 兩個（證據紀錄、`github_oidc.tf`）、`Untracked` 兩個（`destroy.yml`、`infra/daily/`） |
+| 2 | `terraform -chdir=infra/daily fmt -check`、`-chdir=infra/persistent fmt -check` | 兩層都無輸出：Claude 手寫的排版第一次就符合 |
+| 3 | `aws login` → `aws sts get-caller-identity --query Arn --output text` | `arn:aws:iam::<account-id>:user/terry-admin` |
+| 4 | `terraform -chdir=infra/daily init` | `Successfully configured the backend "s3"!`；`Reusing previous version of hashicorp/aws from the dependency lock file`、`Installed hashicorp/aws v6.68.0 (signed by HashiCorp)` |
+| 5 | `terraform -chdir=infra/daily validate`、`-chdir=infra/persistent validate` | 兩層都 `Success! The configuration is valid.` |
+| 6 | `terraform -chdir=infra/persistent plan` | `Plan: 0 to add, 1 to change, 0 to destroy.`：只有 `aws_iam_role_policy.destroy` `updated in-place`；其他 12 個只有 `Refreshing state`；新增 `DescribeDailyNetwork`（11 個動作、`Resource = "*"`）與 `DeleteDailyNetwork`（條件 `aws:ResourceTag/Layer = "daily"`、7 種 ARN）；原本的明文 Deny 不變 |
+| 7 | `$env:TF_VAR_admin_cidr = "$((irm checkip.amazonaws.com).Trim())/32"` | 見下方「定案 6 補充」 |
+| 8 | `terraform -chdir=infra/daily plan` | `Plan: 19 to add, 0 to change, 0 to destroy.`；每個資源的 `tags_all` 都有 `Layer = "daily"`；S3 Endpoint 政策只有 `s3:GetObject` `arn:aws:s3:::prod-ap-northeast-1-starport-layer-bucket/*`；DynamoDB Endpoint 政策只有 `GetItem`／`PutItem`／`UpdateItem` 與三張表的 ARN（帳號 ID 由 `aws_caller_identity` 在 plan 時就算出來） |
+
+**定案 6 補充（本人 11:42 選 A）：本機的 `admin_cidr` 用環境變數 `TF_VAR_admin_cidr`，每開一個終端機查一次當下的公開 IP，不存 `.tfvars` 檔。**
+
+- 本人常帶著電腦換網路；DHCP 發的是內部 IP（路由器給的），ALB 看到的是電信業者給路由器的公開 IP，換網路就會變
+- 硬碟上不留 IP；忘了設時 Terraform 會停下來問 `var.admin_cidr`，等於自動提醒。不選 `.tfvars`：換網路時容易拿舊 IP apply，而且不會有提醒
+- `checkip.amazonaws.com` 的回應尾巴帶換行，要 `.Trim()`，否則值會是「IP、換行、/32」，被變數檢查擋下
+- C 段沒有 ALB，IP 對不對不影響；D 段測試換了網路就重新 apply（只改那一條規則）。在公司網路上查到的是全公司共用的出口 IP，D 段測試要用家裡網路或手機熱點
+
+### 限制（目前為止）
+
+- Claude 的試跑環境裝不了 Terraform，骨架只用 HCL 解析器檢查；本人電腦的 `fmt`、`validate`、`plan` 都通過（上方「施工」）
+- 11 個 `Describe` 是照 Terraform 會呼叫的 API 推的，可能漏；`DisassociateRouteTable` 等動作 AWS 會檢查哪幾種資源的標籤，也要第一次 destroy 才確定
+- 權限模擬器不會去看資源上真正的標籤，標籤要用 `--context-entries` 自己餵；所以標籤條件的「真的有效」要靠 destroy 實測
+- 證明約 5 分鐘過期是查證到的說法（Spacelift 支援文件），workflow 的寫法不依賴確切秒數
 
 ---
 
@@ -1351,10 +1441,11 @@ OPENAI_TIMEOUT_SECONDS = 60
 | 17 | 3.2、3.6、D16、D19 | 雲端 DynamoDB 先建三張表（`usage` 留 M5）：`PAY_PER_REQUEST`、`deletion_protection_enabled`、PITR；ECR `llm-gateway`：`IMMUTABLE`、`scan_on_push`、生命週期（沒標籤 1 天、最多 10 個）；State bucket：`bucket_prefix`、`prevent_destroy`、封鎖公開、版本控制、`AES256`、只准 HTTPS；Terraform 1.16.5、AWS provider 6.68.0（E118） |
 | 18 | 5.1（State 管理）、PART 9「IaC」 | 實作：State 放 `llm-gateway-tfstate-<亂碼>` bucket 的 `persistent/terraform.tfstate`，`use_lockfile`；本機用 `aws login`（Terraform 1.15 起支援）；中斷的操作會留下 `.tflock`，以 `force-unlock` 收拾前要確認主人與沒有程序在跑（E119） |
 | 19 | 4.2（CI/CD 層）、5.1、D20、11.4 的 S11 | GitHub OIDC 提供者與 `llm-gateway-destroy` 角色放長期層；只有 environment `destroy`（只准 `main`）借得到，`sub` 用 2026/7/15 後的新格式（`repo:Poyu-Tu@<owner-id>/llm-gateway@<repo-id>:environment:destroy`）；權限分批長，第一批只有每日層帳本兩個檔，並先寫明文 Deny 擋長期層；environment 取消管理員略過；`oidc-check.yml` 實測：沒掛 environment 被 AWS 拒、從分支觸發被 GitHub 擋（E120） |
+| 20 | 3.5、D13、D16、5.1、PART 9「IaC」 | 每日層骨架：VPC `10.0.0.0/16`、公有子網 1a／1c（不自動發公開 IP）、私有子網 1a、網際網路閘道放 C 段；安全群組 `alb`（80 只准本人 IP）、`gateway`（8000 只准從 ALB、出 443）；AWS-0104 以 `trivy:ignore` 刻意接受（12/31）；Endpoint Policy：S3 只准 ECR 映像層 bucket 的 `GetObject`、DynamoDB 只准三張表的 `GetItem`／`PutItem`／`UpdateItem`；跨層資料用寫死的表名加 `aws_caller_identity`；destroy workflow 下載官方 zip 比對 SHA256、證明存檔交給 Terraform 換憑證、`admin_cidr` 填 RFC 5737 位址；destroy 角色第二批：逐一列出的 `Describe` 與限 `Layer=daily` 標籤的刪除（E121） |
 
 ---
 
-## 目前進度（2026-10-17 16:15）
+## 目前進度（2026-10-17 18:55）
 
 **M4 開工前準備全部完成**（10/14～10/15）：
 
@@ -1373,8 +1464,10 @@ OPENAI_TIMEOUT_SECONDS = 60
 - **PR #7 合併（10/17 10:40）：** `main` = `92b7aa4`，6 個檢查全綠
 - **A 段後半開工（E120）：** OIDC 與 destroy 角色五項定案；發現 GitHub 新 repo 的 `sub` 改成「名字@編號」；帳號裡沒有既有的 OIDC 提供者
 - **A 段完成（E120）：** OIDC 提供者與 destroy 角色上雲（免費）；權限模擬器 5 題、`oidc-check` 從 `main` 借到角色、沒掛 environment 被拒、從分支觸發被擋；PR #9 合併，`main` = `e08f48e`
-- 下一步：本筆與截圖進 repo（docs PR）→ **C 段**每日層骨架（`infra/daily/`，帳本 `daily/terraform.tfstate`）→ destroy workflow 第一次實測
-- 下一筆證據是 **E121**
+- **E120 後半與截圖進 repo：** PR #10 合併，`main` = `8c36ed3`
+- **C 段開工（E121）：** 六項定案；`infra/daily/` 骨架、`destroy.yml`、destroy 角色第二批權限寫好（HCL 解析器檢查通過）
+- 下一步：本人電腦 `fmt`／`validate`／`plan` → PR → 合併 → apply 長期層（只改權限）→ 權限模擬器 → apply 每日層 → 從 `main` 跑 destroy workflow
+- 下一筆證據是 **E122**
 
 ---
 
@@ -1400,7 +1493,7 @@ OPENAI_TIMEOUT_SECONDS = 60
 | ~~CI 加 `trivy config`（E104）~~ | ✅ 10/16 `Config scan`，必要檢查；trivy-action v0.36.0 已包含 PR #4 的升級，Node.js 20 警告消失（E118） | — |
 | ~~Dependabot 的 PR #4~~ | ✅ 10/17 Dependabot 自行關閉（分支已刪，E120） | — |
 | ~~environment 的新 `sub` 格式（E120）~~ | ✅ 10/17 `oidc-check` 印出 `repo:Poyu-Tu@62129723/llm-gateway@1394630828:environment:destroy`，與推定相同 | — |
-| 每日層的 destroy 要不要讀長期層的資料（E120） | C 段決定：用 `terraform_remote_state` 讀 `persistent/` 帳本（角色要多 `GetObject`），或用 data source（角色要多 `Describe*`），或寫死名稱 | C 段 |
+| ~~每日層的 destroy 要不要讀長期層的資料（E120）~~ | ✅ 10/17 表名寫死、帳號 ID 用 `aws_caller_identity`，角色不多開權限（E121） | — |
 | `AWS-0132` 豁免（E118） | 12/31 到期，到期前決定改用 KMS 或延長 | 12/31 前 |
 | `usage` 表（E118） | M5 建；Endpoint Policy、IAM 要補 | M5 |
 | 供應商預算用完的告警（D32、E100） | M3 只記稽核的 `error_code` | M4～M6 |

@@ -1,0 +1,97 @@
+name: destroy
+
+# 拆掉每日層（infra/daily/）：省錢用，手動觸發（D20）。長期層（帳本、表、ECR、OIDC）不動
+# 借角色的方式（E121 定案 4）：只把 GitHub 開的身分證明存成檔案，交給 Terraform 自己換臨時憑證，
+# 臨時憑證的三個值從頭到尾不出現在環境變數與 log 裡
+# 不用第三方 Action 裝 Terraform（E121 定案 3）：下載官方 zip，比對寫死的 SHA256
+on:
+  workflow_dispatch:
+
+# 整個 workflow 預設什麼權限都沒有；需要的工作自己開
+permissions: {}
+
+# 同一時間只准拆一次；第二次排隊等，不取消正在拆的那次（拆到一半被取消，帳本會留下鎖）
+concurrency:
+  group: destroy-daily
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: 1.16.5
+  # terraform_1.16.5_linux_amd64.zip 的指紋，抄自 HashiCorp 官方的 SHA256SUMS（10/17）
+  # 升級 Terraform 時，TF_VERSION、這個指紋、infra/*/versions.tf 要一起改
+  TF_SHA256: 2bc2fcfff033265c9e02ca0351f01794eb122f62a9b2a49a3294b9e49eaab5e4
+  TF_IN_AUTOMATION: "1"
+  AWS_REGION: ap-northeast-1
+
+jobs:
+  destroy:
+    name: Destroy the daily layer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # 只有掛這個 environment 的工作借得到 destroy 角色；environment 只准 main（E120）
+    environment: destroy
+    permissions:
+      id-token: write # 跟 GitHub 要身分證明
+      contents: read # 取出程式碼
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Terraform and check its fingerprint
+        run: |
+          set -euo pipefail
+          curl -sSfL -o "$RUNNER_TEMP/terraform.zip" \
+            "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+          # 指紋對不上就停在這裡，不安裝
+          echo "${TF_SHA256}  $RUNNER_TEMP/terraform.zip" | sha256sum --check --strict -
+          unzip -q -o "$RUNNER_TEMP/terraform.zip" terraform -d "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/terraform" version
+
+      - name: Hide the account ID
+        env:
+          ROLE_ARN: ${{ secrets.AWS_DESTROY_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          # 帳號 ID 會出現在計畫裡的表 ARN：從角色 ARN 取出來，之後每個步驟的 log 都遮成 ***
+          echo "::add-mask::$(echo "$ROLE_ARN" | cut -d: -f5)"
+
+      # Terraform（S3 帳本與 AWS provider）讀這三個環境變數，自己拿證明去換臨時憑證
+      # GitHub 的證明約 5 分鐘就過期，而 init、destroy、state list 是三個各自換憑證的程式，
+      # 所以每個指令之前都重新要一張；換到的臨時憑證在同一個程式裡可用 1 小時，拆 D 段也夠
+      - name: Destroy with Terraform
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_DESTROY_ROLE_ARN }}
+          AWS_WEB_IDENTITY_TOKEN_FILE: ${{ runner.temp }}/token
+          AWS_ROLE_SESSION_NAME: destroy-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # 向 GitHub 要一張給 AWS STS 用的證明，存成檔案；證明本身遮掉、不印
+          new_token() {
+            curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' > "$AWS_WEB_IDENTITY_TOKEN_FILE"
+            echo "::add-mask::$(cat "$AWS_WEB_IDENTITY_TOKEN_FILE")"
+          }
+
+          echo "::group::terraform init"
+          new_token
+          terraform -chdir=infra/daily init -input=false
+          echo "::endgroup::"
+
+          # admin_cidr 是必填變數，但拆除用不到它的值：填 RFC 5737 文件專用位址（E121 定案 6）
+          new_token
+          terraform -chdir=infra/daily destroy -auto-approve -input=false -var=admin_cidr=192.0.2.1/32
+
+          # 拆完帳本裡必須一個資源都不剩；有剩就讓這次執行失敗
+          new_token
+          left=$(terraform -chdir=infra/daily state list)
+          if [ -n "$left" ]; then
+            echo "Still in the daily state:"
+            echo "$left"
+            exit 1
+          fi
+          echo "The daily state is empty"

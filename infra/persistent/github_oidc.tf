@@ -1,5 +1,5 @@
 # GitHub Actions 向 AWS 借臨時身分的鑰匙（OIDC）。放在長期層：destroy 不能把自己的鑰匙也拆掉
-# 這一批只開「讀寫每日層的帳本」；刪除權限等每日層寫好再一起加（E120 定案 2）
+# 第一批只開「讀寫每日層的帳本」（E120 定案 2）；第二批加拆每日層骨架的權限（E121）
 
 locals {
   # GitHub 2026/7/15 之後建立的 repo，身分證明的 sub 是「名字@編號」的新格式（本 repo 9/29 建立）
@@ -14,7 +14,22 @@ locals {
 
   # 長期層的帳本與鎖檔：明文 Deny 用
   persistent_state_object = "${aws_s3_bucket.tfstate.arn}/persistent/terraform.tfstate"
+
+  # 每日層骨架的資源種類（E121）：只限本帳號、東京區、這幾種；再加 Layer = daily 標籤條件
+  daily_ec2_arn_prefix = "arn:aws:ec2:ap-northeast-1:${data.aws_caller_identity.current.account_id}"
+  daily_network_resources = [
+    "${local.daily_ec2_arn_prefix}:vpc/*",
+    "${local.daily_ec2_arn_prefix}:subnet/*",
+    "${local.daily_ec2_arn_prefix}:route-table/*",
+    "${local.daily_ec2_arn_prefix}:internet-gateway/*",
+    "${local.daily_ec2_arn_prefix}:security-group/*",
+    "${local.daily_ec2_arn_prefix}:security-group-rule/*",
+    "${local.daily_ec2_arn_prefix}:vpc-endpoint/*",
+  ]
 }
+
+# 帳號 ID 向 AWS 問「我是誰」就知道，不用寫進 repo
+data "aws_caller_identity" "current" {}
 
 # 讓 AWS 認得「GitHub Actions 開的身分證明」
 # 不寫 thumbprint_list：AWS 驗證 GitHub 的證明改用自己信任的憑證機構，指紋已不使用
@@ -83,6 +98,58 @@ data "aws_iam_policy_document" "destroy_permissions" {
     effect    = "Allow"
     actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
     resources = ["${local.daily_state_object}.tflock"]
+  }
+
+  # ---- 第二批（E121）：拆每日層的骨架（VPC、子網、大門、路由表、安全群組、Gateway Endpoint）----
+
+  # 拆之前要先看現況。EC2 的 Describe 不能指定資源，AWS 規定 Resource 只能寫 "*"
+  # 動作逐一列出、不寫 ec2:Describe*（E121 定案 2）；缺哪個，destroy 的錯誤訊息會寫出來，再補
+  statement {
+    sid    = "DescribeDailyNetwork"
+    effect = "Allow"
+    actions = [
+      "ec2:DescribeVpcs",
+      "ec2:DescribeVpcAttribute",
+      "ec2:DescribeSubnets",
+      "ec2:DescribeRouteTables",
+      "ec2:DescribeInternetGateways",
+      "ec2:DescribeSecurityGroups",
+      "ec2:DescribeSecurityGroupRules",
+      "ec2:DescribeNetworkAcls",
+      "ec2:DescribeVpcEndpoints",
+      "ec2:DescribePrefixLists",
+      "ec2:DescribeNetworkInterfaces",
+    ]
+    resources = ["*"]
+  }
+
+  # 只准刪貼著 Layer = daily 的東西（每日層的 default_tags 會自動貼）
+  # 卸大門（DetachInternetGateway）會同時檢查大門與 VPC 兩邊的標籤
+  # 刻意不給任何 Create*、CreateTags：拆除組不能蓋東西，也不能把別的東西改貼成 daily 再刪
+  statement {
+    sid    = "DeleteDailyNetwork"
+    effect = "Allow"
+    actions = [
+      "ec2:DeleteVpc",
+      "ec2:DeleteSubnet",
+      "ec2:DeleteRouteTable",
+      "ec2:DisassociateRouteTable",
+      "ec2:DeleteRoute",
+      "ec2:DetachInternetGateway",
+      "ec2:DeleteInternetGateway",
+      "ec2:DeleteSecurityGroup",
+      "ec2:RevokeSecurityGroupIngress",
+      "ec2:RevokeSecurityGroupEgress",
+      "ec2:DeleteVpcEndpoints",
+    ]
+    # 每個 ID 事先不知道（每次 apply 都不同），所以種類後面是 *；真正的範圍由下面的標籤條件決定
+    resources = local.daily_network_resources
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Layer"
+      values   = ["daily"]
+    }
   }
 
   # ---- 以下是明文 Deny：之後不管加了什麼允許，長期層都碰不到（Deny 一定贏過 Allow）----
