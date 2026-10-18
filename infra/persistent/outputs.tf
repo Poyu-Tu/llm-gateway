@@ -25,3 +25,27 @@ output "destroy_role_arn" {
   description = "ARN of the role the GitHub destroy workflow assumes"
   value       = aws_iam_role.destroy.arn
 }
+
+# 每日層的 ECS 任務定義要用這兩個角色；ARN 含帳號 ID，每日層用名字自己組，這裡印出來給人核對
+output "task_execution_role_arn" {
+  description = "ARN of the role ECS uses to start the Gateway task"
+  value       = aws_iam_role.task_execution.arn
+}
+
+# OpenAI 那邊的服務帳號對應，sub 要填這個（E123）
+output "task_role_arn" {
+  description = "ARN of the role the Gateway code runs as (the sub OpenAI maps to gateway-wif)"
+  value       = aws_iam_role.task.arn
+}
+
+# 本人用 CLI 訂閱 Email 時要用
+output "alerts_topic_arn" {
+  description = "ARN of the SNS topic the alarms publish to"
+  value       = aws_sns_topic.alerts.arn
+}
+
+# 每日層把 DNS 查詢日誌接到 VPC 時要用（每日層用名字查不到它，所以在這裡印出 ID 給人核對）
+output "dns_query_log_config_id" {
+  description = "ID of the Resolver query log configuration the daily VPC is attached to"
+  value       = aws_route53_resolver_query_log_config.dns.id
+}

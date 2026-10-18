@@ -1,11 +1,20 @@
 """Settings that matter once the gateway runs behind the load balancer."""
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app, get_client
 
 # FastAPI 預設會開的四個說明頁：列出所有 API 的路徑與欄位
 API_DOCS_PATHS = ["/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"]
+
+
+# get_client() 會記住第一次建好的連線；每個測試前後都清掉，前一個測試的連線不會被下一個拿到
+@pytest.fixture(autouse=True)
+def fresh_client():
+    get_client.cache_clear()
+    yield
+    get_client.cache_clear()
 
 
 # 說明頁一律關閉：使用者用不到，只會把 API 的地圖交給想攻擊的人
@@ -45,3 +54,9 @@ def test_openai_client_gives_up_after_60_seconds(monkeypatch):
 
     assert client.timeout == 60
 
+
+# 整個程式共用一個連線：身分聯盟的通行證可用 1 小時，每個請求都新建就每次重換
+def test_openai_client_is_shared(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-a-real-key")
+
+    assert get_client() is get_client()

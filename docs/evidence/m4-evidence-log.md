@@ -1520,7 +1520,133 @@ OPENAI_TIMEOUT_SECONDS = 60
 |---|---|---|
 | `4099590` | 10/18 12:05 | `feat: add the daily network skeleton and the destroy workflow` |
 | `6fcb525` | 10/18 12:43 | `Merge pull request #11 from Poyu-Tu/feat/m4-daily-network`（`8c36ed3..6fcb525`；6 個檢查全綠） |
-| （待推） | — | 本筆與 3 張截圖 |
+| `c791bd4` | 10/18 13:55 | `docs: record the C-stage apply and the first destroy run`（本筆與 3 張截圖） |
+| `dfc49f8` | 10/18 14:0x | `Merge pull request #12 from Poyu-Tu/docs/m4-daily-results`（`6fcb525..dfc49f8`；6 個檢查全綠） |
+
+---
+
+## E123. D 段開工：九項定案（2026-10-18 14:23～15:02）
+
+**依據：** E117（施工順序 D）、E120（權限分批長）、E121、E122；決策書 3.5（五個必踩的坑）、4.1、4.5、5.1、6.4、7.1、7.9、11.4（S08～S11）、D13、D14、D16、D20、D25；`m4-body-start-handoff.md` 第 4 節（寫 Terraform 時要記得的 11 項）。
+
+**範圍：** NAT（單 AZ 1a）＋彈性 IP、私有路由表 `0.0.0.0/0 → NAT`、Route 53 Resolver DNS 防火牆（先 ALERT 後 BLOCK）＋查詢日誌、ALB（兩個公有子網、閒置逾時 120 秒、HTTP 80 只准本人 IP）、ECS Fargate（叢集、任務定義、服務）、CloudWatch 日誌群組與 `audit_write_failed` 指標篩選＋告警；`get_client()` 改用身分聯盟；雲端三張表的種子資料；OpenAI 端的 Fargate 角色對應；destroy 角色第三批權限。
+
+**生活比喻：** C 段蓋好圍牆、隔間、門禁與兩條專用走廊；D 段接水電（NAT）、請一位拿名單的總機（DNS 防火牆）、開店門（ALB）、讓店員上班（Fargate）。
+
+**花費估算（決策書 6.2 的東京單價）：** 全部開著約每小時 US$0.12（NAT 0.062、ALB 0.0243、公開 IPv4 × 3 共 0.015、Fargate 0.0154，其餘幾乎 0）；apply 到 destroy 預估 3～4 小時，約 US$0.4～0.5。
+
+### 沿用的定案（不再問）
+
+ALB 閒置逾時 120 秒（E115）；ALB 健康檢查打 `/health`、開部署斷路器並自動退回（E114）；`readonlyRootFilesystem: true`（E116）；任務角色對 `audit` 只給 `PutItem`、`api_keys` 只讀、`quotas` 讀＋`UpdateItem`（E116）；`DYNAMODB_TARGET=aws`（E111）；NAT 與私有子網都在 1a（D13）；ALB 只收本人 IP（E117）。
+
+### 定案（本人逐題作答，14:51～15:02）
+
+| # | 決定 | 定案 | 不選的選項與理由 | 弱點 |
+|---|---|---|---|---|
+| 1 | 上雲節奏 | **A：一次全上。** DNS 防火牆的「其他全部」規則先 ALERT；Gateway 跑起來後用真實對話與一次性任務製造查詢，從查詢日誌整理放行清單 → 改 BLOCK 再 apply（只改一條規則）→ 重跑一輪確認 → 當天 destroy | B 拆兩次：臨時任務本身就要 ECR、日誌、任務定義，D1 等於大半都要建，多一輪 apply／destroy。C 直接 BLOCK：漏一個網域就卡在 `CannotPullContainerError`（決策書 3.5 坑 2） | ALERT 那段時間出口只有紀錄、沒有擋（ALB 只收本人 IP） |
+| 2 | Gateway 的兩個 IAM 角色放哪一層 | **A：執行角色與任務角色都放長期層。** 政策裡指到每日層的東西（日誌群組、SSM 參數）用寫死的名字；信任條件限 `ecs-tasks.amazonaws.com` 與本帳號 | B 放每日層：destroy 角色要多拿 `iam:DeleteRole` 等「註銷身分」的權限，與 C 段連 `CreateTags` 都不給的原則相反。C 拆開放：兩邊的缺點都拿到 | 每日層拆掉後角色還在（沒有任務在跑就沒人借得到） |
+| 3 | HMAC 金鑰怎麼交給 Fargate | **A：本人用 AWS CLI 建 SSM SecureString `/llm-gateway/audit-hmac-key`**（值用 Python `secrets` 當場產生、不顯示；雲端用新的一把，與本機 `.env` 分開）。Terraform 只寫名字：任務定義的 `secrets` 指過去、執行角色只准讀這幾個參數；用 AWS 預設的 `aws/ssm` 金鑰加密 | B Terraform 用 write-only 參數建：要多引入 `random` provider（鎖版本、冷卻期），功能較新。C 明文環境變數：違反 D14 | 唯一不歸 Terraform 管的東西，誤刪要手動重建；放行清單要多 `ssm.ap-northeast-1.amazonaws.com` |
+| 4 | `get_client()` 怎麼切換金鑰與身分聯盟 | **A：新環境變數 `OPENAI_AUTH`，一定要明講**：`api_key`（本機）／`workload_identity`（雲端）；沒設或寫錯 → 啟動就報錯。整個程式共用一個連線物件。身分提供者 ID、服務帳號 ID 也由本人用 CLI 存進 SSM（證據紀錄一直遮蔽它們，不進 repo）；audience `llm-gateway-capstone` 直接寫在 Terraform | B 自動判斷：程式自己猜，殘留的環境變數會讓本機悄悄換路（E111 的 43 個測試連錯資料庫就是這類問題）。C 本機也用身分聯盟：每次開發要 `aws login` 再匯出會過期的憑證，而且讓管理員帳號當 OpenAI 的身分 | `.env`、`.env.example`、`compose.yaml` 都要加一行；測試要配合「共用一個連線」 |
+| 5 | 映像從哪一版建、標籤怎麼取 | **A：程式與 Terraform 同一個 PR → 本機 `fmt`／`validate`／`plan` → CI 全綠 → 合併 → 從 `main` 建映像，標籤 = 合併 commit 的編號 → 推 ECR → apply。** 之後要改程式：小 PR → 新標籤 → 只改變數 `image_tag` 再 apply。任務定義寫明 `X86_64` | B 從分支建：雲上跑過的那一份可能不在 `main`。C 固定標籤：`IMMUTABLE` 不准覆蓋 | apply 前多等一輪 CI（還沒跳錶） |
+| 6 | S08 怎麼證明「清單外被擋」；ECS Exec | **A：一次性任務**：同一個任務定義與映像，臨時把啟動指令換成一小段 Python，查 `api.openai.com` 與 `example.com` 並試連 443，結果進 CloudWatch 日誌，DNS 查詢日誌出現 BLOCK；換指令的設定放 JSON 檔，外面包一支短的 PowerShell 腳本。**ECS Exec 不做** | B ECS Exec：放行清單要加 `ssmmessages` 等網域、任務角色多權限、本機裝 Session Manager 外掛，唯讀根目錄下還要另外掛可寫的資料夾（社群實測），與「出口管很緊」反方向。C 兩個都做：還是要付 B 的複雜度 | 決策書 8.2 M4 驗證列的「`enable_ecs_exec` 改成 `true` 後能進入容器」留白 |
+| 7 | destroy 權限碰到不能限標籤的動作 | **B：先找「根本不需要這個權限」的做法。** 任務定義 `skip_destroy = true`（destroy 只從帳本移除、不註銷；任務定義不收費，留著當版本紀錄）；之後再遇到別的，真的沒辦法才寫 `Resource "*"` 並附理由 | A 直接給 `ecs:DeregisterTaskDefinition` 的 `Resource "*"`：範圍是整個帳號的任務定義，換來的只是撕掉不花錢的東西。C 讓本人電腦拆：workflow 拆不乾淨 | 「state 為空」不再代表 AWS 上一點不剩，任務定義會一版一版累積（每次改設定多一版） |
+| 8 | `audit_write_failed` 告警通知誰 | **A：SNS 主題放長期層、訂閱本人 Email**（確認一次）；每日層的告警用名字指過去。Trivy AWS-0095（SNS 沒加密，HIGH）以 `trivy:ignore` 刻意接受、12/31 到期：用 AWS 預設金鑰加密的主題，CloudWatch 告警發不過去，要自管 KMS 金鑰（每月約 US$1）；主題裡只有告警名稱與狀態，沒有使用者資料 | B 不接通知：沒人聽得到的警報器。C 主題放每日層：每天要重點確認信、destroy 角色多 SNS 刪除權限 | 多一筆刻意接受的豁免 |
+| 8-2 | AWS 附送的預設資源 | **A：只認領預設安全群組**（`aws_default_security_group`）：規則清空、貼名字與 `Layer=daily`；主路由表、預設網路 ACL 不動 | B 三個都認領：網路 ACL 規則寫錯會擋死整個子網。C 都不動：忘了指定安全群組的東西會套用「對外全開」的預設 | destroy 時只從帳本移除，靠刪 VPC 一起消失 |
+
+**題 8 的 E 段驗證方式：** 本人用 CLI 往日誌群組寫一行假的 `audit_write_failed`，看告警變 `ALARM` 並收到信；證明「篩選 → 指標 → 告警 → 通知」這條鏈。Gateway 自己寫失敗的那一段已在本機刪表實驗證明（E116），兩者分開記。
+
+**查到、寫進設計的事：**
+
+- S3、DynamoDB 雖然走 Gateway Endpoint，容器仍要先經 VPC 的 DNS 查網域，所以 `dynamodb.ap-northeast-1.amazonaws.com` 與 ECR 映像層 bucket 的網域也要在放行清單裡；切成 BLOCK 時漏了就連資料庫都查不到
+- Route 53 Resolver 的刪除動作（規則群組、網域清單、關聯、查詢日誌設定）都支援 `aws:ResourceTag`（AWS Service Authorization Reference）；NAT、彈性 IP、ALB、ECS、日誌、告警寫 Terraform 時逐一查並用模擬器驗
+
+### 寫程式與 Terraform 時多做的安排（依定案推出，15:05～15:25 告知本人）
+
+| # | 安排 | 依據 |
+|---|---|---|
+| 1 | **兩個日誌群組（`/ecs/llm-gateway`、`/llm-gateway/dns-queries`）、DNS 查詢日誌設定、`audit_write_failed` 指標篩選與告警都放長期層**；每日層只把查詢日誌「接上 VPC」 | 定案 7：刪查詢日誌設定要 `logs:DeleteLogDelivery`（只能寫 `*`）；日誌在每日層拆掉後仍查得到；日誌群組保存 30 天並開 AWS 層級的防刪（`deletion_protection_enabled`） |
+| 2 | SNS 的 Email 訂閱由本人用 CLI 建 | 信箱是個人資料，同定案 3 的做法：不進 repo、不進帳本 |
+| 3 | `tests/conftest.py` 開頭強制 `OPENAI_AUTH=api_key`（用 `=` 不用 `setdefault`） | 定案 4：視窗殘留雲端設定時，測試也不會去向 AWS 要證明 |
+| 4 | 任務角色的信任條件加 `aws:SourceAccount` 與 `aws:SourceArn`（本帳號東京的 ECS）；執行角色只加 `aws:SourceAccount` | ECS 文件建議的防冒用條件 |
+| 5 | 放行規則設 `TRUST_REDIRECTION_DOMAIN` | 預設會連 CNAME 指過去的名字也拿去比，切 BLOCK 時會被擋 |
+
+**查到的：** AWS 文件寫明 `GetWebIdentityToken` 證明的 `sub` 是呼叫者的 IAM ARN，用角色時是角色的 ARN（不是每次不同的 session），所以 OpenAI 對應 `llm-gateway-task` 一次就好（AWS IAM〈Understanding token claims〉）。OpenAI 文件建議任務角色以 `sts:IdentityTokenAudience`、`sts:DurationSeconds ≤ 300` 限制（OpenAI〈Configuring workload identity federation for AWS〉）。
+
+### 程式：`app/openai_auth.py`（新檔）與 `app/main.py`（本人填空 11 格，15:27～15:47）
+
+| 函式 | 做什麼 |
+|---|---|
+| `read_openai_auth()` | 讀 `OPENAI_AUTH`，只收 `api_key`、`workload_identity`；沒設 → `KeyError`，其他 → `ValueError` |
+| `get_aws_identity_token()` | 用東京 STS 地區網址（`https://sts.ap-northeast-1.amazonaws.com`）要一張 audience 為 `OPENAI_WIF_AUDIENCE`、ES384、300 秒的證明 |
+| `make_openai_client(auth, max_retries, timeout)` | 金鑰模式交給 SDK 讀 `OPENAI_API_KEY`；身分聯盟模式把 `get_aws_identity_token` **本身**交給 SDK（不加括號），兩個 ID 從環境讀 |
+| `app/main.py` | 模組層級 `OPENAI_AUTH = read_openai_auth()`（啟動就檢查）；`get_client()` 加 `@lru_cache(maxsize=1)`、改呼叫 `make_openai_client()` |
+
+**填空第一次交出時（`4 failed, 15 passed`）：**
+
+| 格 | 寫成 | 應該是 | 訊息 |
+|---|---|---|---|
+| ⑥ | `return auth` | `return OpenAI(max_retries=max_retries, timeout=timeout)` | `AttributeError: 'str' object has no attribute 'api_key'` |
+| ⑨ | `read_openai_auth` | `read_openai_auth()` | 3 個 `ValueError: Unknown OpenAI auth mode: <function read_openai_auth at 0x...>`：存進去的是函式本身 |
+| ⑩ | `@lru_cache` | `@lru_cache(maxsize=1)`（建議） | 能跑：沒有參數的函式只會有 1 個結果；寫明讓人一眼看出「只建一個」 |
+
+改正後 Claude 取回兩個檔逐字比對，與參考版相同。
+
+### 測試（Claude 整份提供；測試數 310 → 325）
+
+- `tests/test_openai_auth.py`（新檔，14 個，不連資料庫）：兩種模式、5 種錯誤寫法、金鑰模式、身分聯盟模式（`get_token` 用 `is` 比對是不是同一支函式）、身分聯盟模式無視環境裡的金鑰（SDK 把 `api_key` 放成佔位字 `workload-identity-auth`）、缺 ID、未知模式、STS 用 botocore `Stubber` 檢查地區網址、audience、ES384、300 秒
+- `tests/test_production_settings.py`（4 → 5 個）：加 `test_openai_client_is_shared`；加道具 `fresh_client`，每個測試前後 `get_client.cache_clear()`
+- `tests/conftest.py`：開頭 `os.environ["OPENAI_AUTH"] = "api_key"`
+
+| 時間點 | 結果 |
+|---|---|
+| 只放測試 | `ImportError: cannot import name 'openai_auth' from 'app'`，`1 error during collection` |
+| 填空第一次 | `4 failed, 15 passed` |
+| 改正 | 兩個檔 `19 passed`；整套 `325 passed`（23.97 秒，含 DynamoDB Local） |
+
+（Claude 事先說「預期 20 passed」是算錯：`test_production_settings.py` 是 5 個不是 6 個。）
+
+### 破壞實驗（本人執行，三個；每個做完改回，Claude 比對檔案大小確認）
+
+| # | 改了什麼 | 結果 | 失敗訊息 | 證明了 |
+|---|---|---|---|---|
+| 1 | `get_token` 改成 `get_aws_identity_token()`（加括號） | `2 failed, 12 passed`：`test_workload_identity_mode_uses_the_aws_token`、`..._ignores_an_api_key` | 本人電腦：`botocore.exceptions.MissingDependencyException: Missing Dependency: Using the login credent...`；Claude 試跑：`KeyError: 'OPENAI_WIF_AUDIENCE'` | 加括號會在建連線那一刻就去要證明。本人的終端機留著 10/14 的 `OPENAI_WIF_AUDIENCE`，壞版本真的往下跑去找 `aws login` 的登入身分（同 `make_dynamodb_client()` 拿掉假帳密那次）；若那個套件剛好有裝，就會用本人真的 AWS 身分向 STS 開證明。正確版本建連線時不會去要證明 |
+| 2 | 拿掉 `@lru_cache(maxsize=1)` | `5 errors` | `AttributeError: 'function' object has no attribute 'cache_clear'` | 共用連線被拿掉，整個檔停下來。限制：紅在測試前的準備動作，`is` 判斷本身沒有單獨看到紅（改 `maxsize=0` 才會），沒做 |
+| 3 | `STS_ENDPOINT` 改 `https://sts.amazonaws.com` | `1 failed, 13 passed` | `assert 'https://sts.amazonaws.com' == 'https://sts....amazonaws.com'` | 改成全球網址擋得下來 |
+
+**練習本：** 程式對照新增 `app/openai_auth.py` 一節（常數、`read_openai_auth()`、`get_aws_identity_token()`、`make_openai_client()`），`get_client()` 升為核心並寫 10/18 改動；測試索引新增 14 列、改 1 檔；進度總表加一列；基礎觀念補強加「函式名稱加不加括號」「`@lru_cache`」；設定檔分頁新增「M4 D 段的設定檔」一節。四個分頁開頭的 commit 編號合併後再改。
+
+### 放檔與本機設定（16:05～16:20）
+
+- 16 個檔由 Claude 放進 repo、核對大小；**`.github/workflows/destroy.yml` 是遠端工具的受保護路徑，寫不進去**，改放根目錄 `destroy.yml.new`，本人 `Move-Item -Force` 搬過去（第一次打成 `.github\workflow\`，`DirectoryNotFoundException`，沒有任何檔案被動）
+- **`.env` 加一行時踩到的坑：** `Add-Content .env "OPENAI_AUTH=api_key"`，但 `.env` 最後一行沒有換行，`Add-Content` 不會先補換行，新的一行黏在 `DYNAMODB_TARGET` 的值後面（`...8001OPENAI_AUTH=api_key`）。Claude 以一行 `sed` 只在該位置補換行，全程只看變數名稱與行數、不印任何值；修正後 4 行、CRLF 不變、`DYNAMODB_TARGET` 結尾仍是 `8001`。之後往檔案尾巴加行，先確認最後一行有換行
+
+### SSM 參數（本人，16:30～16:46）
+
+- 兩個 OpenAI ID 的位置（OpenAI 文件沒寫）：身分提供者 ID（`idp_` 開頭）在組織設定 → Security → Workload Identity Provider 列表的 PROVIDER ID 欄；服務帳號 ID 是 `gateway-wif` 的 **User ID（`user-` 開頭）**，在專案設定 → Members，或對應頁 `gateway-wif` 旁的 ⓘ。本人找不到時，由 Claude 用 Claude in Chrome 在自己的分頁群組裡找到
+- **推定、未證實：** SDK 要的服務帳號 ID 就是這個 `user-` 開頭的值；填錯的話 Gateway 第一次呼叫 OpenAI 會 `OAuth authentication error`，改 SSM 的值即可
+- 10/14 探測時用 `$env:` 設的兩個 ID 以明文留在 PowerShell 歷史檔；這次改用 `--value (Read-Host)`，輸入的值不進歷史檔
+- `put-parameter` 三次（HMAC 金鑰由 `secrets.token_hex(32)` 當場產生，雲端專用、與本機 `.env` 不同把），之後 `cls`
+- `describe-parameters`（不列值）：3 個都是 `SecureString`、版本 `1`。中間兩次打錯：`describe-parameter`（印說明）、`--query "Parameter[]..."`（**沒有報錯、什麼都不印**：欄位名稱打錯只會回空的）
+
+### fmt／validate／plan 與長期層 apply（16:46～17:05）
+
+| 步驟 | 結果 |
+|---|---|
+| 兩層 `fmt -check`、`validate` | 都沒印東西、都 `Success!`（Claude 事先以 OpenTofu 1.10.6 加同版 AWS provider 檢查過） |
+| 長期層 `plan`（`Select-String` 只留摘要） | `Plan: 10 to add, 1 to change, 0 to destroy.`：兩個角色與兩份政策、SNS 主題、兩個日誌群組、查詢日誌設定、指標篩選、告警；`aws_iam_role_policy.destroy` 原地更新 |
+| **順序調整** | 每日層 `dns_firewall.tf` 要用名字查長期層的查詢日誌設定，設定沒建之前每日層 plan 跑不起來；所以長期層先 apply（10 個都不計費），每日層等合併、建好映像才 apply |
+| 長期層 `apply` | `Apply complete! Resources: 10 added, 1 changed, 0 destroyed.`；新 output：`alerts_topic_arn`、`dns_query_log_config_id`、`task_execution_role_arn`、`task_role_arn` |
+| 每日層 `plan -var=image_tag=0000000`（試算） | `Plan: 36 to add, 0 to change, 0 to destroy.`（C 段 19 ＋ 網路 4 ＋ DNS 防火牆 7 ＋ ALB 3 ＋ ECS 3） |
+
+### OpenAI 端的對應（本人，17:10）
+
+- 新增 `gateway-task-role`：服務帳號 `gateway-wif`、專案 `llm-gateway-capstone`、`sub` = `arn:aws:iam::<account-id>:role/llm-gateway-task`、權限 Restricted，ⓘ 只有 `api.model.chat_completions.request`（Claude 讀頁面逐字核對）
+- `terry-admin-probe` 保留，Fargate 打通 OpenAI 後再刪
+
+### SNS Email 訂閱（本人，17:14～17:22）
+
+- `aws sns subscribe --topic-arn (terraform -chdir=infra/persistent output -raw alerts_topic_arn) --protocol email --notification-endpoint (Read-Host)`，之後 `cls`；本人點信裡的確認連結
+- 確認（不印信箱）：`list-subscriptions-by-topic --query "Subscriptions[].[Protocol,SubscriptionArn=='PendingConfirmation']"` → `email   False`
 
 ---
 

@@ -85,3 +85,42 @@ resource "aws_route_table_association" "private_a" {
   subnet_id      = aws_subnet.private_a.id
   route_table_id = aws_route_table.private.id
 }
+
+# ==== D 段（E123）====
+
+# ---- NAT：私有子網對外唯一的出口（單 AZ，跟私有子網同在 1a，D13）----
+# 按小時計費（約 US$0.062／小時，加上彈性 IP 約 US$0.005／小時），測完當天 destroy
+
+resource "aws_eip" "nat" {
+  domain = "vpc"
+
+  tags = { Name = "llm-gateway-nat" }
+}
+
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public_a.id
+
+  tags = { Name = "llm-gateway" }
+
+  # NAT 要等大門裝好才能真的通到外面
+  depends_on = [aws_internet_gateway.main]
+}
+
+# 私有子網的指路牌加一條：要去外面的（OpenAI、STS、ECR、Logs、SSM），走 NAT
+# S3 與 DynamoDB 不會走這條：Gateway Endpoint 的路由比 0.0.0.0/0 更精準，會先被選中
+resource "aws_route" "private_internet" {
+  route_table_id         = aws_route_table.private.id
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.main.id
+}
+
+# ---- 認領 AWS 附送的預設安全群組（E123 定案 8-2）----
+# 任何東西建在這個 VPC 卻忘了指定安全群組，就會套用它；AWS 預設是「對外全開、同群組互通」
+# 這裡不寫任何 ingress、egress，Terraform 就把它的規則全部清空：忘了指定的東西進不來也出不去
+# destroy 時 Terraform 只把它從帳本移除（AWS 不准刪預設安全群組），刪 VPC 時 AWS 一起刪
+resource "aws_default_security_group" "default" {
+  vpc_id = aws_vpc.main.id
+
+  tags = { Name = "llm-gateway-default-unused" }
+}

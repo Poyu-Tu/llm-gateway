@@ -1,8 +1,14 @@
 """Shared fixtures for tests."""
 
+import os
+
 import pytest
 
 from app.db import make_dynamodb_client
+
+# app/main.py 一載入就要讀 OPENAI_AUTH（沒設就起不來）。測試一律用金鑰模式：
+# 用 = 不用 setdefault，這個視窗裡就算留著雲端的設定，也不會把測試帶去向 AWS 要證明
+os.environ["OPENAI_AUTH"] = "api_key"
 
 # 考場的網址寫死在這裡：這個道具會刪掉所有資料表，絕不能被指到別的地方
 TEST_ENDPOINT_URL = "http://127.0.0.1:8002"
