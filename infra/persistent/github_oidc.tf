@@ -1,5 +1,6 @@
 # GitHub Actions 向 AWS 借臨時身分的鑰匙（OIDC）。放在長期層：destroy 不能把自己的鑰匙也拆掉
-# 第一批只開「讀寫每日層的帳本」（E120 定案 2）；第二批加拆每日層骨架的權限（E121）
+# 第一批只開「讀寫每日層的帳本」（E120 定案 2）；第二批加拆每日層骨架的權限（E121）；
+# 第三批加拆 D 段（NAT、DNS 防火牆、ALB、ECS）的權限（E123）
 
 locals {
   # GitHub 2026/7/15 之後建立的 repo，身分證明的 sub 是「名字@編號」的新格式（本 repo 9/29 建立）
@@ -25,6 +26,21 @@ locals {
     "${local.daily_ec2_arn_prefix}:security-group/*",
     "${local.daily_ec2_arn_prefix}:security-group-rule/*",
     "${local.daily_ec2_arn_prefix}:vpc-endpoint/*",
+  ]
+
+  # 第三批（E123）：D 段會跳錶的東西。一樣只限本帳號、東京區、這幾種，再加 Layer = daily 標籤條件
+  account_region = "ap-northeast-1:${data.aws_caller_identity.current.account_id}"
+  daily_runtime_resources = [
+    "${local.daily_ec2_arn_prefix}:natgateway/*",
+    "${local.daily_ec2_arn_prefix}:elastic-ip/*",
+    "arn:aws:elasticloadbalancing:${local.account_region}:loadbalancer/app/*",
+    "arn:aws:elasticloadbalancing:${local.account_region}:listener/app/*",
+    "arn:aws:elasticloadbalancing:${local.account_region}:targetgroup/*",
+    "arn:aws:ecs:${local.account_region}:cluster/*",
+    "arn:aws:ecs:${local.account_region}:service/*",
+    "arn:aws:route53resolver:${local.account_region}:firewall-domain-list/*",
+    "arn:aws:route53resolver:${local.account_region}:firewall-rule-group/*",
+    "arn:aws:route53resolver:${local.account_region}:firewall-rule-group-association/*",
   ]
 }
 
@@ -152,6 +168,81 @@ data "aws_iam_policy_document" "destroy_permissions" {
     }
   }
 
+  # ---- 第三批（E123）：拆 D 段（NAT、彈性 IP、DNS 防火牆、ALB、ECS）----
+
+  # 一樣先看現況。這幾個服務的 Describe、List 有的不能指定資源；只看不改，全部寫 "*"
+  # （跟 DescribeDailyNetwork 同一個做法，動作逐一列出）
+  statement {
+    sid    = "DescribeDailyRuntime"
+    effect = "Allow"
+    actions = [
+      "ec2:DescribeNatGateways",
+      "ec2:DescribeAddresses",
+      "ec2:DescribeAddressesAttribute",
+      "elasticloadbalancing:DescribeLoadBalancers",
+      "elasticloadbalancing:DescribeLoadBalancerAttributes",
+      "elasticloadbalancing:DescribeListeners",
+      "elasticloadbalancing:DescribeListenerAttributes",
+      "elasticloadbalancing:DescribeTargetGroups",
+      "elasticloadbalancing:DescribeTargetGroupAttributes",
+      "elasticloadbalancing:DescribeTags",
+      "elasticloadbalancing:DescribeCapacityReservation",
+      "ecs:DescribeClusters",
+      "ecs:DescribeServices",
+      "ecs:DescribeTaskDefinition",
+      "ecs:ListTagsForResource",
+      "route53resolver:GetFirewallDomainList",
+      "route53resolver:ListFirewallDomains",
+      "route53resolver:GetFirewallRuleGroup",
+      "route53resolver:ListFirewallRules",
+      "route53resolver:GetFirewallRuleGroupAssociation",
+      "route53resolver:ListResolverQueryLogConfigs",
+      "route53resolver:GetResolverQueryLogConfig",
+      "route53resolver:GetResolverQueryLogConfigAssociation",
+      "route53resolver:ListTagsForResource",
+    ]
+    resources = ["*"]
+  }
+
+  # 一樣只准刪貼著 Layer = daily 的東西；不給任何 Create*、Tag*
+  # 任務定義不在這裡：它設了 skip_destroy，拆的時候不去 AWS 註銷（E123 定案 7）
+  statement {
+    sid    = "DeleteDailyRuntime"
+    effect = "Allow"
+    actions = [
+      "ec2:DeleteNatGateway",
+      "ec2:DisassociateAddress",
+      "ec2:ReleaseAddress",
+      "elasticloadbalancing:DeleteListener",
+      "elasticloadbalancing:DeleteLoadBalancer",
+      "elasticloadbalancing:DeleteTargetGroup",
+      # 刪服務前 Terraform 先把任務數改成 0（UpdateService），等任務都停了才刪
+      "ecs:UpdateService",
+      "ecs:DeleteService",
+      "ecs:DeleteCluster",
+      "route53resolver:DisassociateFirewallRuleGroup",
+      "route53resolver:DeleteFirewallRule",
+      "route53resolver:DeleteFirewallRuleGroup",
+      "route53resolver:DeleteFirewallDomainList",
+    ]
+    resources = local.daily_runtime_resources
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Layer"
+      values   = ["daily"]
+    }
+  }
+
+  # DNS 查詢日誌的設定在長期層（貼的是 persistent），每日層只有「接上 VPC」那條線
+  # 只准拆那條線、只限這一個設定；刪設定本身在下面明文 Deny
+  statement {
+    sid       = "DetachDnsQueryLogging"
+    effect    = "Allow"
+    actions   = ["route53resolver:DisassociateResolverQueryLogConfig"]
+    resources = [aws_route53_resolver_query_log_config.dns.arn]
+  }
+
   # ---- 以下是明文 Deny：之後不管加了什麼允許，長期層都碰不到（Deny 一定贏過 Allow）----
 
   # 三張表：不准刪表、不准關刪除保護（UpdateTable）、不准關時光機、不准改資料
@@ -237,6 +328,65 @@ data "aws_iam_policy_document" "destroy_permissions" {
       "iam:DeleteRolePermissionsBoundary",
     ]
     resources = [aws_iam_role.destroy.arn]
+  }
+
+  # 第三批（E123）：Gateway 的兩個角色、告警、日誌、DNS 查詢日誌的設定，一樣碰不到
+  statement {
+    sid    = "DenyGatewayRolesChange"
+    effect = "Deny"
+    actions = [
+      "iam:DeleteRole",
+      "iam:UpdateRole",
+      "iam:UpdateAssumeRolePolicy",
+      "iam:PutRolePolicy",
+      "iam:DeleteRolePolicy",
+      "iam:AttachRolePolicy",
+      "iam:DetachRolePolicy",
+      "iam:PutRolePermissionsBoundary",
+      "iam:DeleteRolePermissionsBoundary",
+    ]
+    resources = [aws_iam_role.task_execution.arn, aws_iam_role.task.arn]
+  }
+
+  statement {
+    sid    = "DenyAlertsChange"
+    effect = "Deny"
+    actions = [
+      "sns:DeleteTopic",
+      "sns:SetTopicAttributes",
+      "sns:AddPermission",
+      "sns:RemovePermission",
+      "cloudwatch:DeleteAlarms",
+      "cloudwatch:PutMetricAlarm",
+      "cloudwatch:DisableAlarmActions",
+    ]
+    resources = [aws_sns_topic.alerts.arn, aws_cloudwatch_metric_alarm.audit_write_failed.arn]
+  }
+
+  statement {
+    sid    = "DenyPersistentLogsChange"
+    effect = "Deny"
+    actions = [
+      "logs:DeleteLogGroup",
+      "logs:PutRetentionPolicy",
+      "logs:DeleteRetentionPolicy",
+      "logs:PutMetricFilter",
+      "logs:DeleteMetricFilter",
+    ]
+    # 日誌群組的 ARN 在 IAM 裡有兩種寫法（結尾有沒有 :*），兩種都列，Deny 才不會漏
+    resources = [
+      aws_cloudwatch_log_group.gateway.arn,
+      "${aws_cloudwatch_log_group.gateway.arn}:*",
+      aws_cloudwatch_log_group.dns_queries.arn,
+      "${aws_cloudwatch_log_group.dns_queries.arn}:*",
+    ]
+  }
+
+  statement {
+    sid       = "DenyQueryLogConfigDelete"
+    effect    = "Deny"
+    actions   = ["route53resolver:DeleteResolverQueryLogConfig"]
+    resources = [aws_route53_resolver_query_log_config.dns.arn]
   }
 
   statement {

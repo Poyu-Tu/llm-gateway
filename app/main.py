@@ -4,6 +4,7 @@ import os
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
+from functools import lru_cache
 
 from botocore.client import BaseClient
 from botocore.exceptions import BotoCoreError, ClientError
@@ -14,6 +15,7 @@ from pydantic import BaseModel, Field
 from app.audit import save_audit, hash_prompt, make_summary, mask, detect_pii_types
 from app.auth import extract_bearer_token, find_user_id, hash_api_key
 from app.db import make_dynamodb_client
+from app.openai_auth import make_openai_client, read_openai_auth
 from app.config import CONFIG_PATH, GatewayConfig, load_config
 from app.router import choose_model
 from app.pricing import ModelNotConfiguredError, cost_micro_usd, find_model_config
@@ -29,6 +31,9 @@ OPENAI_MAX_RETRIES = 0
 # 強模型寫滿輸出上限 2,000 個 tokens 約 32 秒（實測每秒約 62 個），30 秒會逾時
 OPENAI_TIMEOUT_SECONDS = 60
 
+# 向 OpenAI 證明身分的方式也在啟動時就確認：沒設或寫錯，Gateway 直接起不來（不等第一個請求才出錯）
+OPENAI_AUTH = read_openai_auth()
+
 # 說明頁（/docs、/redoc、/openapi.json）一律關閉：使用者用不到，只會把 API 的地圖交給想攻擊的人
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -41,8 +46,10 @@ class ChatRequest(BaseModel):
 
 
 # 領用窗口：OpenAI 連線（測試時會換成假的）
+# 整個程式共用一個：身分聯盟換來的通行證可用 1 小時，每個請求都新建就要每次重換、多兩趟網路
+@lru_cache(maxsize=1)
 def get_client() -> OpenAI:
-    return OpenAI(max_retries=OPENAI_MAX_RETRIES, timeout=OPENAI_TIMEOUT_SECONDS)
+    return make_openai_client(OPENAI_AUTH, OPENAI_MAX_RETRIES, OPENAI_TIMEOUT_SECONDS)
 
 
 # 領用窗口：HMAC 金鑰，從環境變數讀取，不寫在程式裡

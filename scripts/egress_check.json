@@ -1,0 +1,12 @@
+{
+  "containerOverrides": [
+    {
+      "name": "gateway",
+      "command": [
+        "python",
+        "-c",
+        "import socket\nfor host in ['api.openai.com', 'example.com']:\n    try:\n        socket.getaddrinfo(host, 443)\n    except OSError as error:\n        print(f'EGRESS {host}: DNS lookup failed ({type(error).__name__}: {error})', flush=True)\n        continue\n    try:\n        socket.create_connection((host, 443), timeout=5).close()\n        print(f'EGRESS {host}: DNS answered and TCP 443 connected', flush=True)\n    except OSError as error:\n        print(f'EGRESS {host}: DNS answered but TCP 443 failed ({type(error).__name__})', flush=True)\n"
+      ]
+    }
+  ]
+}
