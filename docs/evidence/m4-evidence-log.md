@@ -1648,6 +1648,260 @@ ALB 閒置逾時 120 秒（E115）；ALB 健康檢查打 `/health`、開部署�
 - `aws sns subscribe --topic-arn (terraform -chdir=infra/persistent output -raw alerts_topic_arn) --protocol email --notification-endpoint (Read-Host)`，之後 `cls`；本人點信裡的確認連結
 - 確認（不印信箱）：`list-subscriptions-by-topic --query "Subscriptions[].[Protocol,SubscriptionArn=='PendingConfirmation']"` → `email   False`
 
+### 推送與 PR #13（本人執行，Claude 截圖與讀頁面，17:25～17:43）
+
+| 步驟 | 結果 |
+|---|---|
+| commit | `fc06c61` `feat: add NAT, DNS firewall, ALB and Fargate to the daily layer`（22 個檔、`1203 insertions(+), 6 deletions(-)`，父 `dfc49f8`） |
+| `git push -u origin feat/m4-daily-runtime` | `* [new branch]`、追蹤設好 |
+| PR #13 | Claude 在自己的分頁填標題與說明，本人按 Create；6 個檢查全綠（`Config scan`、`Image scan`、`Tests` 三個必要＋CodeQL 三個），沒有衝突 |
+| 合併 | 本人按 Merge（merge commit），`main` = **`b259965`**；本機 `git switch main`、`git pull`（`dfc49f8..b259965` Fast-forward）、本機與遠端分支刪除 |
+| PR 說明的規則（本人 17:31 提出） | PR 說明一律中文；PR 與 commit 都不附 Claude 署名或對話連結。查過：署名從 PR #11 開始出現（#11、#12、#13），commit 都沒有。三個 PR 的說明由 Claude 在編輯框改好、本人按 Update comment，改後重讀確認沒有署名。已寫進 Project 指示 |
+
+**D 段的程式與設定到此全部進 `main`，但每日層的 D 段資源還沒 apply**（會計費的 NAT、ALB、Fargate、DNS 防火牆都還沒建）。剩下：建映像推 ECR → 每日層 apply → 驗證 → S08～S11 → destroy。
+
+**10/19 01:25 討論：** 本人問能否在公司電腦做剩下的步驟。照 D34（登入 AWS 與 `plan`／`apply` 只在個人電腦）維持在個人電腦；理由之一是 ALB 只開給 `admin_cidr`，在公司電腦會變成全公司共用的對外 IP。
+
+## E124. D 段上雲與 E 段驗收：映像、apply、身分聯盟、DNS 防火牆、S08～S11、告警、模擬器、destroy（2026-10-19 19:40～22:45）
+
+**依據：** E123（D 段九項定案與程式）；決策書 3.5、4.1、4.5、6.4、7.1、11.4、11.5。
+
+**目的：** 把 D 段真的建在 AWS 上，證明「雲端跑通與本機相同的流程」與「受控出口」，拍 S08～S11，測告警，當天拆掉。
+
+**結果一句話：** 36 個資源上雲；雲端沒有 OpenAI 金鑰也叫得到模型；容器實際查的網域剛好是放行清單 9 個；切 BLOCK 後名單外的網域連地址都查不到，查詢日誌留下紀錄；S08～S11 到齊；告警 1 分鐘內寄信；destroy workflow 拆掉 35 個、卡在 EIP（權限設計漏洞），本機補拆，AWS 確認拆光。計費約 1 小時 50 分。
+
+### 0. 簡報 PR #15（19:40～19:48，本人執行，Claude 填 PR 說明）
+
+| 步驟 | 結果 |
+|---|---|
+| 分支 `docs/slides-v3`，只 add 三個檔 | `d89737b`（`3 files changed, 87 insertions(+)`）：10 分鐘簡報 v3（2,132,078 bytes）、`slides-changelog.md`、重截的 `s06-cost-savings.png`；證據紀錄與多餘的 v2.1 沒有加 |
+| PR #15（中文說明、不附署名） | 6 個檢查全綠。10/19 之後第一個 PR：CodeQL（python）49 秒正常；途中出現一次灰色的「Code scanning results：1 configuration not found」，跑完變成「No new alerts」，是過渡狀態 |
+| 合併 | `main` = **`90ed268`**；本機與遠端分支刪除；多餘的 `llm-gateway-slides-10min-v2.1.pptx` 刪除 |
+
+### 1. 映像與 ECR（19:51～20:29）
+
+| 步驟 | 結果 |
+|---|---|
+| 標籤 | 用當下 `main` 的 `90ed268`（`git rev-parse --short HEAD` 存進 `$tag`，不手打）。`app/` 與 `b259965` 相同，#14、#15 只動了文件與 `scripts/` 的標籤字 |
+| 第一次建置 | `docker build --platform linux/amd64` 成功，但結尾有 `exporting attestation manifest`、`exporting manifest list`：Docker 預設多附出廠證明，推上去會是「目錄（image index）」格式；子層沒有標籤，可能被 ECR「沒標籤 1 天」的清理規則清掉 |
+| 重建 | 加 `--provenance=false --sbom=false`，結尾只剩 `exporting manifest`、`exporting config`（全部快取，幾秒） |
+| ECR 登入第一次 | `aws ecr get-login-password … \| docker login --password-stdin` 兩次都 `login attempt … failed with status: 400 Bad Request` |
+| 查原因 | `$PSVersionTable.PSVersion.Major` = **5**；密碼存進變數後長度 **2252**（正常）→ 壞在 PowerShell 5 把一個程式的輸出經管線交給另一個程式時會重新編碼 |
+| ECR 登入第二次 | `docker login --username AWS --password $pw …` → `Login Succeeded`（黃字警告 `--password` 不安全；權杖 12 小時、只能拉推映像）；`Remove-Variable pw` |
+| 推送 | 8 層 `Pushed`；`90ed268: digest: sha256:96c54173…`，與本機相同 |
+| 格式 | `imageManifestMediaType` = `application/vnd.oci.image.manifest.v1+json`（單一映像） |
+| 掃描 | `describe-images` 的掃描欄位是 `null`，但 `describe-image-scan-findings` 是 `COMPLETE`；帳號層級 `BASIC`、沒有規則 → 靠倉庫的 `scan_on_push`，有運作 |
+| 掃描結果 | **HIGH 3、MEDIUM 9、LOW 3**，沒有 CRITICAL |
+
+**三個 HIGH（Claude 查 Debian 安全追蹤頁）：**
+
+| CVE | 套件 | Debian 13 狀態 | 會不會碰到 Gateway |
+|---|---|---|---|
+| CVE-2026-85091 | zlib `1.3.dfsg+really1.3.1-1` | 沒有修補版 | 漏洞在 `gzprintf()`；Gateway 不寫 `.gz` |
+| CVE-2026-5435 | glibc `2.41-12+deb13u4` | 沒有修補版，`<no-dsa>`（Minor issue） | 漏洞在印 DNS TSIG 紀錄的舊函式；不呼叫 |
+| CVE-2026-19499 | glibc `2.41-12+deb13u4` | 沒有修補版，`<no-dsa>`（Minor issue） | 漏洞在 `strfmon()`；Gateway 算錢用整數 |
+
+**決定：** 上雲。三個都是上游沒有修補、換指紋也修不掉，且卡在用不到的函式；與 CI 只擋「有修補版的 HIGH、CRITICAL」一致（D62）。等 Debian 出修補再換基底映像指紋。
+
+### 2. 每日層 apply（20:42～20:49）
+
+| 步驟 | 結果 |
+|---|---|
+| `admin_cidr` | `$env:TF_VAR_admin_cidr = "$((Invoke-RestMethod http://checkip.amazonaws.com).Trim())/32"`：查到就存，不印 IP（本人打成 `http://`，一樣查得到） |
+| `plan -var="image_tag=$tag"` | `Plan: 36 to add, 0 to change, 0 to destroy.`，與 E123 的試算相同 |
+| `apply` | `Apply complete! Resources: 36 added`；ALB 2 分 32 秒；**ECS 服務 1 分 8 秒穩定**（等於：經 NAT 拉到映像、三個 SSM 參數交給容器、唯讀根目錄下啟動、ALB 健康檢查通過）；任務定義 `llm-gateway:1`；**計費約 20:49 開始** |
+
+### 3. 跑通（20:50～21:13）
+
+| 步驟 | 結果 |
+|---|---|
+| `/health` | `HTTP/1.1 200 OK`、`{"status":"ok"}`、`server: uvicorn`（20:50:53）；只放行本人 IP 的 ALB 連得進去 |
+| 灌雲端資料 | 專案的 boto3 讀不了 `aws login` 的登入狀態（同 E123 破壞實驗 1）→ `aws configure export-credentials --format powershell \| Out-String \| Invoke-Expression` 把臨時憑證放進環境變數；`DYNAMODB_TARGET=aws` 跑 `scripts.seed`，輸出整段收進變數，alice、bob 的 Key 各存一個變數，只印長度 `67`、`67` |
+| **真的聊天** | `Say good morning in French` → `reply : Bonjour !`、`model : gpt-6-luna`（request_id `7edb67af-…`）。**雲端沒有 OpenAI 金鑰**：任務角色向東京 STS 要 5 分鐘的身分證明、換 OpenAI 通行證；**SSM 放 `user-…` 這個服務帳號 ID 是對的**（E123 的假設成立） |
+| 雲端稽核（第一次） | `RuntimeError: Credentials were refreshed, but the refreshed credentials are still expired.`：20:55 匯出的臨時憑證約 15 分鐘就過期，Python 不會自己續期 |
+| 重新登入也失敗 | `aws login` 之後再匯出仍 `still expired`：**環境變數比 `aws login` 優先**，CLI 先拿到的是過期的那組 |
+| 定下的做法 | 跑 Python 查雲端前 `Get-ChildItem Env:AWS_* \| Remove-Item` → 匯出 → 跑 → 再清掉，讓 `aws`、`terraform` 用回 `aws login` |
+| 雲端稽核 | `status: ok`、`user_id: bob`、`charged: True`、**`cost_micro_usd: 4`**（12 × 0.1 ＋ 5 × 0.5 = 3.7 → 4）、`model`／`routed_model`／`provider_model: gpt-6-luna`、`route_reason: default`、`fallback: False`、`finish_reason: stop`、`pii_types: []`、64 字 `prompt_hash`、`summary`、`timestamp: 2026-10-19T13:01:32Z` |
+
+### 4. DNS 防火牆：先告警、後阻擋（21:26～21:55）
+
+**ALERT 一小時的查詢日誌（`/llm-gateway/dns-queries`）：**
+
+| 次數 | 網域 |
+|---|---|
+| 160 | `logs.ap-northeast-1.amazonaws.com` |
+| 各 2 | `dynamodb…`、`prod-ap-northeast-1-starport-layer-bucket.s3…`、`auth.openai.com`、`sts.ap-northeast-1…`、`<account-id>.dkr.ecr…`、`ssm…`、`api.openai.com`、`api.ecr…` |
+
+- **容器查過的網域剛好就是放行清單 9 個，一個不多、一個不少**；不用改清單
+- 1 筆轉不成 JSON：CloudWatch 建立紀錄時寫的測試訊息（`Permissions are set correctly…`），不是 DNS 查詢
+- 整段沒有任何一筆帶 `firewall` 欄位：放行規則判定通過的查詢不記防火牆欄位，只有 ALERT／BLOCK 才記 → 這段時間沒有查詢落到清單外
+
+**切 BLOCK：**
+
+| 步驟 | 結果 |
+|---|---|
+| 第一次 `apply -var="dns_firewall_action=BLOCK"` | 計畫 `3 to change`，比預期多 2 個 → 本人先答 `no` |
+| 查原因（計畫寫進 `infra\daily\block.tfplan`，`*.tfplan` 被 `.gitignore` 擋；Claude 讀完、本人刪掉） | 放行清單 9 個網域、全部網域清單的 `*`：**AWS 存網域時會在結尾補一個點**（`api.openai.com.`、`*.`），Terraform 拿程式裡沒有點的版本比，以為被改過；內容相同、無害，但每次 plan 都會出現 |
+| 第二次 apply | `Apply complete! Resources: 0 added, 3 changed, 0 destroyed.` |
+| BLOCK 後再聊天 | `Say thank you in Japanese` → `gpt-6-luna`、`(Arigatō)`（日文在 PowerShell 5 顯示成亂碼）→ **放行清單在 BLOCK 下是完整的** |
+
+**出口檢查（S08）：**
+
+| 步驟 | 結果 |
+|---|---|
+| 第一次 `.\scripts\egress_check.ps1` | `Error handling -chdir option: chdir $tf: The system cannot find the file specified` ×4、`--cluster: expected one argument`：**PowerShell 不會展開 `-chdir=$tf` 裡的變數**（`-` 開頭的字串被當成參數名稱原樣交出）。沒有建出任何東西 |
+| 修正 | Claude 把四行改成 `terraform "-chdir=$tf" output …`（1,243 → 1,251 bytes，BOM 保留）；之前給的指令都是寫死 `-chdir=infra/daily`，所以沒踩到 |
+| 第二次（先不錄） | `EGRESS api.openai.com: DNS answered and TCP 443 connected`；`EGRESS example.com: DNS lookup failed (gaierror: [Errno -5] No address associated with hostname)` |
+| 查詢日誌 | 13:53:44Z 4 筆 `BLOCK`、`NOERROR`：`example.com.` 的 A、AAAA，與 `example.com.ap-northeast-1.compute.internal.` 的 A、AAAA（Linux 查不到時自動接 VPC 內部網域再試，`*` 一起擋）→ **證明防火牆真的在運作並留紀錄**（回答 ALERT 階段「沒看到 firewall 欄位」的疑問） |
+| 錄影（終端機的 PowerShell） | 先 `function prompt {"PS> "}`、`$since`、兩個查詢包成 `Show-Egress`、`Show-DnsBlocked`、`cls`；錄 `m4-s08-egress-control.mp4`（本人電腦，不進 repo）：任務 `2cf4e901…`、同樣兩行 `EGRESS`、同樣 4 筆 `BLOCK` |
+
+### 5. S08～S11 截圖（本人 `Win`+`Shift`+`S` 貼給 Claude，Claude 裁掉空白、放進 `docs/screenshots/`、核對尺寸）
+
+| # | 檔名 | 內容 |
+|---|---|---|
+| S08 | `s08-egress-control.png` | 兩行 `EGRESS` ＋ 4 筆 `BLOCK`／`NOERROR` |
+| S09 | `s09-no-public-ip.png` | 服務 `assignPublicIp` = `DISABLED`；正在跑的任務網卡 `PublicIp` = `None`；子網 `llm-gateway-private-a`、`AutoAssignPublicIp` = `False` |
+| S10 | `s10-endpoints.png` | 新腳本 `scripts/show_egress_controls.ps1`：DynamoDB 走廊只准 `GetItem`／`PutItem`／`UpdateItem` 三張表；S3 走廊只准 `GetObject` ECR 映像層 bucket；DNS 防火牆 100 `ALLOW`、200 `BLOCK`／`NODATA`；9 個網域（帳號 ID 換成 `<account-id>`） |
+| S11 | `s11-part1-task-role.png`、`s11-part2-execution-role.png` | 新腳本 `scripts/show_gateway_roles.ps1`：任務角色 4 條、執行角色 4 條；**`Resource: *` 只有兩條，都是 AWS 規定不能指定資源的動作**：`ecr:GetAuthorizationToken`、`sts:GetWebIdentityToken`（後者有 audience `llm-gateway-capstone` 與 `DurationSeconds ≤ 300` 兩個條件） |
+
+- 傳到本人資料夾的 PNG 會被重新壓縮（大小不同），Claude 逐像素比對 S08：完全相同
+- 同一個暫存路徑第二次傳檔會送出舊內容（`show_egress_controls.ps1` 第一次是 2,031 的舊版），換新檔名重傳後 2,060、指紋一致
+
+### 6. 告警測試（22:20～22:27）
+
+- 新日誌串流 `alarm-test/<時間>`，寫一行 `{"event":"audit_write_failed","request_id":"alarm-test"}`（JSON 先寫進暫存檔，用 `file://` 交給 `put-log-events`，避開 PowerShell 5 的引號問題）→ `rejectedLogEventsInfo: null`
+- **22:21:18（14:21:18 UTC）`OK -> ALARM`**，約 1 分鐘；SNS 寄信到本人信箱
+- 22:27:18 `ALARM -> OK`（缺資料當成沒越線）
+- 信件截圖遮掉帳號 ID、告警與主題 ARN，存 `docs/screenshots/m4-alarm-email.png`（佐證，不佔 S 編號）
+
+### 7. destroy 角色模擬器第三批（22:26）
+
+新腳本 `scripts/simulate_destroy_role.ps1`（只印題目與結果，不印帳號 ID 與 ARN）：10 題全部符合預期，截圖 `docs/screenshots/m4-destroy-role-simulator.png`。
+
+| # | 題目 | 結果 |
+|---|---|---|
+| 1、2、4 | 拆 NAT、ALB、ECS 叢集（`daily`） | `allowed` |
+| 3、5 | 拆 ALB（沒標籤）、DNS 防火牆規則群組（`persistent`） | `implicitDeny` |
+| 6～9 | 刪 Gateway 任務角色、告警 SNS 主題、Gateway 日誌群組、DNS 查詢日誌設定 | `explicitDeny` |
+| 10 | 把查詢日誌從 VPC 拆開 | `allowed` |
+
+**限制：** 沒有出 `ec2:DisassociateAddress` 這一題 → 下面第 9 節的漏洞沒有被抓到。
+
+### 8. 延遲與記憶體（決策書 12.5「上雲後量一次」）
+
+| 項目 | 結果 |
+|---|---|
+| `/health` 5 次（台灣 → 東京 ALB → 容器） | 113、41、41、42、42 ms |
+| 聊天 3 次（`Say hi`） | 3,538、1,956、1,747 ms；多數時間在等 OpenAI |
+| 容器記憶體（ECS `MemoryUtilization`，兩小時最高） | 約 14.8%（512 MiB 的 14.8% ≈ 76 MiB）；平均值被畫面上的其他視窗擋住，沒有記到 |
+
+### 9. 拆除（22:32～22:41）
+
+| 步驟 | 結果 |
+|---|---|
+| destroy workflow（本人從 `main` 按 Run workflow，`destroy #2`） | **3 分 31 秒失敗**。ECS 服務 2 分 36 秒（先等任務停）、網際網路閘道 1 分 33 秒、ALB 17 秒、**VPC 拆掉了**（NAT 已不在）；最後 `Error: disassociating EC2 EIP (eipassoc-…): … not authorized to perform: ec2:DisassociateAddress on resource: arn:aws:ec2:ap-northeast-1:***:*/*` |
+| 原因 | NAT 先拆、EIP 最後拆；帳本裡還記著 EIP 掛在 NAT 上，Terraform 先呼叫 `DisassociateAddress`（其實已自動脫離，只是過場）。**AWS 先檢查權限、再檢查東西在不在**；這個動作的資源是 `*/*`，沒有標籤，而 destroy 角色把它放在「限 `Layer=daily`」那一條 → 條件永遠不成立 |
+| 本機補拆 | `state list` → `destroy`：`Plan: 0 to add, 0 to change, 1 to destroy`（`aws_eip.nat`）→ `Destroy complete! Resources: 1 destroyed.`（約 22:38） |
+| 確認拆光（問 AWS） | 每日層帳本空；`daily` 標籤的 NAT、EIP、VPC 都沒有；`llm-gateway` 的 ALB、DNS 防火牆規則群組沒有；ECS 叢集 `INACTIVE` |
+| 修法（下一個 PR） | destroy 角色把 `ec2:DisassociateAddress` 從限標籤那一條移出，另寫一條、`Resource "*"`、不加標籤條件（跟 `ecr:GetAuthorizationToken` 同類：AWS 沒辦法指定資源）。代價：destroy 角色可以把帳號裡任何一個公開 IP 從機器上拔下來，但**刪不掉**（`ReleaseAddress` 仍限 `daily`）；帳號裡只有這個專題的 IP。套用後模擬器補一題 |
+| 實測限制 | 修好之後，要等下一次真的 apply 每日層再按 destroy，才算實測過「一鍵拆光」；M5 開工時順便驗。在那之前每次 destroy 完都要問 AWS 確認 |
+
+### 10. 收尾
+
+- OpenAI 端：10/14 探測用的對應（`sub` 是本人的 IAM 使用者）刪除（本人按，22:44）；Claude 重讀頁面確認只剩 `gateway-task-role`
+- **計費：** 約 20:49～22:38，約 1 小時 50 分，估約 US$0.22（Cost Explorer 隔天才準）
+- **OpenAI 呼叫：** bob 5 次（`Bonjour`、`Arigatō`、`Say hi` 3 次；第一次打錯參數的那次沒有送出）；出口檢查只連 TCP，不呼叫模型
+
+### 證明了什麼（D、E 段）
+
+- 雲端跑通與本機相同的流程：驗 Key、讀額度、遮罩、路由、呼叫、扣額度、寫雲端稽核
+- **OpenAI 工作負載身分聯盟在 Fargate 上可用**：雲端不放 OpenAI 金鑰
+- **受控出口成立**：容器實際只查 9 個網域；BLOCK 後名單內的照通、名單外的連地址都查不到，查詢日誌留下 `BLOCK` 紀錄
+- 容器沒有公開 IP、在私有子網；兩條走廊只准特定動作與資源；兩個角色的權限都指定資源（兩個例外有理由）
+- 稽核寫不進去的告警會寄信
+- destroy 角色的 Deny 保護長期層（模擬器）；但「一鍵拆光」這次沒有成功
+
+### 限制（誠實記錄）
+
+- 三個 HIGH 弱點沒有修補版，帶著上雲
+- DNS 防火牆只管 DNS：程式直接用 IP 連線擋不到（7.9 的殘餘風險，這次沒有測）
+- ALERT 只觀察了約一小時、一種流量（啟動＋聊天）；強模型、降級、限流的路徑沒有走過
+- 延遲只量了幾次、從台灣量；記憶體只有最高值
+- 告警測試用的是手寫的假日誌，不是 Gateway 真的寫不進稽核
+- destroy workflow 第二次實測失敗，修正後還沒實測
+- 雲端的 alice、bob Key 只存在當時的 PowerShell 變數裡；表在長期層，Key 的雜湊還在 `api_keys` 表
+
+### 面試可用的說法
+
+- 「我的 Gateway 在雲端沒有放 OpenAI 的金鑰。容器用自己的 IAM 角色向 AWS 要一張 5 分鐘的身分證明，拿去跟 OpenAI 換通行證；角色的權限只准開給 OpenAI 那個對象、最多 300 秒。」
+- 「DNS 防火牆我先開告警模式跑了一小時，整理容器實際查過的網域，剛好就是我放行的 9 個，才切成阻擋。切完我故意去連 example.com：DNS 連地址都不給，查詢日誌記下了 BLOCK。」
+- 「一鍵拆除第二次實測失敗了。原因是拆公開 IP 前要先把它從 NAT 上拔下來，這個動作 AWS 沒辦法指定資源，而我把它放在『只能動 daily 標籤的東西』那一條，條件永遠不成立。模擬器 10 題全對，但沒出到這一題。我在本機補拆、問 AWS 確認拆光，再把這個動作改成不限標籤，代價是它能拔任何 IP、但刪不掉。」
+- 「AWS 會在網域結尾自動補一個點，Terraform 以為被改過，每次都想改回去。內容一樣、無害，但我把程式改成跟 AWS 一樣的寫法，讓 plan 乾淨，真的改動才不會被淹沒。」
+
+
+## E125. 修正 PR：destroy 角色拔公開 IP、DNS 網域結尾加點、模擬器補到 12 題（2026-10-20 00:40～）
+
+**依據：** E124 第 4 節（網域結尾的點）、第 7 節（模擬器沒出到的題目）、第 9 節（destroy #2 卡在 `ec2:DisassociateAddress`）。
+
+**目的：** 把 E124 找到的兩個問題改進程式，長期層套用 destroy 角色的新權限，模擬器補考，連同 E124 的截圖、腳本、證據一起走一個 PR。
+
+**結果一句話：** destroy 角色多一條 `DisassociateAnyAddress`（`Resource "*"`、不加標籤條件），長期層 apply 1 個改動；模擬器 12 題全對；DNS 網域改成結尾有點。「一鍵拆光」要等下一次 apply 每日層才實測得到。
+
+### 1. 改了什麼（分支 `fix/m4-destroy-eip`）
+
+| 檔案 | 改動 | 為什麼 |
+|---|---|---|
+| `infra/persistent/github_oidc.tf` | `ec2:DisassociateAddress` 從 `DeleteDailyRuntime`（限 `Layer = daily`）移出，另寫 `sid = "DisassociateAnyAddress"`、`resources = ["*"]`、不加條件，附註解（代價：能把帳號裡任何一個公開 IP 從機器上拔下來，但刪不掉，`ReleaseAddress` 仍限 `daily`） | AWS 檢查這個動作時資源是 `*/*`，沒有標籤可比，限標籤的條件永遠不成立（E124 第 9 節） |
+| `infra/daily/dns_firewall.tf` | 放行清單 9 個網域結尾加點（`api.openai.com.`；ECR 那個也是），全部網域清單 `*` 改 `*.`，附註解 | AWS 存成結尾有點，Terraform 每次 plan 都以為被改過（E124 第 4 節） |
+| `scripts/simulate_destroy_role.ps1` | 加第 11 題（`ec2:DisassociateAddress` 對 `*`、沒標籤 → `allowed`）、第 12 題（`ec2:ReleaseAddress` 對 `elastic-ip/eipalloc-test`、沒標籤 → `implicitDeny`） | 補考 E124 漏掉的題目；第 12 題證明「拔得掉、刪不掉」 |
+
+### 2. 檢查（00:43～00:47，個人電腦）
+
+- `terraform fmt -check -recursive infra`：什麼都沒印（Claude 也在自己的環境用格式檢查工具確認兩個改過的檔，exit 0）
+- `terraform -chdir=infra/persistent validate`、`terraform -chdir=infra/daily validate`：都是 `Success! The configuration is valid.`
+
+### 3. 長期層 plan → apply（00:48～00:51；`aws login`，先清 `AWS_*` 環境變數）
+
+| 步驟 | 結果 |
+|---|---|
+| plan | 只有 `aws_iam_role_policy.destroy` 原地更新（`~`）：`DeleteDailyRuntime` 的動作清單少了 `ec2:DisassociateAddress`（`ReleaseAddress`、`DeleteNatGateway` 還在）；新增 `DisassociateAnyAddress`（`Action = "ec2:DisassociateAddress"`、`Resource = "*"`）；`Plan: 0 to add, 1 to change, 0 to destroy.` |
+| apply | `Modifications complete after 1s`；`Apply complete! Resources: 0 added, 1 changed, 0 destroyed.`（免費：IAM 不收錢） |
+
+### 4. 權限模擬器補考（00:52）
+
+`scripts/simulate_destroy_role.ps1`：**12 題全部 `O`**（截圖 `docs/screenshots/m4-destroy-role-simulator.png` 覆蓋舊的 10 題版）。
+
+| # | 題目 | 預期 | 結果 |
+|---|---|---|---|
+| 1～10 | 同 E124 第 7 節 | — | 跟上次相同，全對 |
+| 11 | 把公開 IP 從機器上拔下來（`ec2:DisassociateAddress`、資源 `*`、沒標籤） | `allowed` | `allowed` |
+| 12 | 刪公開 IP（`ec2:ReleaseAddress`、沒標籤） | `implicitDeny` | `implicitDeny` |
+
+### 5. 每日層
+
+- 帳本是空的（E124 拆光），plan 看不出「點」修好沒；下一次 apply 每日層時，切 BLOCK 的 plan 應該只剩動作那一個改動
+- 「一鍵拆光」同樣要等下一次 apply 再按 destroy workflow 才算實測（M5 開工時）
+
+### 6. PR
+
+（合併後補：PR 編號、檢查結果、`main` 的新 commit、Config scan 對 `Resource "*"` 有沒有意見）
+
+### 證明了什麼
+
+- destroy 角色現在「拔得掉任何公開 IP、刪不掉沒標籤的公開 IP」（模擬器第 11、12 題）
+- 長期層的保護沒有被這次改動打開（第 5～9 題照舊 `implicitDeny`／`explicitDeny`）
+
+### 限制（誠實記錄）
+
+- 模擬器只問「這張卡刷這扇門會不會開」，不是真的拆；真的拆要等下一次 apply
+- 第 11 題的資源用 `*`：模擬器這樣問跟 AWS 真的檢查時一樣，但沒有用真的 EIP 測
+- DNS 結尾加點只確認語法；實際有沒有消除假改動要等下一次 apply
+
+### 面試可用的說法
+
+- 「模擬器 10 題全對，真的拆還是卡住，因為我沒出到那一題。修好之後我補了兩題：一題證明拔得掉，一題證明沒標籤的刪不掉，讓放寬的那條權限有邊界。」
+
+
 ---
 
 ## 決策書 v2.10 待改項目
@@ -1675,10 +1929,13 @@ ALB 閒置逾時 120 秒（E115）；ALB 健康檢查打 `/health`、開部署�
 | 19 | 4.2（CI/CD 層）、5.1、D20、11.4 的 S11 | GitHub OIDC 提供者與 `llm-gateway-destroy` 角色放長期層；只有 environment `destroy`（只准 `main`）借得到，`sub` 用 2026/7/15 後的新格式（`repo:Poyu-Tu@<owner-id>/llm-gateway@<repo-id>:environment:destroy`）；權限分批長，第一批只有每日層帳本兩個檔，並先寫明文 Deny 擋長期層；environment 取消管理員略過；`oidc-check.yml` 實測：沒掛 environment 被 AWS 拒、從分支觸發被 GitHub 擋（E120） |
 | 20 | 3.5、D13、D16、5.1、PART 9「IaC」 | 每日層骨架：VPC `10.0.0.0/16`、公有子網 1a／1c（不自動發公開 IP）、私有子網 1a、網際網路閘道放 C 段；安全群組 `alb`（80 只准本人 IP）、`gateway`（8000 只准從 ALB、出 443）；AWS-0104 以 `trivy:ignore` 刻意接受（12/31）；Endpoint Policy：S3 只准 ECR 映像層 bucket 的 `GetObject`、DynamoDB 只准三張表的 `GetItem`／`PutItem`／`UpdateItem`；跨層資料用寫死的表名加 `aws_caller_identity`；destroy workflow 下載官方 zip 比對 SHA256、證明存檔交給 Terraform 換憑證、`admin_cidr` 填 RFC 5737 位址；destroy 角色第二批：逐一列出的 `Describe` 與限 `Layer=daily` 標籤的刪除（E121） |
 | 21 | 5.1、D20、6.4、11.4 的 S11 | destroy workflow 實測：從 `main` 手動觸發，51 秒拆光每日層骨架 19 個資源，`state list` 為空；Terraform 不用第三方 Action（官方 zip＋SHA256）、OIDC 證明存檔交給 Terraform 換憑證、帳號 ID 以 `::add-mask::` 遮罩；destroy 角色的刪除權限限 `Layer=daily`，模擬器 5 題（E122） |
+| 22 | 3.5、4.1、4.5、5.1、6.4、7.1、7.9、D13、D16、D20、D25 | D 段設計（E123）：長期層加執行角色與任務角色（任務角色只 `PutItem` 稽核、`sts:GetWebIdentityToken` 限 audience `llm-gateway-capstone` 與 300 秒）、兩個日誌群組（30 天、防刪）、DNS 查詢日誌設定、`audit_write_failed` 告警與 SNS；每日層加 NAT（單一 AZ 1a）、DNS 防火牆（9 個網域放行、其他 `*` 預設 ALERT、可切 BLOCK＋NODATA）、ALB（閒置 120 秒、`/health`、HTTP 80 只開 `admin_cidr`）、Fargate（0.25 vCPU／0.5 GB、根目錄唯讀、斷路器回滾、沒有公開 IP、沒有 ECS Exec、任務定義 `skip_destroy`）；`app/openai_auth.py`：`OPENAI_AUTH` 分 `api_key`／`workload_identity`；SSM 三個參數由本人用 CLI 建；destroy 角色第三批；Trivy 豁免加 AWS-0053、AWS-0054、AWS-0095（12/31）；測試 325 個（E123）。**實測結果待 D 段 apply 後補**（實測見第 23 項） |
+| 23 | 3.5、4.1、4.5、6.4、7.9、8.2 的 M4、11.4（S08～S11）、12.5 | D、E 段實測（E124）：映像 `90ed268` 單一 OCI 格式（`--provenance=false --sbom=false`）、ECR 掃描 HIGH 3（都沒有修補版、用不到的函式，帶著上雲）；36 個資源、ECS 1 分 8 秒穩定；身分聯盟在 Fargate 可用、服務帳號 ID 是 `user-…`；ALERT 時容器只查 9 個放行網域、BLOCK 後名單外 `NODATA` 並記 `BLOCK`（含 `.compute.internal` 搜尋網域）；S08～S11 截圖與 S08 錄影；告警約 1 分鐘寄信；延遲 `/health` 約 41 ms、聊天 1.7～3.5 秒、記憶體最高約 14.8%（12.5 該列劃掉）；destroy workflow 卡在 `DisassociateAddress`，改為不限標籤、`Resource "*"`（E125：長期層 apply、模擬器 12 題）；網域改寫成結尾有點；新增 `scripts/show_egress_controls.ps1`、`show_gateway_roles.ps1`、`simulate_destroy_role.ps1`；本機操作規則：PowerShell 5 不用管線交 ECR 密碼、Python 查雲端前後清 `AWS_*` 環境變數、`-chdir` 加引號 |
+| 24 | 11.6、2.1、2.2、8.3、11.4 的 S06、12.5 | 簡報 v3 的改動：照 `docs/handoff/slides-v3-done-handoff.md` 第 3 節（10 分鐘版 v3 37 頁、版面規則補「概念頁 → 驗收畫面」與框線、錄影不嵌進報告版、2.1 架構圖對齊簡報第 7 頁、2.2 加一句對應簡報第 8 頁、S06 右下重截、12.5 加 PR #14 一列） |
 
 ---
 
-## 目前進度（2026-10-18 13:45）
+## 目前進度（2026-10-20 00:55）
 
 **M4 開工前準備全部完成**（10/14～10/15）：
 
@@ -1700,8 +1957,16 @@ ALB 閒置逾時 120 秒（E115）；ALB 健康檢查打 `/health`、開部署�
 - **E120 後半與截圖進 repo：** PR #10 合併，`main` = `8c36ed3`
 - **C 段開工（E121）：** 六項定案；`infra/daily/` 骨架、`destroy.yml`、destroy 角色第二批權限寫好（HCL 解析器檢查通過）
 - **C 段完成（E122）：** PR #11 合併（`main` = `6fcb525`）；長期層 apply（角色第二批權限）；模擬器 5 題；每日層 apply 19 個；`destroy #1` 51 秒拆光、帳本為空；**AWS 上只剩長期層 13 個資源，沒有在跳錶的東西**
-- 下一步：本筆與 3 張截圖進 repo（docs PR）→ **D 段**（NAT、DNS 防火牆、ALB、ECS Fargate，約 US$2.8／天，測完當天 destroy）
-- 下一筆證據是 **E123**
+- **C 段紀錄進 repo：** PR #12 合併，`main` = `dfc49f8`
+- **D 段開工（E123）：** 九項定案；`app/openai_auth.py`、ECS 角色、日誌與告警、NAT、DNS 防火牆、ALB、Fargate 寫好；`325 passed`；長期層 apply（免費資源）；SSM 三個參數、OpenAI 對應 `gateway-task-role`、SNS 訂閱完成
+- **PR #13 合併（10/18 17:40）：** `main` = **`b259965`**，6 個檢查全綠；**每日層 D 段還沒 apply，AWS 上沒有在跳錶的東西**
+- **簡報 PR #15 合併（10/19 19:48）：** `main` = `90ed268`
+- **D、E 段上雲與驗收（E124，10/19 19:51～22:45）：** 36 個資源、身分聯盟可用、受控出口成立（ALERT 收網域 → BLOCK → 出口檢查）、S08～S11 到齊、告警寄信、模擬器 10 題；destroy workflow 卡在 EIP，本機補拆，**AWS 確認拆光，沒有在跳錶的東西**
+- **修正 PR 開工（E125，10/20 00:40～）：** destroy 角色加 `DisassociateAnyAddress`、長期層 apply（1 個改動）、模擬器 12 題全對、DNS 網域結尾加點
+- 下一步（不花錢）：
+  1. **修正 PR（個人電腦）：** commit、push、PR、合併；E125 第 6 節補 PR 結果
+  2. **M4 結案：** `docs/milestones/m4-report.md`（問本人時數與 Cost Explorer 實際花費）、決策書 v2.10（本表 24 項）、練習本 `.tf` 各節第 3 句補實測、`slides-v2.1-start-handoff.md` 第 3 節（M4 成果、24.8% → 25.3%）
+- 下一筆證據是 **E126**
 
 ---
 
@@ -1728,9 +1993,11 @@ ALB 閒置逾時 120 秒（E115）；ALB 健康檢查打 `/health`、開部署�
 | ~~Dependabot 的 PR #4~~ | ✅ 10/17 Dependabot 自行關閉（分支已刪，E120） | — |
 | ~~environment 的新 `sub` 格式（E120）~~ | ✅ 10/17 `oidc-check` 印出 `repo:Poyu-Tu@62129723/llm-gateway@1394630828:environment:destroy`，與推定相同 | — |
 | ~~每日層的 destroy 要不要讀長期層的資料（E120）~~ | ✅ 10/17 表名寫死、帳號 ID 用 `aws_caller_identity`，角色不多開權限（E121） | — |
-| 主路由表、預設安全群組、預設網路 ACL（E122） | 用 `aws_default_route_table`、`aws_default_security_group`、`aws_default_network_acl` 認領：貼名字與 `Layer=daily`，預設安全群組規則清空（Trivy AWS-0173，LOW）；不認領也不影響 destroy | D 段 |
+| 主路由表、預設網路 ACL（E122） | 預設安全群組已在 D 段認領並清空規則（E123）；主路由表、預設網路 ACL 仍不認領，不影響 destroy | — |
 | Terraform 1.16.6（E122） | 過冷卻期後一起升：兩層 `versions.tf`、`destroy.yml` 的 `TF_VERSION` 與指紋 | M4 內 |
-| D 段的 destroy 權限（E122） | NAT、彈性 IP、DNS 防火牆、ALB、ECS、日誌群組、告警的刪除與 `Describe`，一樣限 `Layer=daily`；先模擬器再實測 | D 段 |
+| D 段的 destroy 權限（E122） | 第三批已套用、模擬器 10 題（E124）；**`ec2:DisassociateAddress` 不能限標籤**，10/20 改為 `Resource "*"` 並套用、模擬器 12 題（E125）；修正後的「一鍵拆光」待下一次 apply 實測 | M5 開工時實測 |
+| 映像的三個 HIGH（E124） | zlib CVE-2026-85091、glibc CVE-2026-5435、CVE-2026-19499：Debian 13 沒有修補版；等修補出來換基底映像指紋 | 每次建映像時看 ECR 掃描 |
+| DNS 防火牆網域結尾的點（E124） | 10/20 程式改寫成結尾有點（`api.openai.com.`、`*.`）（E125）；有沒有消除假改動待下一次 apply 看 plan | M5 開工時實測 |
 | `AWS-0132` 豁免（E118） | 12/31 到期，到期前決定改用 KMS 或延長 | 12/31 前 |
 | `usage` 表（E118） | M5 建；Endpoint Policy、IAM 要補 | M5 |
 | 供應商預算用完的告警（D32、E100） | M3 只記稽核的 `error_code` | M4～M6 |

@@ -6,10 +6,10 @@
 # 印出的是這次任務的 ARN；任務跑完幾秒就自己結束，不會一直計費
 
 $tf = "infra/daily"
-$cluster = terraform -chdir=$tf output -raw ecs_cluster_name
-$taskdef = terraform -chdir=$tf output -raw task_definition
-$subnet = terraform -chdir=$tf output -raw private_subnet_id
-$sg = terraform -chdir=$tf output -raw gateway_security_group_id
+$cluster = terraform "-chdir=$tf" output -raw ecs_cluster_name
+$taskdef = terraform "-chdir=$tf" output -raw task_definition
+$subnet = terraform "-chdir=$tf" output -raw private_subnet_id
+$sg = terraform "-chdir=$tf" output -raw gateway_security_group_id
 
 # 跟 Gateway 一樣：沒有公開 IP，對外只能走 NAT，查網域要過 DNS 防火牆
 aws ecs run-task --cluster $cluster --task-definition $taskdef --launch-type FARGATE `
