@@ -112,8 +112,8 @@ def main() -> None:
     candidates = [
         ("R0 10/12 以前的規則", replace(current, keywords=OLD_KEYWORDS)),
         ("R1 「比較」換成「請比較」「優缺點」", replace(current, keywords=keywords_r1)),
-        ("R2 現在的設定檔（10/13 定案）", current),
-        ("R3 現在的設定檔，字數門檻改成 500", replace(current, min_chars=500)),
+        ("R2 採用：現在的規則（300 字＋關鍵字，10/13 定案）", current),
+        ("R3 對照：字數門檻放寬到 500", replace(current, min_chars=500)),
     ]
 
     first = summarize(rows, current)
