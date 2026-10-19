@@ -211,7 +211,6 @@ data "aws_iam_policy_document" "destroy_permissions" {
     effect = "Allow"
     actions = [
       "ec2:DeleteNatGateway",
-      "ec2:DisassociateAddress",
       "ec2:ReleaseAddress",
       "elasticloadbalancing:DeleteListener",
       "elasticloadbalancing:DeleteLoadBalancer",
@@ -232,6 +231,18 @@ data "aws_iam_policy_document" "destroy_permissions" {
       variable = "aws:ResourceTag/Layer"
       values   = ["daily"]
     }
+  }
+
+  # 把公開 IP 從 NAT 上拔下來（E124）：Terraform 拆 EIP 前一定先呼叫 DisassociateAddress
+  # AWS 檢查這個動作時看不到是哪一個 IP（資源是 */*），也就沒有標籤可比；
+  # 放在上面那條（限 Layer = daily）條件永遠不成立，destroy #2 就卡在這裡
+  # 只能寫 "*"、不加條件。代價：拆除組能把帳號裡任何一個公開 IP 從機器上拔下來，
+  # 但刪不掉（ReleaseAddress 仍限 daily）；這個帳號只有本專題的 IP
+  statement {
+    sid       = "DisassociateAnyAddress"
+    effect    = "Allow"
+    actions   = ["ec2:DisassociateAddress"]
+    resources = ["*"]
   }
 
   # DNS 查詢日誌的設定在長期層（貼的是 persistent），每日層只有「接上 VPC」那條線

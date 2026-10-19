@@ -6,21 +6,23 @@
 
 locals {
   # 放行清單：一個一個寫完整網域，不寫 *.amazonaws.com（決策書 3.5 坑 1：攻擊者自己帳號的 S3 也在那底下）
+  # 每個網域結尾都有一個點（DNS 的正式寫法）：AWS 存的時候會自動補，程式不寫的話，
+  # Terraform 每次 plan 都以為被改過、想改回去（E124）
   allowed_domains = [
     # OpenAI：模型、身分聯盟換通行證（E113）
-    "api.openai.com",
-    "auth.openai.com",
+    "api.openai.com.",
+    "auth.openai.com.",
     # 任務角色向東京的 STS 要身分證明（只有地區網址開得出這種證明）
-    "sts.ap-northeast-1.amazonaws.com",
+    "sts.ap-northeast-1.amazonaws.com.",
     # 拉映像：先跟 ECR 換登入權杖，再到本帳號的倉庫拿映像清單，映像層本身在 AWS 的 S3 bucket
-    "api.ecr.ap-northeast-1.amazonaws.com",
-    "${data.aws_caller_identity.current.account_id}.dkr.ecr.ap-northeast-1.amazonaws.com",
-    "prod-ap-northeast-1-starport-layer-bucket.s3.ap-northeast-1.amazonaws.com",
+    "api.ecr.ap-northeast-1.amazonaws.com.",
+    "${data.aws_caller_identity.current.account_id}.dkr.ecr.ap-northeast-1.amazonaws.com.",
+    "prod-ap-northeast-1-starport-layer-bucket.s3.ap-northeast-1.amazonaws.com.",
     # 寫日誌、啟動時拿 SSM 的機密
-    "logs.ap-northeast-1.amazonaws.com",
-    "ssm.ap-northeast-1.amazonaws.com",
+    "logs.ap-northeast-1.amazonaws.com.",
+    "ssm.ap-northeast-1.amazonaws.com.",
     # 資料庫：雖然走 Gateway Endpoint 不經 NAT，但程式還是要先查這個網域，查不到就連不上
-    "dynamodb.ap-northeast-1.amazonaws.com",
+    "dynamodb.ap-northeast-1.amazonaws.com.",
   ]
 }
 
@@ -40,10 +42,10 @@ resource "aws_route53_resolver_firewall_domain_list" "allowed" {
   domains = local.allowed_domains
 }
 
-# 「其他全部」：* 代表任何網域；排在放行清單後面，所以只會抓到名單外的
+# 「其他全部」：*. 代表任何網域（結尾的點同上）；排在放行清單後面，所以只會抓到名單外的
 resource "aws_route53_resolver_firewall_domain_list" "everything" {
   name    = "llm-gateway-everything-else"
-  domains = ["*"]
+  domains = ["*."]
 }
 
 resource "aws_route53_resolver_firewall_rule_group" "egress" {
