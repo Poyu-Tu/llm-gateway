@@ -20,7 +20,7 @@ USAGE_FIELDS = (
 ALREADY_EXISTS_CODE = "ConditionalCheckFailed"
 
 
-# usage 的排序鍵：時間在前、單號在後；照字串牌就是照時間排，同一個時間的兩筆也不會撞
+# usage 的排序鍵：時間在前、單號在後；照字串排就是照時間排，同一個時間的兩筆也不會撞
 def usage_sort_key(timestamp: str, request_id: str) -> str:
     """Return the usage sort key: the timestamp, then the request id."""
     result = f"{timestamp}#{request_id}"
