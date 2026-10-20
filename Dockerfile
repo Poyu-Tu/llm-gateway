@@ -1,5 +1,5 @@
 # ===== Phase 1：（只用來裝套件，不會出現在最後的映像裡）=====
-FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS builder
+FROM python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170 AS builder
 
 # 從 uv 官方映像借用 uv 執行檔（同樣用 digest 鎖定）
 COPY --from=ghcr.io/astral-sh/uv:0.12.19@sha256:04d046b13e60d6bcec73cbc5e1cad25d680dea90c8573340950a0ac2d1aef424 /uv /bin/uv
@@ -16,7 +16,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 
 # ===== Phase 2：（真正要執行的映像）=====
-FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+FROM python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170
 
 # 建立一般使用者，不用 root 執行
 RUN useradd --uid 10001 --no-create-home appuser
