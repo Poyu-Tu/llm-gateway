@@ -24,4 +24,5 @@ data/
 *.tfstate
 *.tfstate.*
 *.tfvars
+*.tfplan
 crash.log
