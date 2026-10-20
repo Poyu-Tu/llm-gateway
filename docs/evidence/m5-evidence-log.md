@@ -132,16 +132,60 @@
 
 ---
 
+## E129. Cost Explorer：M4 期間的 AWS 實際金額（2026-10-20 約 14:00～15:43，公司電腦）
+
+**依據：** `m4-closed-handoff.md` 第 3 節；決策書 v2.10 的 6.3「M4 實測花費」（AWS 實際金額待補）。
+
+**指令：** `aws ce get-cost-and-usage --time-period Start=2026-10-14,End=2026-10-21 --granularity DAILY --metrics UnblendedCost`（每次呼叫 US$0.01，這筆會出現在之後的帳上）。日期是 **UTC**：`2026-10-19` 那一格 = 台北 10/19 08:00～10/20 08:00。
+
+| UTC 日期 | UnblendedCost（USD） | 那天做了什麼 |
+|---|---|---|
+| 10/14 | 0.0000050016 | 開工前準備（本機），身分聯盟探測 |
+| 10/15 | 0.000005 | 本機；長期層骨架還沒上雲 |
+| 10/16 | 0 | 沒有上雲 |
+| 10/17 | 0.00023588 | 長期層上雲（State bucket、表、ECR、角色等） |
+| 10/18 | 0.000172354 | 每日層免費骨架（C 段）與 `destroy #1` |
+| 10/19 | **0.2909840749** | D、E 段上雲驗收（台北 20:49～22:38）、`destroy #2` 失敗後本機補拆 |
+| 10/20 | 0 | 每日層已拆；當天資料可能還沒進來 |
+| **合計** | **約 0.2914** | |
+
+- 每一格都標 `"Estimated": true`（月底結帳前都是估計值），10/20 那一格之後可能再變動
+- **跟估算對照：** 決策書 v2.10 用 6.2 的單價估 D、E 段約 US$0.22（每小時約 0.12 × 約 1 小時 50 分），實際 10/19 那一格約 **US$0.29**，多約 32%
+
+### 10/19 分計費項目（`--group-by Type=DIMENSION,Key=USAGE_TYPE --output table`，再一次 US$0.01）
+
+| 計費項目 | 金額（USD） | 換算 |
+|---|---|---|
+| `APN1-NatGateway-Hours` | **0.186** | = 3 × 0.062：**計了 3 小時** |
+| `APN1-LoadBalancerUsage` | 0.0486 | = 2 × 0.0243：計了 2 小時 |
+| `APN1-PublicIPv4:InUseAddress` | 0.026823615 | ≈ 5.4 個「IP·小時」（ALB 兩個、NAT 一個） |
+| （第一項，名稱在終端機捲動上限之外，沒看到） | 0.0224500445 | 推定是 Fargate vCPU（0.25 vCPU × 0.05056 ≈ 1.8 小時），**未確認** |
+| `APN1-PublicIPv4:IdleAddress` | 0.000973615 | ≈ 0.19 小時（約 12 分鐘）：彈性 IP 沒掛在 NAT 上、還沒被釋放的時間，對得上 `destroy #2` 卡在 `DisassociateAddress`、本機補拆前那一段 |
+| `APN1-NatGateway-Bytes` | 0.0003954081 | 流量費，可以忽略 |
+| `APN1-Requests-Tier1`、`Requests-Tier2` | 0.0002397、0.00003737 | S3 請求（State、映像層） |
+| `APN1-TimedStorage-ByteHrs` | 0.0000708617 | S3 儲存 |
+| `APN1-WriteRequestUnits`、`ReadRequestUnits` | 0.000013585、0.00000228 | DynamoDB |
+| `APN1-LCUUsage` | 0.0000009778 | ALB 的 LCU，可以忽略 |
+| 其他（`Lambda-GB-Second`、`VendedLog-Bytes`、`KMS-Requests`、跨區 `AWS-In-Bytes`、`ScheduledInvocation`、`USE1-Catalog-Request` 等） | 0 | |
+
+- 看得到的各項加總約 0.2858；跟 10/19 的總額 0.2910 差約 0.005，推定是沒看到的 Fargate 記憶體那一項（0.5 GB × 0.00553 × 1.8 小時 ≈ 0.005），**未確認**
+- **多出來的錢在哪裡（有證據）：** 主要是 **NAT 計了 3 小時**（0.186），估算時只算 1 小時 50 分（約 0.114）。可能的原因（推測）：NAT 在驗收開始（20:49）前就建好了、而且不滿一小時也照一小時算；ALB 也是 2 小時（0.0486）。彈性 IP 閒置只有約 12 分鐘、0.001，不是主因
+- **學到的：** 估雲端花費時，按小時計費的資源要算「建好到拆掉」的整段，還要把不滿一小時的部分進位成一小時；M5 上雲演練（約 2 小時）照這個方法重估
+- 長期層閒置幾乎不花錢的說法得到佐證：10/16、10/20 都是 0，10/17、10/18 加起來不到 US$0.0005
+
+**寫進哪裡（今晚 M4 docs PR）：** `docs/milestones/m4-report.md` 第 8 節、決策書 v2.10 的 6.3 與 M4 結果的「實際時間 / 成本」、變更紀錄的「時間與花費」：AWS 實際約 US$0.29（Cost Explorer，UTC 10/14～10/20，估計值），比估算多的主因是 NAT 計了 3 小時；M4 報告可以在花費那一節補一句「按小時計費要算整段、不滿一小時進位」。
+
+---
+
 ## 目前進度（2026-10-20）
 
 - M5 七項定案完成（E127）
-- Terraform 1.16.6：長期層 `plan` 乾淨，`destroy.yml` 已改、`.gitignore` 擋 `*.tfplan`，PR 待推（E128）
+- Terraform 1.16.6：PR #17 合併（`main` = `46fd3eb`），6 個檢查全過（E128）
+- M4 的 AWS 實際金額：約 US$0.29（E129），今晚寫進 M4 docs PR
 - 下一步：
-  1. commit、push、開 PR（`chore/terraform-1.16.6`）
-  2. 公司電腦：查 Cost Explorer 的 M4 實際金額（數字記下，今晚寫進 M4 結案的 docs PR）
-  3. 個人電腦（今晚）：M4 結案的 docs PR（`docs/m4-closure`）；這個 Terraform PR 只動 `destroy.yml` 與本檔，跟個人電腦上還沒推的三個 M4 檔不重疊，`git pull` 不會衝突
-  4. M5 程式與 Terraform（公司電腦可寫草稿、跑不碰金鑰的測試；上雲演練在個人電腦）
-- 下一筆證據是 **E129**
+  1. 個人電腦（今晚）：M4 結案的 docs PR（`docs/m4-closure`）；這個 Terraform PR 只動 `destroy.yml` 與本檔（PR #17 已合併），跟個人電腦上還沒推的三個 M4 檔不重疊，`git pull` 不會衝突；M4 docs PR 要一併放進本檔（E129 的新版）
+  2. M5 程式與 Terraform（公司電腦可寫草稿、跑不碰金鑰的測試；上雲演練在個人電腦）
+- 下一筆證據是 **E130**
 
 ---
 
@@ -168,4 +212,3 @@
 | 交易的 IAM 動作與 Endpoint Policy 寫法 | 寫 Terraform 前查 AWS 文件 | M5 寫 Terraform 時 |
 | Lambda 網卡收回時間 | 第 6 題第 7 步實測；超過 destroy workflow 上限就改放 VPC 外 | M5 上雲 |
 | SQS 隱藏時間與 Lambda 逾時的數字 | 隱藏時間 = 6 × Lambda 逾時（查證後定） | M5 寫 Terraform 時 |
-| Cost Explorer 的 M4 實際金額 | `aws ce get-cost-and-usage` 查（公司電腦也可以） | 10/20 |
