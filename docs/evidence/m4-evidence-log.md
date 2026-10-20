@@ -1741,7 +1741,7 @@ ALB 閒置逾時 120 秒（E115）；ALB 健康檢查打 `/health`、開部署�
 | 步驟 | 結果 |
 |---|---|
 | 第一次 `apply -var="dns_firewall_action=BLOCK"` | 計畫 `3 to change`，比預期多 2 個 → 本人先答 `no` |
-| 查原因（計畫寫進 `infra\daily\block.tfplan`，`*.tfplan` 被 `.gitignore` 擋；Claude 讀完、本人刪掉） | 放行清單 9 個網域、全部網域清單的 `*`：**AWS 存網域時會在結尾補一個點**（`api.openai.com.`、`*.`），Terraform 拿程式裡沒有點的版本比，以為被改過；內容相同、無害，但每次 plan 都會出現 |
+| 查原因（計畫寫進 `infra\daily\block.tfplan`，Claude 讀完、本人刪掉。**10/20 更正：**原寫「`*.tfplan` 被 `.gitignore` 擋」是錯的，`.gitignore` 只擋 `*.tfstate`、`*.tfstate.*`、`*.tfvars`（E120 已記）；這個檔在刪掉之前是未追蹤狀態，沒有被 commit） | 放行清單 9 個網域、全部網域清單的 `*`：**AWS 存網域時會在結尾補一個點**（`api.openai.com.`、`*.`），Terraform 拿程式裡沒有點的版本比，以為被改過；內容相同、無害，但每次 plan 都會出現 |
 | 第二次 apply | `Apply complete! Resources: 0 added, 3 changed, 0 destroyed.` |
 | BLOCK 後再聊天 | `Say thank you in Japanese` → `gpt-6-luna`、`(Arigatō)`（日文在 PowerShell 5 顯示成亂碼）→ **放行清單在 BLOCK 下是完整的** |
 
@@ -1839,7 +1839,7 @@ ALB 閒置逾時 120 秒（E115）；ALB 健康檢查打 `/health`、開部署�
 - 「AWS 會在網域結尾自動補一個點，Terraform 以為被改過，每次都想改回去。內容一樣、無害，但我把程式改成跟 AWS 一樣的寫法，讓 plan 乾淨，真的改動才不會被淹沒。」
 
 
-## E125. 修正 PR：destroy 角色拔公開 IP、DNS 網域結尾加點、模擬器補到 12 題（2026-10-20 00:40～）
+## E125. 修正 PR：destroy 角色拔公開 IP、DNS 網域結尾加點、模擬器補到 12 題（2026-10-20 00:40～01:05）
 
 **依據：** E124 第 4 節（網域結尾的點）、第 7 節（模擬器沒出到的題目）、第 9 節（destroy #2 卡在 `ec2:DisassociateAddress`）。
 
@@ -1884,7 +1884,11 @@ ALB 閒置逾時 120 秒（E115）；ALB 健康檢查打 `/health`、開部署�
 
 ### 6. PR
 
-（合併後補：PR 編號、檢查結果、`main` 的新 commit、Config scan 對 `Resource "*"` 有沒有意見）
+| 步驟 | 結果 |
+|---|---|
+| commit（本人指定：commit 訊息用英文、PR 說明用中文） | `88a42f1` `fix: let the destroy role detach EIPs and add trailing dots to DNS firewall domains`（`14 files changed, 414 insertions(+), 21 deletions(-)`）；推前 Claude 掃過要推的文字檔，沒有 12 位數的帳號 ID |
+| PR #16（中文說明、不附署名） | 6 個檢查全綠：`Config scan` 16 秒（**沒有對新的 `Resource "*"` 提意見，不用加豁免**）、`Tests` 29 秒、`Image scan`、CodeQL（actions 36 秒、python 52 秒）、Code scanning「No new alerts」 |
+| 合併（本人按，01:04） | `main` = **`bd849c1`**；本機分支刪除；雲端的 `fix/m4-destroy-eip` 與兩個早已合併的舊分支（`docs/routing-eval-labels`、`feat/m4-github-oidc`）一起刪除，`git fetch --prune` 後只剩 `main` |
 
 ### 證明了什麼
 
@@ -1900,6 +1904,20 @@ ALB 閒置逾時 120 秒（E115）；ALB 健康檢查打 `/health`、開部署�
 ### 面試可用的說法
 
 - 「模擬器 10 題全對，真的拆還是卡住，因為我沒出到那一題。修好之後我補了兩題：一題證明拔得掉，一題證明沒標籤的刪不掉，讓放寬的那條權限有邊界。」
+
+
+## E126. M4 結案：時數、花費、結案文件（2026-10-20 01:11～）
+
+**依據：** 決策書 8.3（每關收尾清單）；E124、E125。
+
+| 項目 | 結果 |
+|---|---|
+| 本人投入時數 | M4（10/14～10/20）約 **27 小時**（本人 10/20 01:11 提供） |
+| AWS 實際花費 | **待補。** Claude 用 Claude in Chrome 讀 Cost Explorer：網址帶的日期與日期選擇器輸入的 10/01～10/20 都沒有套用，畫面停在 4/1～9/30；帳單頁 10 月的「按服務收費」全部 USD 0.00、沒有 EC2／VPC 列（推定資料還沒更新）。報告先寫估算約 US$0.22，之後在個人電腦用 `aws ce get-cost-and-usage` 補。**10/20 補上：約 US$0.29**（見 `m5-evidence-log.md` E129） |
+| OpenAI 花費 | Gateway 自己算的成本加總約 17,500 micro-USD（約 US$0.018），其中 16,322 是 E114 量長回答那一次；沒有和 OpenAI 後台逐筆對帳 |
+| 結案文件 | `docs/milestones/m4-report.md`；決策書 v2.10（`docs/decision-book/decision-book-v2.10.md`）；練習本：四個分頁開頭改 `bd849c1`、「設定檔」分頁 `.tf` 各節第 3 句改成實測、新增四支 `scripts/*.ps1` 的小節、進度總表加一列；`docs/handoff/slides-v2.1-start-handoff.md` 第 3 節補 M4 成果、24.8% 改 25.3% |
+
+**M4 ✅（10/20）。** 檢查點 10/25，提前五天。
 
 
 ---
@@ -1935,7 +1953,7 @@ ALB 閒置逾時 120 秒（E115）；ALB 健康檢查打 `/health`、開部署�
 
 ---
 
-## 目前進度（2026-10-20 00:55）
+## 目前進度（2026-10-20 結案）
 
 **M4 開工前準備全部完成**（10/14～10/15）：
 
@@ -1962,11 +1980,13 @@ ALB 閒置逾時 120 秒（E115）；ALB 健康檢查打 `/health`、開部署�
 - **PR #13 合併（10/18 17:40）：** `main` = **`b259965`**，6 個檢查全綠；**每日層 D 段還沒 apply，AWS 上沒有在跳錶的東西**
 - **簡報 PR #15 合併（10/19 19:48）：** `main` = `90ed268`
 - **D、E 段上雲與驗收（E124，10/19 19:51～22:45）：** 36 個資源、身分聯盟可用、受控出口成立（ALERT 收網域 → BLOCK → 出口檢查）、S08～S11 到齊、告警寄信、模擬器 10 題；destroy workflow 卡在 EIP，本機補拆，**AWS 確認拆光，沒有在跳錶的東西**
-- **修正 PR 開工（E125，10/20 00:40～）：** destroy 角色加 `DisassociateAnyAddress`、長期層 apply（1 個改動）、模擬器 12 題全對、DNS 網域結尾加點
-- 下一步（不花錢）：
-  1. **修正 PR（個人電腦）：** commit、push、PR、合併；E125 第 6 節補 PR 結果
-  2. **M4 結案：** `docs/milestones/m4-report.md`（問本人時數與 Cost Explorer 實際花費）、決策書 v2.10（本表 24 項）、練習本 `.tf` 各節第 3 句補實測、`slides-v2.1-start-handoff.md` 第 3 節（M4 成果、24.8% → 25.3%）
-- 下一筆證據是 **E126**
+- **修正 PR #16 合併（E125，10/20 00:40～01:05）：** destroy 角色加 `DisassociateAnyAddress`、長期層 apply（1 個改動）、模擬器 12 題全對、DNS 網域結尾加點；`main` = **`bd849c1`**，6 個檢查全綠；雲端只剩 `main` 分支
+- **M4 結案（E126，10/20）：** 約 27 小時；結案報告、決策書 v2.10、練習本、簡報交接檔第 3 節完成；**M4 ✅**，檢查點 10/25 提前五天
+- 下一步：
+  1. 結案文件走一個 docs PR（個人電腦；commit 英文、PR 中文）
+  2. 補 Cost Explorer 的 M4 實際金額（10/20 完成：約 US$0.29，M5 E129）
+  3. M5 開工（新的證據紀錄 `m5-evidence-log.md`，從 E127 開始）；第一次 apply 每日層時實測一鍵拆光與 DNS 假改動
+- 下一筆證據是 **E127**（M5）
 
 ---
 
@@ -2004,3 +2024,4 @@ ALB 閒置逾時 120 秒（E115）；ALB 健康檢查打 `/health`、開部署�
 | 預扣（7.10） | M3 不做 | M5 |
 | PR #6 的 CI 附註（10/15 21:18 本人截圖） | `CodeQL` 2 則是通知（notice）：`ubuntu-latest` 自 **10/19** 起改指 Ubuntu 26；`ci` 1 則是已知的 Node.js 20 警告（Trivy Action 內部的 `actions/cache`）。`ci.yml` 兩個工作都鎖 `ubuntu-24.04`，不受影響；CodeQL 預設設定的機器由 GitHub 管，10/19 後看第一次 CodeQL 結果有沒有變；M4 新增的 workflow（destroy）也鎖 `ubuntu-24.04` | 10/19 後第一個 PR |
 | A 能不能擋住「沒進 PR、但有綠勾的 commit」（E108） | 目前的 `ci.yml` 做不出這種 commit；不另外測 | — |
+| `.gitignore` 沒有擋 `*.tfplan`（E120、E124 更正） | 計畫檔含帳本內容；建議 `.gitignore` 加一行 `*.tfplan`（不花錢、不影響程式） | M4 結案的 docs PR 或 M5 第一個 PR |
