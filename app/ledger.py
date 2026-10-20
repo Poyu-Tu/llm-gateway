@@ -35,3 +35,23 @@ def to_dynamodb_item(values: dict) -> dict:
     for name, value in values.items():
         item[name] = serializer.serialize(value)
     return item
+
+
+# 交易被取消時判斷「是不是已經入過帳」：有事被擋、而且被擋的每一件都是「已經存在」才算重複
+# 混了別的原因（例如 TransactionConflict）代表這次真的沒寫進去，要往外丟讓 SQS 重送
+def is_duplicate(exc: ClientError) -> bool:
+    """Return True only if the transaction was cancelled because the charge already exists."""
+    if exc.response["Error"]["Code"] != "TransactionCanceledException":
+        return False
+    reasons = exc.response.get("CancellationReasons", [])
+    codes = []
+    for reason in reasons:
+        code = reason.get("Code")
+        if code != "None":
+            codes.append(code)
+    if not codes:
+        return False
+    for code in codes:
+        if code != ALREADY_EXISTS_CODE:
+            return False
+    return True
