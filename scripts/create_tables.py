@@ -1,6 +1,6 @@
 from botocore.client import BaseClient
 
-from app.db import API_KEYS_TABLE, QUOTAS_TABLE, AUDIT_TABLE, make_dynamodb_client
+from app.db import API_KEYS_TABLE, QUOTAS_TABLE, AUDIT_TABLE, USAGE_TABLE, make_dynamodb_client
 
 
 # 建表放在 scripts/，不放 app/：Gateway 在雲端不該有建表的權限
@@ -47,6 +47,21 @@ def create_tables(client: BaseClient) -> None:
             ],
             KeySchema=[
                 {"AttributeName": "request_id", "KeyType": "HASH"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+    # 用量明細（M5）：user_id + ts_request（「時間#單號」）；按人查、照時間排，同一個時間的兩筆也不會撞
+    if USAGE_TABLE not in existing:
+        client.create_table(
+            TableName=USAGE_TABLE,
+            AttributeDefinitions=[
+                {"AttributeName": "user_id", "AttributeType": "S"},
+                {"AttributeName": "ts_request", "AttributeType": "S"},
+            ],
+            KeySchema=[
+                {"AttributeName": "user_id", "KeyType": "HASH"},
+                {"AttributeName": "ts_request", "KeyType": "RANGE"},
             ],
             BillingMode="PAY_PER_REQUEST",
         )
