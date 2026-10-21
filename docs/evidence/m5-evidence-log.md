@@ -3,7 +3,7 @@
 > 依決策書 11.5 遮蔽：AWS 帳號 ID、存取金鑰 ID、公開 IP；OpenAI 的 Project ID、金鑰 Tracking ID、金鑰末 4 碼、建立者 user ID；個人帳號名稱（含終端機提示字元與路徑中的使用者資料夾名稱，一律寫成 `<user>`）。
 > 本檔收錄「文字型」證據；截圖另存於 `docs/screenshots/`（檔名以 `m5-` 開頭，正式清單照決策書 11.4 的 S 編號），日誌另存於 `docs/logs/`。
 > E 編號接續 `m4-evidence-log.md`（E108～E126），M5 從 E127 開始。
-> 紀錄日期：2026-10-20 建立，10-21 更新（E130）（M4 於 10/20 結案；M5 檢查點併入 11/1 的 M6 檢查點，本人目標 10/25 前完成 M5）
+> 紀錄日期：2026-10-20 建立，10-21 更新（E130～E132）（M4 於 10/20 結案；M5 檢查點併入 11/1 的 M6 檢查點，本人目標 10/25 前完成 M5）
 
 ---
 
@@ -246,18 +246,122 @@
 
 ---
 
+## E131. M5 第二塊開工：五個設計題（2026-10-21 11:30～13:23，公司電腦，只讀程式）
+
+**依據：** E127 定案 1～4、6；E130；`app/main.py`、`app/ledger.py`、`app/quota.py`、`compose.yaml`、`tests/fakes.py`（`main` = `ab583f9`，讀公司電腦的 repo）。
+
+**範圍：** 只有定案，沒有寫程式、沒有登入 AWS。
+
+**生活比喻：** 外場把點單放進出單夾、後台會計拿去記帳。這次講好：單子要不要裝信封、信封上寫什麼；出單夾的範本放哪裡；加油前還要不要先刷卡確認；會計拿到字跡糊掉的單怎麼辦；練習用的店沒裝出單夾時怎麼辦。
+
+### 成功那條路改完的樣子（照 E127 定案 1、2 推出，不是這次選的）
+
+```
+算成本 cost，放進 record
+├─ 送 SQS 成功 ─────────────► 回答（Gateway 不寫 audit，交給 Worker）
+└─ 送 SQS 失敗 → record_charge()
+      ├─ 回 True ───────────► 回答（Gateway 自己記好三本帳）
+      ├─ 回 False ──────────► 回答（SQS 其實收到、只是回應逾時，Worker 已經記過）
+      └─ 也出錯 → 印一行日誌 ─► 回答照給（錢已經付給 OpenAI）
+```
+
+沒花錢的三條路（429、500、502／503）不變，Gateway 照樣直接寫稽核。
+
+### 讀程式時確認、寫進設計的事
+
+- `period_of()`（`app/quota.py`）用**台北時間**切月份；Worker 打包不帶 `quota.py`，所以 `period` 由 Gateway 決定、放進事件
+- `record_charge()` 寫 `audit` 時整份 `record` 照抄（`to_dynamodb_item(audit_record)`）：`period` 若塞進 `record`，`audit` 會多一個欄位，跟 Gateway 備援寫出來的不一致
+- Worker 不能 import `app/main.py`：它一載入就執行 `load_config()` 與 `read_openai_auth()`，在 Lambda 上起不來，也會把 FastAPI、OpenAI 帶進打包
+- 佇列網址若在請求進來時才讀，沒設定時丟 `KeyError`，備援只接 `BotoCoreError`／`ClientError`，結果是**錢已付給 OpenAI 卻回 500**；所以要在啟動時讀、啟動時檢查（同 `OPENAI_AUTH`）
+
+### 定案（本人逐題作答）
+
+| # | 題目 | 定案 | 不選的選項與理由 | 弱點 |
+|---|---|---|---|---|
+| 1 | SQS 訊息放什麼 | **A：外面包一層信封**：`{"version": 1, "period": "2026-10", "record": {…完整稽核紀錄…}}`；`record` 原封不動交給 `record_charge()` | B 不包、`period` 塞進 `record`、不帶版本：`audit` 多一個欄位、兩條路寫出來不一致，改格式時分不出新舊訊息。C 不帶 `period`、Worker 用 `timestamp` 自己算：Worker 要多打包 `quota.py`，「算哪個月」兩處各算一次 | 版本號只能讓 Worker 認出「看不懂」，不會自動轉換舊格式 |
+| 2 | 送 SQS 的程式放哪裡 | **A：新檔 `app/events.py`**：版本常數、組信封、拆信封、建 SQS 連線、送出；`app/main.py` 只加領用窗口 `get_sqs()`；逾時與重試 import `app/db.py` 的常數 | B 全寫在 `main.py`：Worker 不能 import `main.py`，拆信封要在 `worker/handler.py` 再寫一份，版本號與欄位名兩邊各抄一次。C 拆進 `db.py` 與 `ledger.py`：兩個檔名都不準了 | Gateway 與 Worker 都會打包到對方用不到的幾行；Worker 打包多一個檔 |
+| 3 | 「花錢前先加 0」（`chat_endpoint()` 第 175～180 行） | **A：留著不改**：它驗的是「`quotas` 現在寫得進去」，正是 Worker 與備援最後都要做的事；DynamoDB 寫入壞掉時在花錢前回 503 | B 拿掉：寫入壞、讀取正常時照樣花錢，錢付了才發現；要刪 `test_chat_returns_503_before_spending_when_usage_cannot_be_written`。C 換成先查 SQS（`GetQueueAttributes`）：多一趟網路、多一個 IAM 權限，查得到不代表送得進去，而且 SQS 壞了本來就有備援 | 只驗「現在」，不驗「等一下」；驗不到 Worker 的權限與 SQS。Gateway 碰資料庫維持 4 次＋SQS 1 次 |
+| 4 | Worker 收到看不懂的訊息（不是 JSON、版本不對、少欄位） | **A：一律往外丟**，跟 DynamoDB 出錯同一條路：重送 3 次 → DLQ（保留 14 天，修好可搬回佇列） | B 印日誌後當作成功：訊息不見；Gateway 先部署新版本、Worker 還是舊版時，整批帳被刪光。C Worker 自己送進 DLQ：Worker 要多 SQS 權限與網路，E127「放行清單一個網域都不用加」的優點沒了 | 明知會失敗還多跑 2 次；部署順序錯了訊息會整批塞進 DLQ（帳不掉，要人工搬回）。**部署順序：先 Worker、後 Gateway** |
+| 5 | 沒有 SQS 的地方（本機、測試） | **A：`CHARGE_QUEUE_URL` 一定要寫**：值只能是 `https://` 開頭的佇列網址，或 `disabled`；`disabled` 時成功那條路直接 `record_charge()`、不試 SQS、啟動時印一行說明；沒寫或寫錯 Gateway 起不來。`compose.yaml` 的 gateway 加 `CHARGE_QUEUE_URL: disabled`，`infra/daily/ecs.tf` 寫真的網址 | B 沒寫就當作不用 SQS：雲端忘了設時默默變回 M4 的同步記帳，Worker 永遠閒著（違反 `app/db.py`「要連哪裡一定要明講」）。C 本機寫假網址、每次走備援：本機每次都印「送不進去」，真出問題時反而看不出來；容器裡沒有 AWS 身分，失敗原因是「找不到憑證」，不是網路壞 | 正式程式多一個模式、一個分支、一個測試；雲端誤寫 `disabled` 會安靜降級，靠啟動日誌與演練第 0 步抓 |
+
+### 實作時照做的預設值（Claude 提出，本人沒有異議）
+
+| 項目 | 預設 |
+|---|---|
+| Worker 結構 | `handler(event, context)` 只把 `event["Records"]` 每一則交給 `process_message(client, body)`；`process_message()` 拆信封（`app/events.py`）→ `record_charge()` → 回傳結果 |
+| Worker 的 DynamoDB 連線 | 同一個 Lambda 執行環境只建一次（`@lru_cache`，同 `main.py` 的 `get_client()`）；Lambda 環境變數 `DYNAMODB_TARGET=aws` |
+| Worker 日誌 | 每則一行 JSON：`charge_recorded` 或 `charge_already_recorded`，只放 `request_id`、`cost_micro_usd`，不放摘要與指紋 |
+| Worker 打包 | `app/__init__.py`、`app/db.py`、`app/ledger.py`、`app/events.py`、`worker/__init__.py`、`worker/handler.py` |
+| SQS 替身 | `tests/fakes.py` 加 `FakeSqs`（比照 `FakeDynamoDB`）：存下送出的訊息，也可設定成送出就丟 `ClientError`；測試用 `dependency_overrides[get_sqs]` 換掉 |
+| 測試（Claude 寫） | 信封格式；送成功時 Gateway 不寫 `audit`、不扣 `quotas`；送失敗時 Gateway 記好三本帳；送失敗且 `record_charge()` 回 `False` 時照樣回答；兩條都失敗時印日誌、照樣回答；`disabled` 模式；Worker 的 `process_message()`（正常、重複、版本不對、不是 JSON） |
+| 寫的順序 | `app/events.py` 的信封 → `worker/handler.py` → `app/events.py` 的 SQS 連線與送出 → `chat_endpoint()` → Terraform |
+
+### 面試可用的說法
+
+- 「記帳事件外面包一層信封，帶版本號和月份。月份由 Gateway 檢查額度時就決定，Worker 照著記，不重算；版本號讓 Worker 認得出看不懂的格式。看不懂就往外丟，三次後進 DLQ，帳不會被默默刪掉。所以部署時先更新 Worker、再更新 Gateway。」
+- 「每個外部依賴都要明講連哪裡：DynamoDB 寫 `aws` 或網址，SQS 寫佇列網址或 `disabled`，沒寫 Gateway 就起不來。雲端忘了設定時，我寧可它起不來，也不要它安靜地降級。」
+- 「花錢前那一次『加 0』我留著。它不保證等一下寫得進去，但能在 DynamoDB 寫入壞掉時，在付錢給 OpenAI 之前就擋下來。」
+
+---
+
+## E132. M5 第二塊（一）：記帳事件的信封 `app/events.py` 與 Worker `worker/handler.py`（2026-10-21 13:23～14:34，公司電腦，分支 `feat/m5-worker`）
+
+**依據：** E131 定案 1、2、4 與預設值；E130 的 `record_charge()`。
+
+**生活比喻：** 出單夾的單子裝進固定格式的信封（版本、月份、原封不動的單子）；後台會計照工作守則拿單、拆信封、記三本帳、在筆記本記一行；拆不開或帳本打不開就退回出單夾。
+
+**範圍：** 只有程式與本機測試（DynamoDB Local），沒有登入 AWS、沒有碰金鑰。SQS 連線與送出、`chat_endpoint()` 的改動、Terraform 都還沒寫；Lambda 與 SQS 還沒建。
+
+### 改了哪些檔
+
+| 檔案 | 誰寫 | 內容 |
+|---|---|---|
+| `app/events.py`（新） | 本人（填空 9 格，全對） | `EVENT_VERSION = 1`、`InvalidEventError`（繼承 `ValueError`）、`build_event()`、`parse_event()` |
+| `worker/__init__.py`（新，空檔） | Claude | 讓 `worker` 成為套件（同 `app/__init__.py`） |
+| `worker/handler.py`（新） | 本人（填空 9 格，全對） | `get_client()`（`@lru_cache`）、`log_charge()`、`process_message()`、`handler(event, context)` |
+| `tests/test_events.py`（新，11 個，不連資料庫） | Claude | 版本是 1；信封三欄；月份不塞進紀錄；組好再拆拿回同一份（含中文、`None`、布林、清單）；不是 JSON、不是物件、版本不對、沒有版本、少紀錄、少月份、紀錄不是物件都丟 `InvalidEventError` |
+| `tests/test_worker.py`（新，8 個：3 個不連資料庫、5 個連考場） | Claude | 版本不對與不是 JSON 都往外丟、還沒碰資料庫；正常記帳回 `True` 並印 `charge_recorded`；同一則兩次第二次回 `False`、錢只扣一次；日誌沒有摘要、指紋、使用者；表不存在時 `ClientError` 往外丟；`handler()` 處理事件裡每一則；`handler()` 遇到壞訊息往外丟 |
+
+### 測試結果（公司電腦）
+
+- `uv run pytest tests/test_events.py`：**11 passed**（0.18 秒）
+- `docker compose up -d` → `uv run pytest`：**359 passed**（22.65 秒；340 + 11 + 8）
+
+### 破壞實驗（本人的版本，做完都改回來；跑 `tests/test_events.py tests/test_worker.py` 共 19 個）
+
+| # | 拆掉什麼（代表哪個沒選的選項） | 預期 | 實際 |
+|---|---|---|---|
+| ① | `parse_event()` 的版本檢查兩行註解掉（等於第 1 題不帶版本號） | 3 個紅 | **3 failed, 16 passed**（1.89 秒）：`test_parse_event_rejects_unknown_version`、`test_parse_event_rejects_missing_version`（`DID NOT RAISE InvalidEventError`）、`test_process_message_raises_on_unknown_version`（`AttributeError: 'object' object has no attribute 'transact_write_items'`：第 2 版訊息一路走到寫帳那一步） |
+| ② | `build_event()` 裡插一行 `record["period"] = period`（等於第 1 題選 B） | 2 個紅；`test_process_message_records_the_charge` 仍綠 | **2 failed, 17 passed**（1.22 秒）：`test_build_event_wraps_record_with_version_and_period`、`test_build_event_does_not_put_period_into_record`；Worker 那題仍綠 |
+| — | 兩個都改回來 | 全綠 | `uv run pytest` → **359 passed**（20.11 秒） |
+
+- 實驗 ② 證明「兩條路寫出來的 `audit` 一樣」靠的是信封的測試；Worker 的測試只檢查三本帳寫進去，看不出 `audit` 多了一個欄位
+
+### 這一步證明了什麼、沒證明什麼
+
+- **證明：** 信封組好再拆拿回同一份；不認得的版本、壞掉的訊息在碰資料庫之前就被擋下並往外丟；Worker 收到同一則兩次只扣一次、不丟錯；資料庫寫不進去時往外丟；日誌不帶摘要、指紋、使用者
+- **沒證明：** 真的 Lambda 收到 SQS 事件的格式（`event["Records"][i]["body"]`，照 AWS 文件寫，要上雲確認）；Lambda 回報失敗後 SQS 真的重送、3 次後進 DLQ（演練第 5 步）；`get_client()` 的「只建一次」（沒有測試）；Gateway 還沒送 SQS
+
+### 本人的提問（10/21）
+
+- `handler()` 的 `context` 沒被用到是正常的嗎？→ 正常：Lambda 一定傳 `(event, context)` 兩個參數，`context` 是這次執行的資訊（執行編號、剩多久逾時），用不到也要留位置，少一個參數一呼叫就 `TypeError`
+
+---
+
 ## 目前進度（2026-10-21）
 
 - M5 七項定案完成（E127）
 - Terraform 1.16.6：PR #17 合併（`main` = `46fd3eb`），6 個檢查全過（E128）
 - M4 的 AWS 實際金額：約 US$0.29（E129），已寫進 M4 docs PR #18（`main` = `d25e36f`）
 - M5 第一塊 `app/ledger.py`（三本帳的共用交易）：本機 340 passed、兩個破壞實驗符合預期（E130）；分支 `feat/m5-ledger` 開 PR
+- M5 第一塊 PR #21 合併（`main` = `ab583f9`）
+- M5 第二塊五個設計題定案（E131）：事件包信封帶版本、`app/events.py`、加 0 保留、看不懂的訊息進 DLQ、`CHARGE_QUEUE_URL` 必填（網址或 `disabled`）
+- M5 第二塊（一）：`app/events.py` 的信封與 Worker `worker/handler.py`，本機 359 passed、兩個破壞實驗符合預期（E132）；分支 `feat/m5-worker` 開 PR
 - 下一步：
-  1. `chat_endpoint()` 成功那條路改成送 SQS，送不進去時改呼叫 `record_charge()`（E127 定案 1、2）
-  2. Worker（`worker/handler.py`）：收 SQS 事件 → `record_charge()`；重複當作已入帳、其他錯誤丟出讓 SQS 重送
+  1. `app/events.py` 的 SQS 連線與送出 → `chat_endpoint()` 成功那條路改成送 SQS，送不進去時改呼叫 `record_charge()`
   3. Terraform：SQS、DLQ、Worker 角色與日誌（長期層）、Lambda（每日層）；查交易的 IAM 與 Endpoint Policy 寫法
   4. 上雲演練 0～7（個人電腦）
-- 下一筆證據是 **E131**
+- 下一筆證據是 **E133**
 
 ---
 
@@ -275,6 +379,7 @@
 | 8 | 2.2 v2.10 補充 | 一次成功的聊天碰資料庫 6 次（不是 5 次）（E127） |
 | 9 | D34、PART 9「開發機」列 | 公司電腦可做不碰金鑰的事，含 `aws login`、`plan`；金鑰、`.env`、真實呼叫仍只在個人電腦；每日層 apply 注意 `admin_cidr`（E128） |
 | 10 | 3.2 `usage`、7.10 | `record_charge()` 放 `app/ledger.py`；`usage` 只存 7 個記帳欄位；回 `True`／`False`，只有每一件取消原因都是 `ConditionalCheckFailed` 才算重複（E130） |
+| 11 | 2.2 [9]、3.1 Worker 職責、3.3、7.10、PART 9 | 事件格式：信封 `version`＋`period`＋`record`；`app/events.py`；花錢前加 0 保留；Worker 看不懂的訊息往外丟、進 DLQ；部署順序先 Worker 後 Gateway；`CHARGE_QUEUE_URL` 必填（佇列網址或 `disabled`），啟動時檢查（E131） |
 
 ---
 
