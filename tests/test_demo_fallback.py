@@ -1,16 +1,14 @@
 """Tests for scripts/demo_fallback.py: only the strong model is rate limited, and the Gateway falls back."""
 
-import json
-
 import pytest
 from fastapi.testclient import TestClient
 from openai import RateLimitError
 
 from app.config import CONFIG_PATH, load_config
 from app.main import app as gateway
-from app.main import get_audit_writer, get_client, get_dynamodb, get_hmac_key, get_quota, get_user_id
+from app.main import get_audit_writer, get_client, get_dynamodb, get_hmac_key, get_queue_url, get_quota, get_sqs, get_user_id
 from scripts.demo_fallback import SimulatedLimitClient
-from tests.fakes import FakeDynamoDB, make_fake_client, make_file_audit_writer
+from tests.fakes import FAKE_QUEUE_URL, FakeDynamoDB, FakeSqs, make_fake_client, make_file_audit_writer, read_sent_record
 
 ROUTING = load_config(CONFIG_PATH).routing
 # 含關鍵字 debug、又不到 300 字：正式規則一定選強模型
@@ -65,13 +63,16 @@ def test_gateway_falls_back_to_the_cheap_model(tmp_path):
     gateway.dependency_overrides[get_user_id] = lambda: "bob"
     gateway.dependency_overrides[get_quota] = lambda: (1_000_000, 0)
     gateway.dependency_overrides[get_dynamodb] = lambda: FakeDynamoDB()
+    sqs = FakeSqs()
+    gateway.dependency_overrides[get_sqs] = lambda: sqs
+    gateway.dependency_overrides[get_queue_url] = lambda: FAKE_QUEUE_URL
 
     response = TestClient(gateway).post("/v1/chat", json={"message": STRONG_MESSAGE})
 
     assert response.status_code == 200
     assert response.json()["model"] == ROUTING.cheap_model
     assert completions.models_called() == [ROUTING.cheap_model]
-    record = json.loads(audit_path.read_text(encoding="utf-8"))
+    record = read_sent_record(sqs)
     assert record["routed_model"] == ROUTING.strong_model
     assert record["fallback"] is True
     assert record["fallback_reason"] == "RateLimitError"

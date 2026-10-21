@@ -3,7 +3,7 @@
 > 依決策書 11.5 遮蔽：AWS 帳號 ID、存取金鑰 ID、公開 IP；OpenAI 的 Project ID、金鑰 Tracking ID、金鑰末 4 碼、建立者 user ID；個人帳號名稱（含終端機提示字元與路徑中的使用者資料夾名稱，一律寫成 `<user>`）。
 > 本檔收錄「文字型」證據；截圖另存於 `docs/screenshots/`（檔名以 `m5-` 開頭，正式清單照決策書 11.4 的 S 編號），日誌另存於 `docs/logs/`。
 > E 編號接續 `m4-evidence-log.md`（E108～E126），M5 從 E127 開始。
-> 紀錄日期：2026-10-20 建立，10-21 更新（E130～E132）（M4 於 10/20 結案；M5 檢查點併入 11/1 的 M6 檢查點，本人目標 10/25 前完成 M5）
+> 紀錄日期：2026-10-20 建立，10-21 更新（E130～E133），10-22 更新（E134）（M4 於 10/20 結案；M5 檢查點併入 11/1 的 M6 檢查點，本人目標 10/25 前完成 M5）
 
 ---
 
@@ -348,7 +348,114 @@
 
 ---
 
-## 目前進度（2026-10-21）
+## E133. M5 第二塊（二）：`app/events.py` 加上 SQS 連線與送出（2026-10-21 15:27～16:36，公司電腦，分支 `feat/m5-gateway-sqs`）
+
+**依據：** E131 定案 2、5 與預設值（SQS 連線的逾時與重試比照 DynamoDB）。
+
+**生活比喻：** 信封格式定好之後，決定出單夾放哪裡（佇列網址，一定要明講）、怎麼走過去（連線，走不到時很快放棄）、怎麼投進去（送出，投不進去由外場自己決定改走備援）。
+
+**範圍：** 只有程式與本機測試；PR #22（信封與 Worker）已合併，`main` = `0b05449`。`chat_endpoint()` 還沒改。分支由 Claude 在公司電腦的終端機開（原本約定打字由本人來，之後指令交給本人打）。
+
+### 改了哪些檔
+
+| 檔案 | 誰寫 | 內容 |
+|---|---|---|
+| `app/events.py` | 本人（填空 7 格，全對） | 加 import（`os`、`boto3`、`Config`、`app/db.py` 的區域與逾時常數）、`QUEUE_DISABLED = "disabled"`、`read_queue_url()`、`make_sqs_client()`、`send_event()` |
+| `tests/fakes.py` | Claude | `FakeSqs`：存下送出的訊息；給 `error` 時送出就丟那個錯誤 |
+| `tests/test_events.py` | Claude | 加 11 個（8 支函式，其中一支參數化 4 組）：`disabled` → `None`、https 網址原樣回傳、沒設定 → `KeyError`、空白／大寫／`http://`／少開頭 → `ValueError`、連東京的 `sqs`、逾時 2／5 秒與最多試 2 次、送出的內容是 `build_event()` 的信封、送不進去時 `ClientError` 往外丟 |
+
+### 測試結果
+
+- 公司電腦：本人回報「都完成了」，Claude 沒看到終端機畫面（螢幕權限閒置過期）
+- 個人電腦重跑（2026-10-21 18:43，分支 `feat/m5-gateway-sqs` = `7d1e782`，DynamoDB Local 兩個容器 Running），Claude 截圖確認：`tests/test_events.py` **22 passed**（26.68s）；全部 **370 passed**（59.28s）
+
+### 這一步證明了什麼、沒證明什麼
+
+- **證明：** 佇列網址只有兩種合法寫法，沒寫或寫錯就報錯；SQS 連線的逾時與重試跟 DynamoDB 一樣；送出的內容就是信封
+- **沒證明：** 真的 SQS 收得到（要上雲）；DNS 被擋時真的很快失敗（演練第 6 步）；沒有做破壞實驗
+
+### 開工時發現、還沒定的事（下一個設計題）
+
+`chat_endpoint()` 成功那條路改成送 SQS（或 `disabled` 時直接 `record_charge()`）之後，成功那一筆**不再經過 `get_audit_writer()`**。目前有 6 個測試檔用 `make_file_audit_writer()` 換掉它，從暫存檔讀稽核紀錄來檢查（`test_chat.py`、`test_chat_auth.py`、`test_chat_fallback.py`、`test_chat_routing.py`、`test_chat_truncation.py`、`test_demo_fallback.py`），其中有些也用 `FakeDynamoDB`（只有 `update_item`，沒有 `transact_write_items`）。這些測試要怎麼跟著改，下一個對話先問本人再動。
+
+---
+
+## E134. M5 第二塊（三）：`chat_endpoint()` 成功那一筆改送 SQS、送不進去自己記帳（2026-10-21 18:43～10-22 00:34，個人電腦，分支 `feat/m5-gateway-sqs`）
+
+**依據：** E127 定案 1、2；E131 定案 2、3、5 與「成功那條路改完的樣子」；E133。
+
+**生活比喻：** 外場收完錢，把單子裝進信封投進出單夾，交給後台會計記帳，自己不再記；出單夾卡住投不進去，外場就自己把三本帳記好；連帳本都打不開，就在交班本寫一行「這筆 7 元沒記到」，並按鈴叫人。今天不收外送的店（`disabled`），外場連外送平台都不打電話，直接自己記。
+
+### 開工前的三個設計題（本人逐題作答）
+
+| # | 題目 | 定案 | 不選的選項與理由 |
+|---|---|---|---|
+| 1 | 不用 Docker 的 5 個聊天測試檔（`test_chat.py`、`test_chat_fallback.py`、`test_chat_routing.py`、`test_chat_truncation.py`、`test_demo_fallback.py`，59 個測試；21 個讀成功那一筆、4 個看假資料庫扣了多少）怎麼改 | **A：換上 `FakeSqs`，成功那一筆從送出的信封拆出來讀** | B 設成 `disabled`、連 DynamoDB Local 讀 `audit` 表：59 個測試全變成要 Docker，測到的是備援路不是雲上的主路。C「轉信替身」把信封拆開寫進同一個稽核暫存檔：只改 5 個準備函式，但分不出成功那筆走哪條路，Gateway 若送了 SQS 又自己寫一次稽核也抓不到，測試名字跟實際檢查的東西對不上 |
+| 2 | 要 Docker 的 4 個檔（`test_chat_auth.py` 7、`test_chat_quota.py` 9、`test_chat_charge.py` 7、`test_chat_audit_store.py` 5）怎麼改 | **C：4 個舊檔用 `disabled`、走真的 `record_charge()`；另開新檔放 Gateway→信封→Worker 的端到端測試** | A 只做舊檔：沒有「接起來是對的」的證據。B 舊檔也換 `FakeSqs`、測試自己叫 Worker：額度測試變成「Worker 扣錢」，備援路反而沒有真的交易測過 |
+| 3 | 小決定 11 項 | **照預設**：載入時讀 `CHARGE_QUEUE_URL`；啟動印 `{"event": "charge_queue_mode", "mode": "sqs"/"disabled"}`、不印網址（網址有帳號 ID）；領用窗口 `get_queue_url()`、`get_sqs()`（`@lru_cache`）；成功那段拆成 `save_charge()`、放 `main.py`（不放會被打包進 Worker 的 `app/events.py`）；只有 SQS 失敗印 `charge_queue_failed`、不告警；兩條都失敗先設 `charged = False` 再用既有的 `report_audit_failure()`（長期層已有 `audit_write_failed` 的 metric filter 與告警，Terraform 不用改）；只接 `BotoCoreError`、`ClientError`；`record_charge()` 回 `False` 不印日誌；`conftest.py` 與 `compose.yaml` 設 `disabled`；新測試分三個檔 | 弱點：`audit_write_failed` 兩種意思（沒花錢的稽核寫不進去／花了錢兩條都失敗）要看 `status`、`charged` 才分得出來；SQS 長時間壞掉時帳是對的但沒人被通知 |
+
+第 2 題：舊檔有 4 個測試的意思變了，因為三本帳現在是同一個交易：「稽核寫不進去但有扣到」這種狀態不存在了（刪 1 個），「扣款失敗」與「兩個都失敗」變成同一件事（合併成 1 個）。
+
+### 改了哪些檔
+
+| 檔案 | 誰寫 | 內容 |
+|---|---|---|
+| `app/main.py` | 本人（填空 14＋2 格） | import `json`、`sys`、`report_audit_failure`、`send_event`、`record_charge`；`CHARGE_QUEUE_URL = read_queue_url()`；`log_queue_mode()`；`get_queue_url()`、`get_sqs()`（`disabled` 時交回 `None`、不建連線）；`report_queue_failure()`；`save_charge()`；`chat_endpoint()` 多 `sqs`、`queue_url` 兩個參數，成功那段改成算成本 → `save_charge()`；刪掉成功路上的 `add_usage(cost)` 與 `write_audit_record(record)`（花錢前的「加 0」與三條失敗路的稽核保留） |
+| `compose.yaml` | 本人 | gateway 加 `CHARGE_QUEUE_URL: disabled` |
+| `tests/conftest.py` | Claude | `os.environ["CHARGE_QUEUE_URL"] = "disabled"` |
+| `tests/fakes.py` | Claude | `FAKE_QUEUE_URL`、`read_sent_record()` |
+| 舊測試 10 個檔 | Claude | 5 個不用 Docker 的檔換 `FakeSqs`、讀信封；`test_chat_charge.py` 改讀 `audit` 表、道具換成「交易一律失敗」；`test_chat_audit_store.py` 刪 2 個；`test_message_limit.py`（借用 `make_test_client()`）、`test_seed.py` 跟著改 |
+| `tests/test_chat_sqs.py`（新，6 個，不用 Docker） | Claude | 剛好送一封信封、送到設定的佇列、紀錄沒有 `charged`；月份照台北時間（UTC 10/31 16:00 算 11 月）；送出後不寫稽核檔、只有「加 0」；模型失敗不送；啟動那行不印網址；`disabled` 時 `get_sqs()` 交回 `None` |
+| `tests/test_chat_charge_fallback.py`（新，4 個，連考場） | Claude | SQS 失敗 → 自己記好三本帳、只印 `charge_queue_failed`（三個欄位）；SQS 失敗且交易說「已經記過」→ 不印 `audit_write_failed`；兩條都失敗 → 兩行日誌、三本都沒寫；`disabled` → 不碰 SQS、不印任何一行 |
+| `tests/test_chat_worker_e2e.py`（新，2 個，連考場） | Claude | Gateway 送出時還沒扣錢、沒有稽核，信封交給 `process_message()` 後三本帳才寫好；Worker 那條路與備援那條路寫出來的 `audit` 欄位完全一樣 |
+
+### 填空時寫錯、後來改對的地方（讀程式時抓到，沒有跑過、沒有進 commit）
+
+| 位置 | 寫成 | 應該是 | 為什麼不行 |
+|---|---|---|---|
+| `report_queue_failure()` ⑦ | `record["error_type"]` | `type(error).__name__` | 成功那一筆的紀錄沒有 `error_type`（只有失敗路才設）：`KeyError`，錢付了卻回 500 |
+| `save_charge()` ⑧ | `raise` | `return` | 送成功時沒有正在處理的錯誤，`raise` 會變成 `RuntimeError`，`except` 接不住：**每一次送成功都回 500** |
+| `chat_endpoint()`（填空範圍外） | `outcome.setting` | `outcome.settings` | 改旁邊時誤刪一個字母：每次成功都 `AttributeError` |
+
+### 跑全部測試時才發現的錯（Claude 的設計錯誤）
+
+第一次跑全部：**25 failed, 354 passed**（50.76 秒）。
+
+| 個數 | 原因 | 修正 |
+|---|---|---|
+| 19 | 設計題 3 第 3 列 Claude 說「建 SQS 連線不會連網路，`disabled` 時建了也不會用」——錯。**boto3 建連線時就會解析憑證**；個人電腦用 `aws login`，需要 `botocore[crt]` → `MissingDependencyException`。FastAPI 進 `chat_endpoint()` 前先把所有領用窗口跑一遍，連 429 路也一起倒（401／503 在驗票口就結束，不受影響）。本機容器沒有憑證時，可能一路找到 EC2 中繼資料服務、等逾時 | `get_sqs()`：`CHARGE_QUEUE_URL is None` 時交回 `None`、不建連線（本人填空 2 格）；`save_charge()`、`chat_endpoint()` 的 `sqs` 型別改 `BaseClient \| None`；加測試 `test_get_sqs_builds_no_client_when_disabled` |
+| 6 | Claude 漏改 `test_message_limit.py`（5 個，借用 `make_test_client()`，回傳多一個值）與 `test_seed.py`（1 個，從暫存檔讀成功那一筆） | 跟著改；`test_message_limit.py` 補上跑完還原領用窗口 |
+
+### 測試結果（個人電腦，Claude 截圖確認）
+
+- 修正後 `uv run pytest`：**380 passed**（31.08 秒；370 − 2 + 12）。比修正前少約 20 秒：本機不再每次去找 AWS 憑證
+- 破壞實驗做完改回來後再跑一次：**380 passed**（30.03 秒）
+- 三個新檔單獨那一行（預期 12 passed）沒有截到，數字由全部的 380 推得
+
+### 破壞實驗（本人的版本，做完都改回來）
+
+| # | 拆掉什麼（代表什麼） | 跑哪些 | 預期 | 實際 |
+|---|---|---|---|---|
+| ① | `get_sqs()` 的 `if ... return None` 兩行（`disabled` 也建連線） | `tests/test_chat_sqs.py` | 1 紅 | **1 failed, 5 passed**（4.17 秒）：`test_get_sqs_builds_no_client_when_disabled`，`MissingDependencyException`（`botocore/credentials.py`） |
+| ② | `save_charge()` 的 `record["charged"] = False`（兩條都失敗時日誌少了「沒扣到」） | `tests/test_chat_charge.py tests/test_chat_charge_fallback.py` | 2 紅 | **2 failed, 9 passed**（6.92 秒）：`test_chat_still_answers_when_charge_fails_after_the_model_replied`、`test_chat_logs_the_uncharged_cost_when_sqs_and_the_fallback_both_fail`，都是 `assert None is False` |
+| ③ | `report_queue_failure(record, exc)` 下一行加 `return`（E127 第 1 題的 C：SQS 壞了只印日誌、不走備援） | `tests/test_chat_charge_fallback.py` | 2 紅、「已經記過」那題仍綠 | **2 failed, 2 passed**（5.72 秒）：`test_chat_records_the_charge_itself_when_sqs_fails`（`assert 0 == 7`）、`test_chat_logs_the_uncharged_cost_when_sqs_and_the_fallback_both_fail`（少了 `audit_write_failed`） |
+
+- 實驗 ③「已經記過」那題仍綠：它只證明「沒有多印」，證明不了「有沒有去記帳」；記帳靠 `test_chat_records_the_charge_itself_when_sqs_fails` 抓
+
+### 這一步證明了什麼、沒證明什麼
+
+- **證明：** 成功那一筆只送一封信封、Gateway 不寫稽核、只做「加 0」；SQS 送不進去時 Gateway 用同一個交易記好三本帳；SQS 其實收到（交易說已經記過）時不誤報；兩條都失敗時回答照給、日誌帶成本與 `charged: false`、走既有告警；`disabled` 不建 SQS 連線；Worker 與備援寫出來的 `audit` 欄位一樣；信封月份照台北時間
+- **沒證明：** 真的 SQS、Lambda、DNS 防火牆（上雲演練 0～7）；SQS 長時間故障時的告警（只有日誌，`charge_queue_failed` 沒有 metric filter）；「拿到 OpenAI 回答之後、送 SQS 之前」Gateway 當掉的空窗（E127 已記，靠 M6 對帳）
+
+### 面試可用的說法
+
+- 「成功那一筆我只送一封信封給 SQS，Gateway 不再自己寫稽核。測試直接拆開送出去的信封檢查，所以我證明得出『成功那筆在信封裡、稽核檔裡沒有』。」
+- 「SQS 送不進去時，Gateway 用跟 Worker 同一支交易函式自己記帳；交易說『已經記過』，代表佇列其實收到了，帳是對的，不誤報。兩條都失敗才印那一行會告警的日誌，帶著成本，事後補收得到。」
+- 「我原本以為建 SQS 連線不會碰網路，全部測試一跑就抓到：boto3 建連線時就會去找憑證。所以本機模式根本不建連線，並加一個測試鎖住。」
+
+---
+
+## 目前進度（2026-10-22）
 
 - M5 七項定案完成（E127）
 - Terraform 1.16.6：PR #17 合併（`main` = `46fd3eb`），6 個檢查全過（E128）
@@ -357,11 +464,13 @@
 - M5 第一塊 PR #21 合併（`main` = `ab583f9`）
 - M5 第二塊五個設計題定案（E131）：事件包信封帶版本、`app/events.py`、加 0 保留、看不懂的訊息進 DLQ、`CHARGE_QUEUE_URL` 必填（網址或 `disabled`）
 - M5 第二塊（一）：`app/events.py` 的信封與 Worker `worker/handler.py`，本機 359 passed、兩個破壞實驗符合預期（E132）；分支 `feat/m5-worker` 開 PR
+- PR #22 合併（`main` = `0b05449`）
+- M5 第二塊（二）：`app/events.py` 的 SQS 連線與送出（E133），分支 `feat/m5-gateway-sqs`（`7d1e782`），個人電腦確認 22 passed／全部 370 passed
+- M5 第二塊（三）：`chat_endpoint()` 成功那一筆改送 SQS、送不進去自己記帳（E134），本機 380 passed、三個破壞實驗符合預期；分支 `feat/m5-gateway-sqs` 開 PR
 - 下一步：
-  1. `app/events.py` 的 SQS 連線與送出 → `chat_endpoint()` 成功那條路改成送 SQS，送不進去時改呼叫 `record_charge()`
-  3. Terraform：SQS、DLQ、Worker 角色與日誌（長期層）、Lambda（每日層）；查交易的 IAM 與 Endpoint Policy 寫法
-  4. 上雲演練 0～7（個人電腦）
-- 下一筆證據是 **E133**
+  1. Terraform：SQS、DLQ、Worker 角色與日誌（長期層）、Lambda（每日層）、DNS 放行 SQS、ECS 任務定義加 `CHARGE_QUEUE_URL` 與 Gateway 的 `sqs:SendMessage`、交易的 IAM 與 Endpoint Policy
+  2. 上雲演練 0～7（個人電腦；部署順序先 Worker 後 Gateway；花費照「整段＋不滿一小時進位」重估）
+- 下一筆證據是 **E135**
 
 ---
 
@@ -380,6 +489,7 @@
 | 9 | D34、PART 9「開發機」列 | 公司電腦可做不碰金鑰的事，含 `aws login`、`plan`；金鑰、`.env`、真實呼叫仍只在個人電腦；每日層 apply 注意 `admin_cidr`（E128） |
 | 10 | 3.2 `usage`、7.10 | `record_charge()` 放 `app/ledger.py`；`usage` 只存 7 個記帳欄位；回 `True`／`False`，只有每一件取消原因都是 `ConditionalCheckFailed` 才算重複（E130） |
 | 11 | 2.2 [9]、3.1 Worker 職責、3.3、7.10、PART 9 | 事件格式：信封 `version`＋`period`＋`record`；`app/events.py`；花錢前加 0 保留；Worker 看不懂的訊息往外丟、進 DLQ；部署順序先 Worker 後 Gateway；`CHARGE_QUEUE_URL` 必填（佇列網址或 `disabled`），啟動時檢查（E131） |
+| 12 | 2.2 [9]、3.3、12.5 | Gateway 成功那一筆：`save_charge()` 先送 SQS、失敗或 `disabled` 時 `record_charge()`；只有 SQS 失敗印 `charge_queue_failed`（不告警，待決）；兩條都失敗用既有 `audit_write_failed` 告警、帶 `charged: false`；`disabled` 不建 SQS 連線（boto3 建連線即解析憑證）（E134） |
 
 ---
 
@@ -390,3 +500,4 @@
 | 交易的 IAM 動作與 Endpoint Policy 寫法 | 寫 Terraform 前查 AWS 文件 | M5 寫 Terraform 時 |
 | Lambda 網卡收回時間 | 第 6 題第 7 步實測；超過 destroy workflow 上限就改放 VPC 外 | M5 上雲 |
 | SQS 隱藏時間與 Lambda 逾時的數字 | 隱藏時間 = 6 × Lambda 逾時（查證後定） | M5 寫 Terraform 時 |
+| `charge_queue_failed` 要不要告警、`audit_write_failed` 要不要拆成兩個事件名 | 寫 Terraform 時一起決定（多一組 metric filter 與告警） | M5 寫 Terraform 時 |

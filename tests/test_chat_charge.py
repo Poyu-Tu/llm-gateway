@@ -5,9 +5,13 @@ import json
 import pytest
 from botocore.exceptions import ClientError
 
+from app.db import AUDIT_TABLE, USAGE_TABLE
 from app.main import app, get_dynamodb
 from app.quota import read_used
+from tests.test_audit_store import read_raw_item, to_python
 from tests.test_chat_quota import HEADERS, make_quota_test_client, put_limit, put_used
+
+# 這個檔沿用 conftest 的 CHARGE_QUEUE_URL=disabled：成功那一筆由 Gateway 用 record_charge() 一次寫三本帳
 
 # 這個檔的測試都要連 DynamoDB Local（考場，8002）
 pytestmark = pytest.mark.integration
@@ -34,23 +38,22 @@ class ReadOnlyDynamoDB:
         raise ClientError(error, "UpdateItem")
 
 
-# 測試道具：第一次寫入成功、之後的寫入都失敗（模型回答的那幾秒資料庫剛好出問題）
-class FailsAfterFirstWriteDynamoDB:
-    """Wraps a real client: the first write passes through, later writes fail."""
+# 測試道具：讀與花錢前的「加 0」照常，三本帳的交易被拒絕（模型回答的那幾秒資料庫剛好出問題）
+class TransactionFailsDynamoDB:
+    """Wraps a real client: reads and update_item pass through, every transaction fails."""
 
     def __init__(self, real):
         self.real = real
-        self.writes = 0
 
     def get_item(self, **kwargs):
         return self.real.get_item(**kwargs)
 
     def update_item(self, **kwargs):
-        self.writes = self.writes + 1
-        if self.writes > 1:
-            error = {"Error": {"Code": "InternalServerError", "Message": "boom"}}
-            raise ClientError(error, "UpdateItem")
         return self.real.update_item(**kwargs)
+
+    def transact_write_items(self, **kwargs):
+        error = {"Error": {"Code": "InternalServerError", "Message": "boom"}}
+        raise ClientError(error, "TransactWriteItems")
 
 
 # 成功的請求要把這次的成本加到當月已用量上
@@ -102,14 +105,14 @@ def test_chat_does_not_charge_blocked_request(tmp_path, dynamodb):
     assert read_used(dynamodb, "alice", PERIOD) == 1000
 
 
-# 成功的請求在稽核留下成本，並註明有扣到
+# 成功的請求在稽核留下成本，並註明有扣到：record_charge() 寫進 audit 表，用回應的 request_id 查得到
 def test_chat_audit_records_cost_and_charge(tmp_path, dynamodb):
-    client, _, audit_path = make_quota_test_client(tmp_path, dynamodb)
+    client, _, _ = make_quota_test_client(tmp_path, dynamodb)
     put_limit(dynamodb, 1000)
 
-    client.post("/v1/chat", json={"message": "Say hi"}, headers=HEADERS)
+    response = client.post("/v1/chat", json={"message": "Say hi"}, headers=HEADERS)
 
-    record = json.loads(audit_path.read_text(encoding="utf-8"))
+    record = to_python(read_raw_item(dynamodb, response.json()["request_id"]))
     assert record["status"] == "ok"
     assert record["cost_micro_usd"] == COST
     assert record["charged"] is True
@@ -130,18 +133,22 @@ def test_chat_returns_503_before_spending_when_usage_cannot_be_written(tmp_path,
     assert completions.last_request is None
 
 
-# 模型已經回答、扣款才失敗：回答照給，稽核記下這筆沒扣到的金額，之後可以補收
-def test_chat_still_answers_when_charge_fails_after_the_model_replied(tmp_path, dynamodb):
-    client, _, audit_path = make_quota_test_client(tmp_path, dynamodb)
+# 模型已經回答、記帳才失敗：回答照給（錢已經付了）；交易要嘛全寫、要嘛全不寫，所以三本帳一本都沒寫，
+# 只在日誌印一行 audit_write_failed（已有告警），帶著這筆的成本與 charged=false，事後補收得到
+def test_chat_still_answers_when_charge_fails_after_the_model_replied(tmp_path, dynamodb, capsys):
+    client, _, _ = make_quota_test_client(tmp_path, dynamodb)
     put_limit(dynamodb, 1000)
-    flaky = FailsAfterFirstWriteDynamoDB(dynamodb)
-    app.dependency_overrides[get_dynamodb] = lambda: flaky
+    app.dependency_overrides[get_dynamodb] = lambda: TransactionFailsDynamoDB(dynamodb)
 
     response = client.post("/v1/chat", json={"message": "Say hi"}, headers=HEADERS)
 
-    record = json.loads(audit_path.read_text(encoding="utf-8"))
     assert response.status_code == 200
     assert response.json()["reply"] == "Hi there"
-    assert record["cost_micro_usd"] == COST
-    assert record["charged"] is False
+    entry = json.loads(capsys.readouterr().err)
+    assert entry["event"] == "audit_write_failed"
+    assert entry["request_id"] == response.json()["request_id"]
+    assert entry["cost_micro_usd"] == COST
+    assert entry["charged"] is False
     assert read_used(dynamodb, "alice", PERIOD) == 0
+    assert dynamodb.scan(TableName=AUDIT_TABLE)["Items"] == []
+    assert dynamodb.scan(TableName=USAGE_TABLE)["Items"] == []

@@ -20,7 +20,7 @@ COST = 7
 PERIOD = "2026-10"
 
 
-# 測試道具：讀、扣額度照常，只有寫稽核（put_item）被拒絕
+# 測試道具：讀、扣額度照常，只有寫稽核（put_item）被拒絕；只用在沒花錢的路（成功那一筆改用交易，不再單獨寫稽核）
 class AuditWriteFailsDynamoDB:
     """Wraps a real client: everything passes through except put_item."""
 
@@ -38,23 +38,6 @@ class AuditWriteFailsDynamoDB:
         raise ClientError(error, "PutItem")
 
 
-# 測試道具：模型回答那幾秒資料庫出問題，扣額度和寫稽核都失敗（最典型的情況）
-# 第一次寫入（花錢前的「加 0」）成功，之後的寫入都失敗
-class FailsAfterFirstWriteDynamoDB(AuditWriteFailsDynamoDB):
-    """Like AuditWriteFailsDynamoDB, but only the first update_item passes through."""
-
-    def __init__(self, real):
-        super().__init__(real)
-        self.updates = 0
-
-    def update_item(self, **kwargs):
-        self.updates = self.updates + 1
-        if self.updates > 1:
-            error = {"Error": {"Code": "InternalServerError", "Message": "boom"}}
-            raise ClientError(error, "UpdateItem")
-        return self.real.update_item(**kwargs)
-
-
 # 測試道具：驗證、額度、稽核都走真的；只有模型是假的
 def make_real_audit_test_client(tmp_path, dynamodb):
     """Like the quota test client, but audit records go to the real audit table."""
@@ -65,7 +48,7 @@ def make_real_audit_test_client(tmp_path, dynamodb):
     return client, completions
 
 
-# 成功的請求：稽核寫進 audit 表，用回應裡的 request_id 查得到
+# 成功的請求：稽核寫進 audit 表，用回應裡的 request_id 查得到（disabled：Gateway 用 record_charge() 寫）
 def test_chat_writes_the_audit_record_to_the_audit_table(tmp_path, dynamodb):
     client, _ = make_real_audit_test_client(tmp_path, dynamodb)
 
@@ -95,21 +78,6 @@ def test_chat_writes_the_blocked_request_to_the_audit_table(tmp_path, dynamodb):
     assert to_python(items[0])["status"] == "quota_exceeded"
 
 
-# 稽核寫不進去：回答照給（錢已經付了），只多印一行日誌，單號和回應對得上
-def test_chat_still_answers_when_the_audit_write_fails(tmp_path, dynamodb, capsys):
-    client, _ = make_real_audit_test_client(tmp_path, dynamodb)
-    app.dependency_overrides[get_dynamodb] = lambda: AuditWriteFailsDynamoDB(dynamodb)
-
-    response = client.post("/v1/chat", json={"message": "Say hi"}, headers=HEADERS)
-
-    assert response.status_code == 200
-    assert response.json()["reply"] == "Hi there"
-    entry = json.loads(capsys.readouterr().err)
-    assert entry["event"] == "audit_write_failed"
-    assert entry["request_id"] == response.json()["request_id"]
-    assert entry["charged"] is True
-
-
 # 稽核寫不進去：429 照樣是 429、照樣附 Retry-After，日誌記下是被擋的請求
 def test_chat_still_returns_429_when_the_audit_write_fails(tmp_path, dynamodb, capsys):
     client, _ = make_real_audit_test_client(tmp_path, dynamodb)
@@ -122,16 +90,3 @@ def test_chat_still_returns_429_when_the_audit_write_fails(tmp_path, dynamodb, c
     assert response.headers["Retry-After"] == "60"
     entry = json.loads(capsys.readouterr().err)
     assert entry["status"] == "quota_exceeded"
-
-
-# 最典型的情況：扣額度和寫稽核一起失敗。回答照給，日誌記下「花了多少、沒扣到」，事後才補得回來
-def test_chat_logs_the_uncharged_cost_when_charging_and_audit_both_fail(tmp_path, dynamodb, capsys):
-    client, _ = make_real_audit_test_client(tmp_path, dynamodb)
-    app.dependency_overrides[get_dynamodb] = lambda: FailsAfterFirstWriteDynamoDB(dynamodb)
-
-    response = client.post("/v1/chat", json={"message": "Say hi"}, headers=HEADERS)
-
-    assert response.status_code == 200
-    entry = json.loads(capsys.readouterr().err)
-    assert entry["cost_micro_usd"] == COST
-    assert entry["charged"] is False

@@ -37,6 +37,8 @@ services:
       DYNAMODB_TARGET: http://dynamodb:8000
       # 本機容器用 .env 的金鑰；用 AWS 身分換通行證只在 Fargate 上
       OPENAI_AUTH: api_key
+      # 本機容器沒有 SQS、也沒有 AWS 身分：成功那一筆由 Gateway 自己記三本帳
+      CHARGE_QUEUE_URL: disabled
     # 先把資料庫容器開起來（只保證「開始啟動」，不保證「已經可以用」）
     depends_on:
       - dynamodb

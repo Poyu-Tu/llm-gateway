@@ -8,8 +8,8 @@ from fastapi.testclient import TestClient
 import app.main
 from app.config import GatewayConfig, ModelConfig, RoutingConfig
 from app.main import app as gateway
-from app.main import get_audit_writer, get_client, get_config, get_dynamodb, get_hmac_key, get_quota, get_user_id
-from tests.fakes import FakeDynamoDB, make_fake_client, make_file_audit_writer
+from app.main import get_audit_writer, get_client, get_config, get_dynamodb, get_hmac_key, get_queue_url, get_quota, get_sqs, get_user_id
+from tests.fakes import FAKE_QUEUE_URL, FakeDynamoDB, FakeSqs, make_fake_client, make_file_audit_writer, read_sent_record
 
 # 測試用的設定：模型名稱故意不用正式的，主程式偷用寫死的名稱時才會被抓到
 # 門檻設成 18 個字，測試的句子才不用寫到 300 字
@@ -30,7 +30,8 @@ def restore_dependencies():
     gateway.dependency_overrides.clear()
 
 
-# 把領用窗口換成假的，設定換成上面那一份；回傳：測試用戶端、筆記本、稽核檔位置、假的資料庫
+# 把領用窗口換成假的，設定換成上面那一份；回傳：測試用戶端、筆記本、稽核檔位置、假的資料庫、假的 SQS
+# 成功那一筆裝進信封送假的 SQS（用 read_sent_record 讀）；沒花錢的失敗紀錄照樣寫進稽核檔（用 read_audit 讀）
 def make_routing_test_client(tmp_path, config=TEST_CONFIG, reported_model=None):
     """Swap the real dependencies for fakes and return what tests need."""
     fake_client, completions = make_fake_client(reported_model=reported_model)
@@ -43,10 +44,13 @@ def make_routing_test_client(tmp_path, config=TEST_CONFIG, reported_model=None):
     gateway.dependency_overrides[get_quota] = lambda: (1_000_000, 0)
     gateway.dependency_overrides[get_dynamodb] = lambda: database
     gateway.dependency_overrides[get_config] = lambda: config
-    return TestClient(gateway), completions, audit_path, database
+    sqs = FakeSqs()
+    gateway.dependency_overrides[get_sqs] = lambda: sqs
+    gateway.dependency_overrides[get_queue_url] = lambda: FAKE_QUEUE_URL
+    return TestClient(gateway), completions, audit_path, database, sqs
 
 
-# 讀出稽核檔的最後一筆
+# 讀出稽核檔的最後一筆（沒花錢的那幾條路）
 def read_audit(audit_path):
     """Return the last audit record as a dict."""
     lines = audit_path.read_text(encoding="utf-8").splitlines()
@@ -55,7 +59,7 @@ def read_audit(audit_path):
 
 # S05 的前半：短、沒有關鍵字的問題交給便宜模型，而且不思考
 def test_chat_sends_simple_message_to_the_cheap_model(tmp_path):
-    client, completions, _, _ = make_routing_test_client(tmp_path)
+    client, completions, _, _, _ = make_routing_test_client(tmp_path)
 
     response = client.post("/v1/chat", json={"message": "Say hi"})
 
@@ -67,7 +71,7 @@ def test_chat_sends_simple_message_to_the_cheap_model(tmp_path):
 
 # S05 的後半：含關鍵字的問題交給強模型，思考量用強模型自己的設定
 def test_chat_sends_keyword_message_to_the_strong_model(tmp_path):
-    client, completions, _, _ = make_routing_test_client(tmp_path)
+    client, completions, _, _, _ = make_routing_test_client(tmp_path)
 
     response = client.post("/v1/chat", json={"message": "Please debug it"})
 
@@ -79,7 +83,7 @@ def test_chat_sends_keyword_message_to_the_strong_model(tmp_path):
 
 # 夠長的問題也交給強模型（門檻 18 個字，這一句 20 個字）
 def test_chat_sends_long_message_to_the_strong_model(tmp_path):
-    client, completions, _, _ = make_routing_test_client(tmp_path)
+    client, completions, _, _, _ = make_routing_test_client(tmp_path)
 
     client.post("/v1/chat", json={"message": "a" * 20})
 
@@ -88,23 +92,23 @@ def test_chat_sends_long_message_to_the_strong_model(tmp_path):
 
 # 稽核要說得出為什麼選這顆模型：便宜模型記 default
 def test_chat_audit_records_route_for_the_cheap_model(tmp_path):
-    client, _, audit_path, _ = make_routing_test_client(tmp_path)
+    client, _, _, _, sqs = make_routing_test_client(tmp_path)
 
     client.post("/v1/chat", json={"message": "Say hi"})
 
-    record = read_audit(audit_path)
+    record = read_sent_record(sqs)
     assert record["route_reason"] == "default"
     assert record["routed_model"] == "small"
 
 
 # 強模型的理由要分得出是關鍵字還是長度
 def test_chat_audit_records_route_for_the_strong_model(tmp_path):
-    client, _, audit_path, _ = make_routing_test_client(tmp_path)
+    client, _, _, _, sqs = make_routing_test_client(tmp_path)
 
     client.post("/v1/chat", json={"message": "Please debug it"})
-    keyword_record = read_audit(audit_path)
+    keyword_record = read_sent_record(sqs)
     client.post("/v1/chat", json={"message": "a" * 20})
-    length_record = read_audit(audit_path)
+    length_record = read_sent_record(sqs)
 
     assert keyword_record["route_reason"] == "keyword"
     assert keyword_record["routed_model"] == "big"
@@ -114,41 +118,42 @@ def test_chat_audit_records_route_for_the_strong_model(tmp_path):
 
 # 路由看的是遮罩後的內容：原文 19 個字（達到門檻 18），遮罩後 "Call [PHONE] now" 只有 16 個字
 def test_chat_routes_on_the_masked_message(tmp_path):
-    client, completions, audit_path, _ = make_routing_test_client(tmp_path)
+    client, completions, _, _, sqs = make_routing_test_client(tmp_path)
 
     client.post("/v1/chat", json={"message": "Call 0912345678 now"})
 
     assert completions.last_request["model"] == "small"
-    assert read_audit(audit_path)["route_reason"] == "default"
+    assert read_sent_record(sqs)["route_reason"] == "default"
 
 
 # S06：成本用實際呼叫的那顆模型的單價。假的模型回報 13 / 11 個 token，強模型是 13 x 2 + 11 x 10 = 136
+# 136 跟著信封交給 Worker 扣；Gateway 自己只做花錢前那一次「加 0」
 def test_chat_charges_the_price_of_the_routed_model(tmp_path):
-    client, _, audit_path, database = make_routing_test_client(tmp_path)
+    client, _, _, database, sqs = make_routing_test_client(tmp_path)
 
     client.post("/v1/chat", json={"message": "Please debug it"})
 
-    record = read_audit(audit_path)
-    charged = database.updates[-1]["ExpressionAttributeValues"][":amount"]["N"]
+    record = read_sent_record(sqs)
+    amounts = [update["ExpressionAttributeValues"][":amount"]["N"] for update in database.updates]
     assert record["cost_micro_usd"] == 136
-    assert charged == "136"
+    assert amounts == ["0"]
 
 
 # 同樣的 token 數，便宜模型是 7：兩顆模型各用各的單價
 def test_chat_charges_the_cheap_price_for_a_simple_message(tmp_path):
-    client, _, audit_path, database = make_routing_test_client(tmp_path)
+    client, _, _, database, sqs = make_routing_test_client(tmp_path)
 
     client.post("/v1/chat", json={"message": "Say hi"})
 
-    record = read_audit(audit_path)
-    charged = database.updates[-1]["ExpressionAttributeValues"][":amount"]["N"]
+    record = read_sent_record(sqs)
+    amounts = [update["ExpressionAttributeValues"][":amount"]["N"] for update in database.updates]
     assert record["cost_micro_usd"] == 7
-    assert charged == "7"
+    assert amounts == ["0"]
 
 
 # 輸出上限跟著模型走：便宜模型帶便宜模型的上限（測試設定是 100）
 def test_chat_sends_the_output_cap_of_the_cheap_model(tmp_path):
-    client, completions, _, _ = make_routing_test_client(tmp_path)
+    client, completions, _, _, _ = make_routing_test_client(tmp_path)
 
     client.post("/v1/chat", json={"message": "Say hi"})
 
@@ -157,7 +162,7 @@ def test_chat_sends_the_output_cap_of_the_cheap_model(tmp_path):
 
 # 強模型帶強模型自己的上限（測試設定是 200）；兩個數字不同，拿錯顆時才看得出來
 def test_chat_sends_the_output_cap_of_the_strong_model(tmp_path):
-    client, completions, _, _ = make_routing_test_client(tmp_path)
+    client, completions, _, _, _ = make_routing_test_client(tmp_path)
 
     client.post("/v1/chat", json={"message": "Please debug it"})
 
@@ -168,18 +173,18 @@ def test_chat_sends_the_output_cap_of_the_strong_model(tmp_path):
 
 # 供應商回報的名稱可能帶日期尾碼：稽核的 model 記我們指定的，provider_model 記回報的
 def test_chat_audit_keeps_the_requested_and_the_reported_model_apart(tmp_path):
-    client, _, audit_path, _ = make_routing_test_client(tmp_path, reported_model="small-2026-09-01")
+    client, _, _, _, sqs = make_routing_test_client(tmp_path, reported_model="small-2026-09-01")
 
     client.post("/v1/chat", json={"message": "Say hi"})
 
-    record = read_audit(audit_path)
+    record = read_sent_record(sqs)
     assert record["model"] == "small"
     assert record["provider_model"] == "small-2026-09-01"
 
 
 # 回給使用者的也是我們指定的名稱，不是供應商內部的版本名稱
 def test_chat_response_names_the_requested_model(tmp_path):
-    client, _, _, _ = make_routing_test_client(tmp_path, reported_model="small-2026-09-01")
+    client, _, _, _, _ = make_routing_test_client(tmp_path, reported_model="small-2026-09-01")
 
     response = client.post("/v1/chat", json={"message": "Say hi"})
 
@@ -188,21 +193,21 @@ def test_chat_response_names_the_requested_model(tmp_path):
 
 # 回報的名稱查不到單價也沒關係：計費用的是呼叫前就查好的設定（13 / 11 個 token，便宜模型是 7）
 def test_chat_charges_normally_when_the_provider_reports_another_name(tmp_path):
-    client, _, audit_path, _ = make_routing_test_client(tmp_path, reported_model="small-2026-09-01")
+    client, _, _, _, sqs = make_routing_test_client(tmp_path, reported_model="small-2026-09-01")
 
     response = client.post("/v1/chat", json={"message": "Say hi"})
 
     assert response.status_code == 200
-    assert read_audit(audit_path)["cost_micro_usd"] == 7
+    assert read_sent_record(sqs)["cost_micro_usd"] == 7
 
 
 # 兩個名稱相同時，provider_model 這一欄也要在：「沒有這一欄」和「兩者相同」要分得出來
 def test_chat_audit_records_provider_model_even_when_names_match(tmp_path):
-    client, _, audit_path, _ = make_routing_test_client(tmp_path)
+    client, _, _, _, sqs = make_routing_test_client(tmp_path)
 
     client.post("/v1/chat", json={"message": "Please debug it"})
 
-    record = read_audit(audit_path)
+    record = read_sent_record(sqs)
     assert record["model"] == "big"
     assert record["provider_model"] == "big"
 
@@ -221,7 +226,7 @@ BROKEN_CONFIG = GatewayConfig(
 
 # 查不到模型設定：回 500 與固定的訊息，而且訊息不能透露是哪一顆模型
 def test_chat_returns_500_when_the_routed_model_has_no_settings(tmp_path):
-    client, _, _, _ = make_routing_test_client(tmp_path, BROKEN_CONFIG)
+    client, _, _, _, _ = make_routing_test_client(tmp_path, BROKEN_CONFIG)
 
     response = client.post("/v1/chat", json={"message": "Please debug it"})
 
@@ -232,7 +237,7 @@ def test_chat_returns_500_when_the_routed_model_has_no_settings(tmp_path):
 
 # 查不到就不呼叫模型，也不扣錢：資料庫只收到事前那一次「加 0」
 def test_chat_spends_nothing_when_the_routed_model_has_no_settings(tmp_path):
-    client, completions, _, database = make_routing_test_client(tmp_path, BROKEN_CONFIG)
+    client, completions, _, database, _ = make_routing_test_client(tmp_path, BROKEN_CONFIG)
 
     response = client.post("/v1/chat", json={"message": "Please debug it"})
 
@@ -245,7 +250,7 @@ def test_chat_spends_nothing_when_the_routed_model_has_no_settings(tmp_path):
 
 # 這個請求要留下稽核紀錄：查得到是誰、路由選了什麼、失敗的類別
 def test_chat_audits_the_request_when_the_routed_model_has_no_settings(tmp_path):
-    client, _, audit_path, _ = make_routing_test_client(tmp_path, BROKEN_CONFIG)
+    client, _, audit_path, _, _ = make_routing_test_client(tmp_path, BROKEN_CONFIG)
 
     response = client.post("/v1/chat", json={"message": "Please debug it"})
 
@@ -261,7 +266,7 @@ def test_chat_audits_the_request_when_the_routed_model_has_no_settings(tmp_path)
 
 # 同一份壞掉的設定，走便宜模型的請求不受影響：只擋該擋的
 def test_chat_still_serves_the_cheap_model_when_only_the_strong_one_is_missing(tmp_path):
-    client, completions, _, _ = make_routing_test_client(tmp_path, BROKEN_CONFIG)
+    client, completions, _, _, _ = make_routing_test_client(tmp_path, BROKEN_CONFIG)
 
     response = client.post("/v1/chat", json={"message": "Say hi"})
 
