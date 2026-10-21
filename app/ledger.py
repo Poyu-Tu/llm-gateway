@@ -55,3 +55,58 @@ def is_duplicate(exc: ClientError) -> bool:
         if code != ALREADY_EXISTS_CODE:
             return False
     return True
+
+
+# 一筆有花錢的請求，三本帳一起寫：usage 新增明細、quotas 加上成本、audit 寫稽核；要嘛全寫，要嘛全不寫
+# Worker 與 Gateway 的備援共用這一支；用 request_id 去重，同一筆送兩次也只扣一次
+def record_charge(client: BaseClient, record: dict, period: str) -> bool:
+    """Write usage, quotas and audit in one transaction. Return False if already recorded."""
+    # 準備三本要寫的資料
+    audit_record = dict(record)
+    audit_record["charged"] = True
+    usage = {
+        "user_id": record["user_id"],
+        "ts_request": usage_sort_key(record["timestamp"], record["request_id"]),
+        "period": period,
+    }
+    for name in USAGE_FIELDS:
+        usage[name] = record[name]
+    quota_key = {
+        "user_id": {"S": record["user_id"]},
+        "period": {"S": period},
+    }
+    # 一個交易三件事
+    try:
+        client.transact_write_items(
+            TransactItems=[
+                {
+                    "Put": {
+                        "TableName": USAGE_TABLE,
+                        "Item": to_dynamodb_item(usage),
+                        "ConditionExpression": "attribute_not_exists(user_id)",
+                    }
+                },
+                {
+                    "Update": {
+                        "TableName": QUOTAS_TABLE,
+                        "Key": quota_key,
+                        "UpdateExpression": "ADD used_micro_usd :amount",
+                        "ExpressionAttributeValues": {
+                            ":amount": {"N": str(record["cost_micro_usd"])}
+                        },
+                    }
+                },
+                {
+                    "Put": {
+                        "TableName": AUDIT_TABLE,
+                        "Item": to_dynamodb_item(audit_record),
+                        "ConditionExpression": "attribute_not_exists(request_id)",
+                    }
+                },
+            ]
+        )
+    except ClientError as exc:
+        if is_duplicate(exc):
+            return False
+        raise
+    return True
