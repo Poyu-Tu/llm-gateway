@@ -3,7 +3,7 @@
 > 依決策書 11.5 遮蔽：AWS 帳號 ID、存取金鑰 ID、公開 IP；OpenAI 的 Project ID、金鑰 Tracking ID、金鑰末 4 碼、建立者 user ID；個人帳號名稱（含終端機提示字元與路徑中的使用者資料夾名稱，一律寫成 `<user>`）。
 > 本檔收錄「文字型」證據；截圖另存於 `docs/screenshots/`（檔名以 `m5-` 開頭，正式清單照決策書 11.4 的 S 編號），日誌另存於 `docs/logs/`。
 > E 編號接續 `m4-evidence-log.md`（E108～E126），M5 從 E127 開始。
-> 紀錄日期：2026-10-20 建立，10-21 更新（E130～E132）（M4 於 10/20 結案；M5 檢查點併入 11/1 的 M6 檢查點，本人目標 10/25 前完成 M5）
+> 紀錄日期：2026-10-20 建立，10-21 更新（E130～E133）（M4 於 10/20 結案；M5 檢查點併入 11/1 的 M6 檢查點，本人目標 10/25 前完成 M5）
 
 ---
 
@@ -348,6 +348,37 @@
 
 ---
 
+## E133. M5 第二塊（二）：`app/events.py` 加上 SQS 連線與送出（2026-10-21 15:27～16:36，公司電腦，分支 `feat/m5-gateway-sqs`）
+
+**依據：** E131 定案 2、5 與預設值（SQS 連線的逾時與重試比照 DynamoDB）。
+
+**生活比喻：** 信封格式定好之後，決定出單夾放哪裡（佇列網址，一定要明講）、怎麼走過去（連線，走不到時很快放棄）、怎麼投進去（送出，投不進去由外場自己決定改走備援）。
+
+**範圍：** 只有程式與本機測試；PR #22（信封與 Worker）已合併，`main` = `0b05449`。`chat_endpoint()` 還沒改。分支由 Claude 在公司電腦的終端機開（原本約定打字由本人來，之後指令交給本人打）。
+
+### 改了哪些檔
+
+| 檔案 | 誰寫 | 內容 |
+|---|---|---|
+| `app/events.py` | 本人（填空 7 格，全對） | 加 import（`os`、`boto3`、`Config`、`app/db.py` 的區域與逾時常數）、`QUEUE_DISABLED = "disabled"`、`read_queue_url()`、`make_sqs_client()`、`send_event()` |
+| `tests/fakes.py` | Claude | `FakeSqs`：存下送出的訊息；給 `error` 時送出就丟那個錯誤 |
+| `tests/test_events.py` | Claude | 加 11 個（8 支函式，其中一支參數化 4 組）：`disabled` → `None`、https 網址原樣回傳、沒設定 → `KeyError`、空白／大寫／`http://`／少開頭 → `ValueError`、連東京的 `sqs`、逾時 2／5 秒與最多試 2 次、送出的內容是 `build_event()` 的信封、送不進去時 `ClientError` 往外丟 |
+
+### 測試結果
+
+- 本人回報「都完成了」（預期 `tests/test_events.py` 22 passed、全部 370 passed）；**Claude 沒看到終端機畫面**（螢幕權限閒置過期），晚上在個人電腦重跑確認後補數字
+
+### 這一步證明了什麼、沒證明什麼
+
+- **證明（待數字確認）：** 佇列網址只有兩種合法寫法，沒寫或寫錯就報錯；SQS 連線的逾時與重試跟 DynamoDB 一樣；送出的內容就是信封
+- **沒證明：** 真的 SQS 收得到（要上雲）；DNS 被擋時真的很快失敗（演練第 6 步）；沒有做破壞實驗
+
+### 開工時發現、還沒定的事（下一個設計題）
+
+`chat_endpoint()` 成功那條路改成送 SQS（或 `disabled` 時直接 `record_charge()`）之後，成功那一筆**不再經過 `get_audit_writer()`**。目前有 6 個測試檔用 `make_file_audit_writer()` 換掉它，從暫存檔讀稽核紀錄來檢查（`test_chat.py`、`test_chat_auth.py`、`test_chat_fallback.py`、`test_chat_routing.py`、`test_chat_truncation.py`、`test_demo_fallback.py`），其中有些也用 `FakeDynamoDB`（只有 `update_item`，沒有 `transact_write_items`）。這些測試要怎麼跟著改，下一個對話先問本人再動。
+
+---
+
 ## 目前進度（2026-10-21）
 
 - M5 七項定案完成（E127）
@@ -357,11 +388,13 @@
 - M5 第一塊 PR #21 合併（`main` = `ab583f9`）
 - M5 第二塊五個設計題定案（E131）：事件包信封帶版本、`app/events.py`、加 0 保留、看不懂的訊息進 DLQ、`CHARGE_QUEUE_URL` 必填（網址或 `disabled`）
 - M5 第二塊（一）：`app/events.py` 的信封與 Worker `worker/handler.py`，本機 359 passed、兩個破壞實驗符合預期（E132）；分支 `feat/m5-worker` 開 PR
+- PR #22 合併（`main` = `0b05449`）
+- M5 第二塊（二）：`app/events.py` 的 SQS 連線與送出（E133），分支 `feat/m5-gateway-sqs`，測試數字待個人電腦確認
 - 下一步：
-  1. `app/events.py` 的 SQS 連線與送出 → `chat_endpoint()` 成功那條路改成送 SQS，送不進去時改呼叫 `record_charge()`
-  3. Terraform：SQS、DLQ、Worker 角色與日誌（長期層）、Lambda（每日層）；查交易的 IAM 與 Endpoint Policy 寫法
-  4. 上雲演練 0～7（個人電腦）
-- 下一筆證據是 **E133**
+  1. 先問設計題：既有聊天測試怎麼跟著改 → `chat_endpoint()` 成功那條路改成送 SQS，送不進去時改呼叫 `record_charge()`
+  2. Terraform：SQS、DLQ、Worker 角色與日誌（長期層）、Lambda（每日層）；查交易的 IAM 與 Endpoint Policy 寫法
+  3. 上雲演練 0～7（個人電腦）
+- 下一筆證據是 **E134**
 
 ---
 

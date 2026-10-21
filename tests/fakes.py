@@ -122,6 +122,21 @@ class FakeDynamoDB:
         self.updates.append(kwargs)
 
 
+# 假的 SQS：把送出的訊息記下來；error 有值時，送出就丟這個錯誤（模擬佇列送不進去）
+class FakeSqs:
+    """Stands in for an SQS client and records the messages it receives."""
+
+    def __init__(self, error=None):
+        self.sent = []
+        self.error = error
+
+    def send_message(self, **kwargs):
+        if self.error is not None:
+            raise self.error
+        self.sent.append(kwargs)
+        return {"MessageId": f"fake-{len(self.sent)}"}
+
+
 # 寫入一筆稽核紀錄到檔案（從 app/audit.py 搬來，只剩測試在用）：附加模式，不能覆蓋舊紀錄
 def append_audit(record: dict, path: Path) -> None:
     """Append one record as a JSON line. Never overwrite earlier records."""
