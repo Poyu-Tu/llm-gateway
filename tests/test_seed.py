@@ -1,13 +1,12 @@
 """Tests for the seed script that creates demo users."""
 
-import json
-
 import pytest
 
 from app.auth import find_user_id, hash_api_key
 from app.quota import read_limit
 from scripts.create_tables import create_tables
 from scripts.seed import generate_api_key, seed_user
+from tests.test_audit_store import read_raw_item, to_python
 from tests.test_chat_quota import make_quota_test_client
 
 # 這個檔的測試都要連 DynamoDB Local（考場，8002）
@@ -71,8 +70,9 @@ def test_seed_user_keeps_users_separate(dynamodb):
 
 
 # 從頭走到尾：種子腳本建出來的人，拿他的 Key 真的打得通對話入口，稽核記的也是他
+# （disabled：成功那一筆由 Gateway 用 record_charge() 寫進 audit 表）
 def test_seeded_user_can_call_chat(tmp_path, dynamodb):
-    client, _, audit_path = make_quota_test_client(tmp_path, dynamodb)
+    client, _, _ = make_quota_test_client(tmp_path, dynamodb)
     key = seed_user(dynamodb, "bob", 1000)
 
     response = client.post(
@@ -81,6 +81,6 @@ def test_seeded_user_can_call_chat(tmp_path, dynamodb):
         headers={"Authorization": "Bearer " + key},
     )
 
-    record = json.loads(audit_path.read_text(encoding="utf-8"))
     assert response.status_code == 200
+    record = to_python(read_raw_item(dynamodb, response.json()["request_id"]))
     assert record["user_id"] == "bob"

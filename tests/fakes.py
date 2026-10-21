@@ -8,6 +8,8 @@ import httpx2
 from boto3.dynamodb.types import TypeSerializer
 from openai import RateLimitError
 
+from app.events import parse_event
+
 
 # 假的 OpenAI：把收到的請求記下來，再回傳假的回應
 # 回報的模型名稱預設就是請求指定的那一顆；要模擬「回報的名稱和指定的不同」時才另外給 reported_model
@@ -135,6 +137,18 @@ class FakeSqs:
             raise self.error
         self.sent.append(kwargs)
         return {"MessageId": f"fake-{len(self.sent)}"}
+
+
+# 假的佇列網址：https 開頭、一看就知道是假的；測試用 get_queue_url 換掉，不會真的連線
+FAKE_QUEUE_URL = "https://sqs.example.test/llm-gateway-charges"
+
+
+# 拆開最後送出的那一封信封，交回裡面的紀錄：成功那一筆不再由 Gateway 寫稽核，而是裝進信封交給 Worker，
+# Worker 再原樣寫進 audit（record_charge() 只多加 charged = True），所以檢查信封裡的紀錄就是檢查稽核的內容
+def read_sent_record(sqs):
+    """Return the record inside the last charge event the fake SQS received."""
+    record, _ = parse_event(sqs.sent[-1]["MessageBody"])
+    return record
 
 
 # 寫入一筆稽核紀錄到檔案（從 app/audit.py 搬來，只剩測試在用）：附加模式，不能覆蓋舊紀錄

@@ -1,6 +1,8 @@
 """LLM Gateway API service."""
 
+import json
 import os
+import sys
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -12,9 +14,11 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from openai import APIError, OpenAI, RateLimitError
 from pydantic import BaseModel, Field
 
-from app.audit import save_audit, hash_prompt, make_summary, mask, detect_pii_types
+from app.audit import save_audit, hash_prompt, make_summary, mask, detect_pii_types, report_audit_failure
 from app.auth import extract_bearer_token, find_user_id, hash_api_key
 from app.db import make_dynamodb_client
+from app.events import make_sqs_client, read_queue_url, send_event
+from app.ledger import record_charge
 from app.openai_auth import make_openai_client, read_openai_auth
 from app.config import CONFIG_PATH, GatewayConfig, load_config
 from app.router import choose_model
@@ -33,6 +37,22 @@ OPENAI_TIMEOUT_SECONDS = 60
 
 # 向 OpenAI 證明身分的方式也在啟動時就確認：沒設或寫錯，Gateway 直接起不來（不等第一個請求才出錯）
 OPENAI_AUTH = read_openai_auth()
+
+# 記帳事件送哪個佇列也在啟動時就確認：沒設或寫錯，Gateway 直接起不來；disabled（本機、測試）表示不用 SQS
+CHARGE_QUEUE_URL = read_queue_url()
+
+
+# 啟動時印一行目前的記帳模式；只印 sqs 或 disabled，不印網址（網址裡有 AWS 帳號 ID）
+def log_queue_mode(queue_url: str | None) -> None:
+    """Print one JSON line saying whether charge events go to SQS."""
+    if queue_url is None:
+        mode = "disabled"
+    else:
+        mode = "sqs"
+    print(json.dumps({"event": "charge_queue_mode", "mode": mode}), file=sys.stderr, flush=True)
+
+
+log_queue_mode(CHARGE_QUEUE_URL)
 
 # 說明頁（/docs、/redoc、/openapi.json）一律關閉：使用者用不到，只會把 API 的地圖交給想攻擊的人
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -65,6 +85,21 @@ def get_config() -> GatewayConfig:
 # 領用窗口：資料庫連線（測試時會換成考場的）
 def get_dynamodb() -> BaseClient:
     return make_dynamodb_client()
+
+
+# 領用窗口：記帳事件的佇列網址；None 表示不用 SQS（測試時會換成假的網址）
+def get_queue_url() -> str | None:
+    return CHARGE_QUEUE_URL
+
+
+# 領用窗口：SQS 連線（測試時會換成假的）；整個程式共用一條，同 get_client()
+# disabled 時不建：boto3 一建連線就去找 AWS 憑證，本機沒有憑證或登入方式不同時會出錯、或卡在逾時
+@lru_cache(maxsize=1)
+def get_sqs() -> BaseClient | None:
+    if CHARGE_QUEUE_URL is None:
+        return None
+    return make_sqs_client()
+
 
 # 領用窗口：寫稽核的方式。正式環境寫進 audit 表、寫不進去就印一行日誌；測試時換成寫暫存檔
 def get_audit_writer(dynamodb: BaseClient = Depends(get_dynamodb)) -> Callable[[dict], None]:
@@ -134,6 +169,35 @@ def health_check():
     return {"status": "ok"}
 
 
+# SQS 送不進去、改走備援時印一行：帳是對的（Gateway 自己記了），只是要知道佇列出了問題；不印摘要與指紋
+def report_queue_failure(record: dict, error: Exception) -> None:
+    """Print one JSON line saying the charge event could not be sent."""
+    entry = {
+        "event": "charge_queue_failed",
+        "request_id": record["request_id"],
+        "error_type": type(error).__name__,
+    }
+    print(json.dumps(entry), file=sys.stderr, flush=True)
+
+
+# 成功那一筆的記帳：先送 SQS 交給 Worker；送不進去或不用 SQS，就自己一次寫三本帳
+# 兩條都失敗時印 audit_write_failed（已有告警），回答照給：錢已經付給 OpenAI 了
+def save_charge(sqs: BaseClient | None, queue_url: str | None, dynamodb: BaseClient, record: dict, period: str) -> None:
+    """Send the charge event to SQS, or record it here if that fails or SQS is disabled."""
+    if queue_url is not None:
+        try:
+            send_event(sqs, queue_url, record, period)
+            return
+        except (BotoCoreError, ClientError) as exc:
+            report_queue_failure(record, exc)
+    # 回 False 表示 SQS 其實收到了、Worker 已經記過：帳是對的，不用印日誌
+    try:
+        record_charge(dynamodb, record, period)
+    except (BotoCoreError, ClientError) as exc:
+        record["charged"] = False
+        report_audit_failure(record, exc)
+
+
 # 對話入口：開單號 → 遮罩 → 呼叫模型 → 寫稽核紀錄 → 回傳
 @app.post("/v1/chat")
 def chat_endpoint(
@@ -145,6 +209,8 @@ def chat_endpoint(
     quota: tuple[int, int] = Depends(get_quota),
     now: datetime = Depends(get_now),
     dynamodb: BaseClient = Depends(get_dynamodb),
+    sqs: BaseClient | None = Depends(get_sqs),
+    queue_url: str | None = Depends(get_queue_url),
     config: GatewayConfig = Depends(get_config),
 ):
     """Send the masked message to the model and write an audit record."""
@@ -240,16 +306,10 @@ def chat_endpoint(
     record["finish_reason"] = result.finish_reason
     record["status"] = "ok"
 
-    # 把這次的成本加到當月已用量；這時模型已經回答了，扣失敗也照樣把回答交出去，並記下沒扣到
+    # 把這次的成本放進紀錄，交給 save_charge()：送 SQS 讓 Worker 記，送不進去就自己記；記帳出問題也照樣把回答交出去
     cost = cost_micro_usd(outcome.settings, result.input_tokens, result.output_tokens)
     record["cost_micro_usd"] = cost
-    try:
-        add_usage(dynamodb, user_id, period, cost)
-        record["charged"] = True
-    except (BotoCoreError, ClientError):
-        record["charged"] = False
-        
-    write_audit_record(record)
+    save_charge(sqs, queue_url, dynamodb, record, period)
     return {
         "request_id": request_id,
         "reply": result.text,
