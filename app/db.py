@@ -16,6 +16,8 @@ LOCAL_SECRET_KEY = "local"
 API_KEYS_TABLE = "api_keys"
 QUOTAS_TABLE = "quotas"
 AUDIT_TABLE = "audit"
+# 每一筆花錢的請求一筆明細（M5）：按人、按時間查用量，月底和 quotas 的已用量對帳
+USAGE_TABLE = "usage"
 
 # 多久放棄：DynamoDB 正常是毫秒等級，連不上就該快點讓使用者知道，而不是默默重試
 CONNECT_TIMEOUT_SECONDS = 2

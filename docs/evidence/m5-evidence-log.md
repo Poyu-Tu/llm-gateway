@@ -3,7 +3,7 @@
 > 依決策書 11.5 遮蔽：AWS 帳號 ID、存取金鑰 ID、公開 IP；OpenAI 的 Project ID、金鑰 Tracking ID、金鑰末 4 碼、建立者 user ID；個人帳號名稱（含終端機提示字元與路徑中的使用者資料夾名稱，一律寫成 `<user>`）。
 > 本檔收錄「文字型」證據；截圖另存於 `docs/screenshots/`（檔名以 `m5-` 開頭，正式清單照決策書 11.4 的 S 編號），日誌另存於 `docs/logs/`。
 > E 編號接續 `m4-evidence-log.md`（E108～E126），M5 從 E127 開始。
-> 紀錄日期：2026-10-20 建立（M4 於 10/20 結案；M5 檢查點併入 11/1 的 M6 檢查點，本人目標 10/25 前完成 M5）
+> 紀錄日期：2026-10-20 建立，10-21 更新（E130）（M4 於 10/20 結案；M5 檢查點併入 11/1 的 M6 檢查點，本人目標 10/25 前完成 M5）
 
 ---
 
@@ -177,15 +177,87 @@
 
 ---
 
-## 目前進度（2026-10-20）
+## E130. M5 第一塊：三本帳的共用交易 `app/ledger.py`（2026-10-20～10-21，公司電腦與個人電腦，分支 `feat/m5-ledger`）
+
+**依據：** E127 定案 2、3；決策書 v2.10 的 3.2、7.10、12.5「`usage` 表」。
+
+**生活比喻：** 便利商店結帳一次要寫三個地方：發票明細（`usage`）、會員卡的本月累積消費（`quotas`）、店內的紀錄簿（`audit`）。三個要嘛都寫、要嘛都不寫；同一張發票號碼（`request_id`）掃兩次，收銀機要說「這張結過了」，不能扣兩次錢。
+
+**範圍：** 只有程式與本機測試（DynamoDB Local），沒有登入 AWS、沒有碰金鑰。Worker、SQS、Terraform 都還沒寫。
+
+### 開工前的三個設計題（10/20，本人逐題作答）
+
+| # | 題目 | 定案 | 不選的選項與理由 |
+|---|---|---|---|
+| 1 | 共用函式放哪裡 | **A：`app/ledger.py`**；Worker 打包只挑 `app/__init__.py`、`app/db.py`、`app/ledger.py`、`worker/handler.py` | 放進 `app/quota.py` 或 `app/audit.py`：Worker 打包會連帶拉進遮罩、路由等用不到的程式 |
+| 2 | `usage` 存哪些欄位 | **A：只存記帳要的**：`request_id`、`period`、`model`、`input_tokens`、`output_tokens`、`reasoning_tokens`、`cost_micro_usd`；主鍵 `user_id`（分區）＋ `ts_request` = `timestamp#request_id`（排序） | 整筆抄 `audit`：路由理由、降級、個資類別存兩份，兩邊改欄位時容易對不上 |
+| 3 | 重複時怎麼回報 | **A：`record_charge()` 回 `True`（這次寫進去）／`False`（已經入過帳）**；只有「被擋的每一件都是 `ConditionalCheckFailed`」才算重複，混了 `TransactionConflict` 等其他原因就往外丟 | 只要有一件「已經存在」就算重複：混了「同時有人在改同一筆額度」時，這次其實沒寫進去卻被當成已入帳，帳就掉了 |
+
+### 改了哪些檔
+
+| 檔案 | 誰寫 | 內容 |
+|---|---|---|
+| `app/db.py` | 本人 | `USAGE_TABLE = "usage"` |
+| `scripts/create_tables.py` | 本人 | 建第四張表 `usage`（`user_id` + `ts_request`） |
+| `app/ledger.py`（新） | 本人（填空） | `USAGE_FIELDS`、`ALREADY_EXISTS_CODE`、`usage_sort_key()`、`to_dynamodb_item()`、`is_duplicate()`、`record_charge()` |
+| `tests/test_ledger.py`（新，14 個） | Claude | 6 個不連資料庫（排序鍵、`is_duplicate()` 的 5 種情況）＋ 8 個連 DynamoDB Local（三本都寫、`usage` 只有記帳欄位、`charged=True` 且不改呼叫者的 dict、累加、送兩次只扣一次、只有 `usage` 已存在、只有 `audit` 已存在、`usage` 表不存在時三本都不寫） |
+| `tests/test_create_tables.py` | Claude | 三張表改四張，加 `usage` 主鍵測試 |
+
+### `record_charge()` 怎麼做
+
+1. 複製一份 `record` 再加 `charged = True`（呼叫者手上那份不被改到）
+2. 從 `record` 挑出 `USAGE_FIELDS` 組成 `usage` 那一列
+3. 一個 `TransactWriteItems` 三件事：`usage` `Put`（`attribute_not_exists(user_id)`）、`quotas` `Update`（`ADD used_micro_usd :amount`）、`audit` `Put`（`attribute_not_exists(request_id)`）
+4. 交易被取消時交給 `is_duplicate()`：是重複就回 `False`，不是就往外丟（讓 SQS 重送或讓備援路線知道）
+
+### 填空時寫錯、後來改對的地方（都是讀程式時抓到，沒有進 commit）
+
+| 函式 | 寫成 | 應該是 | 為什麼不行 |
+|---|---|---|---|
+| `is_duplicate()` | 第 ④ 格 `return True`（「沒有任何原因」時） | `return False` | 取消了卻沒有原因時不能猜成重複，否則可能把沒寫進去的帳當成已入帳 |
+| `is_duplicate()` | 第 ⑤ 格 `code != exc` | `code != ALREADY_EXISTS_CODE` | 要比的是取消原因的代碼字串，不是整個錯誤物件；寫成 `exc` 時每一件都「不相等」，永遠回 `False` |
+| `record_charge()` | 函式第一行 `period, str` | `period: str` | Python 不會報錯，而是多出第四個叫 `str` 的參數：呼叫時少一個參數（8 個連資料庫的測試全紅），而且函式裡的 `str(...)` 被蓋掉 |
+| `record_charge()` | 第 ⑦ 格 `"user_id"` | `"attribute_not_exists(user_id)"` | `ConditionExpression` 要放一個會成立或不成立的條件句，只有欄位名時 DynamoDB 會回 `ValidationException`、拒收整個交易 |
+
+### 測試結果（10/21，公司電腦）
+
+- `docker compose up -d` → `uv run pytest`：**340 passed**（25.79 秒；325 + `test_ledger.py` 14 + `test_create_tables.py` 新增 1）
+- 本機 DynamoDB Local 交易被取消時**有**附 `CancellationReasons`，「送兩次只扣一次」是綠的；**雲端的錯誤格式要上雲確認**
+
+### 破壞實驗（本人的版本，做完都改回來）
+
+| # | 拆掉什麼 | 預期 | 實際 |
+|---|---|---|---|
+| ① | `is_duplicate()` 的「每一件都是 `ALREADY_EXISTS_CODE`」那段迴圈（註解掉） | 只有 `test_is_not_duplicate_when_a_reason_is_conflict` 紅 | `uv run pytest tests/test_ledger.py` → **1 failed, 13 passed**（2.19 秒），紅的就是那一個：`assert True is False` |
+| ② | `usage` 那件的 `ConditionExpression`（註解掉） | 只有 `test_record_charge_stops_when_usage_row_already_exists` 紅 | **1 failed, 13 passed**（1.73 秒），紅的就是那一個：`assert True is False`（`usage` 被蓋過去、`quotas` 扣了錢、回 `True`） |
+| — | 兩個都改回來 | 全綠 | `uv run pytest` → **340 passed**（20.20 秒） |
+
+- 實驗 ② 時「同一筆送兩次」那題**仍是綠的**：`audit` 的「不存在才寫」也擋得住。兩道互為備援，所以要另外有「只有 `usage` 已存在」「只有 `audit` 已存在」兩題各自顧一道
+
+### 這一步證明了什麼、沒證明什麼
+
+- **證明：** 三本帳在同一個交易裡要嘛全寫、要嘛全不寫（`usage` 表不存在時 `quotas`、`audit` 都沒寫）；同一個 `request_id` 送兩次只扣一次；混了其他取消原因時不會誤判成重複
+- **沒證明：** 雲端 DynamoDB 取消交易時的錯誤格式；交易的 IAM 與 Endpoint Policy 寫法；Gateway 與 Worker 還沒改成呼叫這一支（`chat_endpoint()` 仍是 M4 的 `add_usage()` ＋ `write_audit_record()`）
+
+### 面試可用的說法
+
+- 「SQS 保證至少送到一次，不是剛好一次。我把用量明細、加額度、寫稽核放進同一個 DynamoDB 交易，兩本新增的帳都加『不存在才寫』，用請求單號去重；送兩次的話整個交易取消，錢只扣一次。」
+- 「交易被取消不一定是重複。我只有在每一件被擋的原因都是『已經存在』時才當作已入帳；混了『同時有人在改同一筆』就往外丟、讓它重試，不然那筆帳會默默掉掉。這個判斷我用破壞實驗驗證過：拿掉之後，就是那個測試變紅。」
+
+---
+
+## 目前進度（2026-10-21）
 
 - M5 七項定案完成（E127）
 - Terraform 1.16.6：PR #17 合併（`main` = `46fd3eb`），6 個檢查全過（E128）
-- M4 的 AWS 實際金額：約 US$0.29（E129），今晚寫進 M4 docs PR
+- M4 的 AWS 實際金額：約 US$0.29（E129），已寫進 M4 docs PR #18（`main` = `d25e36f`）
+- M5 第一塊 `app/ledger.py`（三本帳的共用交易）：本機 340 passed、兩個破壞實驗符合預期（E130）；分支 `feat/m5-ledger` 開 PR
 - 下一步：
-  1. 個人電腦（今晚）：M4 結案的 docs PR（`docs/m4-closure`）；這個 Terraform PR 只動 `destroy.yml` 與本檔（PR #17 已合併），跟個人電腦上還沒推的三個 M4 檔不重疊，`git pull` 不會衝突；M4 docs PR 要一併放進本檔（E129 的新版）
-  2. M5 程式與 Terraform（公司電腦可寫草稿、跑不碰金鑰的測試；上雲演練在個人電腦）
-- 下一筆證據是 **E130**
+  1. `chat_endpoint()` 成功那條路改成送 SQS，送不進去時改呼叫 `record_charge()`（E127 定案 1、2）
+  2. Worker（`worker/handler.py`）：收 SQS 事件 → `record_charge()`；重複當作已入帳、其他錯誤丟出讓 SQS 重送
+  3. Terraform：SQS、DLQ、Worker 角色與日誌（長期層）、Lambda（每日層）；查交易的 IAM 與 Endpoint Policy 寫法
+  4. 上雲演練 0～7（個人電腦）
+- 下一筆證據是 **E131**
 
 ---
 
@@ -202,6 +274,7 @@
 | 7 | D19、12.5「Terraform 1.16.6」與「`.gitignore` 沒有擋 `*.tfplan`」、PART 9 IaC 列 | 升級只改 `destroy.yml` 兩行與本機安裝，`versions.tf` 不用改；1.16.6 已升、長期層 `plan` 乾淨；`.gitignore` 已擋 `*.tfplan`；12.5 兩列劃掉（E127、E128） |
 | 8 | 2.2 v2.10 補充 | 一次成功的聊天碰資料庫 6 次（不是 5 次）（E127） |
 | 9 | D34、PART 9「開發機」列 | 公司電腦可做不碰金鑰的事，含 `aws login`、`plan`；金鑰、`.env`、真實呼叫仍只在個人電腦；每日層 apply 注意 `admin_cidr`（E128） |
+| 10 | 3.2 `usage`、7.10 | `record_charge()` 放 `app/ledger.py`；`usage` 只存 7 個記帳欄位；回 `True`／`False`，只有每一件取消原因都是 `ConditionalCheckFailed` 才算重複（E130） |
 
 ---
 

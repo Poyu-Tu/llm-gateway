@@ -6,12 +6,12 @@ from scripts.create_tables import create_tables
 pytestmark = pytest.mark.integration
 
 
-# 建完之後三張表都在；表名直接寫字串，常數打錯才抓得到
-def test_create_tables_creates_three_tables(dynamodb):
+# 建完之後四張表都在（M5 加 usage）；表名直接寫字串，常數打錯才抓得到
+def test_create_tables_creates_four_tables(dynamodb):
     create_tables(dynamodb)
 
     names = dynamodb.list_tables()["TableNames"]
-    assert sorted(names) == ["api_keys", "audit", "quotas"]
+    assert sorted(names) == ["api_keys", "audit", "quotas", "usage"]
 
 
 # quotas 的主鍵是 user_id 加 period：少了 period，換月會蓋掉上個月的紀錄
@@ -39,6 +39,17 @@ def test_create_tables_keys_audit_by_request_id(dynamodb):
 
     schema = dynamodb.describe_table(TableName="audit")["Table"]["KeySchema"]
     assert schema == [{"AttributeName": "request_id", "KeyType": "HASH"}]
+
+
+# usage 的主鍵是 user_id 加 ts_request：少了 ts_request，同一個人只能存一筆
+def test_create_tables_gives_usage_a_two_part_key(dynamodb):
+    create_tables(dynamodb)
+
+    schema = dynamodb.describe_table(TableName="usage")["Table"]["KeySchema"]
+    assert schema == [
+        {"AttributeName": "user_id", "KeyType": "HASH"},
+        {"AttributeName": "ts_request", "KeyType": "RANGE"},
+    ]
 
 
 # 重複執行不能出錯，也不能把已有的資料清掉
