@@ -3,7 +3,7 @@
 > 依決策書 11.5 遮蔽：AWS 帳號 ID、存取金鑰 ID、公開 IP；OpenAI 的 Project ID、金鑰 Tracking ID、金鑰末 4 碼、建立者 user ID；個人帳號名稱（含終端機提示字元與路徑中的使用者資料夾名稱，一律寫成 `<user>`）。
 > 本檔收錄「文字型」證據；截圖另存於 `docs/screenshots/`（檔名以 `m5-` 開頭，正式清單照決策書 11.4 的 S 編號），日誌另存於 `docs/logs/`。
 > E 編號接續 `m4-evidence-log.md`（E108～E126），M5 從 E127 開始。
-> 紀錄日期：2026-10-20 建立，10-21 更新（E130～E133），10-22 更新（E134）（M4 於 10/20 結案；M5 檢查點併入 11/1 的 M6 檢查點，本人目標 10/25 前完成 M5）
+> 紀錄日期：2026-10-20 建立，10-21 更新（E130～E133），10-22 更新（E134～E136）（M4 於 10/20 結案；M5 檢查點併入 11/1 的 M6 檢查點，本人目標 10/25 前完成 M5）
 
 ---
 
@@ -455,6 +455,130 @@
 
 ---
 
+## E135. M5 第三塊開工：Terraform 的八個設計題（2026-10-22 13:23～13:48，公司電腦，只讀程式）
+
+**依據：** E127 定案 3、5 與預設值；E131 定案 5；E134 定案 3；`infra/persistent/`、`infra/daily/`（`main` = `c82d845`，公司電腦的 repo 已從 `0b05449` 快轉到 `c82d845`）；AWS 文件（DynamoDB 交易的 IAM、Lambda 的 SQS 觸發、SQS 的 SSE-SQS）。
+
+**範圍：** 只有定案，沒有寫 Terraform、沒有登入 AWS。
+
+**生活比喻：** 餐廳要裝出單夾（SQS）和會計的座位（Lambda）。開工前講好：分幾次施工、單子失敗幾次才進問題抽屜、會計一張單最多處理多久、會計的權限卡怎麼寫、座位的門禁、出單夾卡住要不要按鈴、出單夾要不要上鎖、打烊拆除組要多哪些工作證。
+
+### 讀 `infra/` 時確認的現況
+
+- `infra/persistent/dynamodb.tf` 只有三張表，註解寫「`usage` 表等 M5 的 Worker 再建」
+- `infra/persistent/ecs_roles.tf` 任務角色只開三張表（`api_keys` GetItem、`quotas` GetItem＋UpdateItem、`audit` PutItem）
+- `infra/daily/endpoints.tf` 的 DynamoDB Endpoint Policy 只列三張表、三個動作，註解寫「M5 加 `usage` 表時再補」
+- `infra/daily/dns_firewall.tf` 放行清單沒有 SQS 的網域
+- `infra/persistent/github_oidc.tf` destroy 角色沒有任何 `lambda:` 權限
+- `.github/workflows/destroy.yml` 的 `timeout-minutes` 是 30
+
+### 查證的事實（寫 Terraform 時照這些）
+
+| 項目 | 查到的 | 來源 |
+|---|---|---|
+| 交易的 IAM | 沒有 `dynamodb:TransactWriteItems` 這個權限；交易裡每一件照本來的動作檢查（`Put` 看 `PutItem`、`Update` 看 `UpdateItem`）；條件 `dynamodb:EnclosingOperation` = `TransactWriteItems` 可以寫成「只准在交易裡做」 | DynamoDB 開發者指南「Using IAM with DynamoDB transactions」 |
+| `maxReceiveCount` | AWS 建議**至少 5**：Lambda 被限流時訊息也算收過一次 | Lambda 開發者指南「Creating and configuring an Amazon SQS event source mapping」 |
+| 隱藏時間 | 必須 ≥ 函式逾時（建立觸發時會檢查）；建議 = 6 × 函式逾時 | 同上 |
+| SSE-SQS | 免費；不用建金鑰、不用改權限；HTTPS 建的新佇列預設就開 | SQS 開發者指南「Configuring server-side encryption for a queue using SQS-managed encryption keys」 |
+| Worker 最壞卡多久 | `app/db.py`：連線 2 秒＋讀取 5 秒，最多 2 次，加退避約 1 秒 → 約 15 秒 | 讀程式 |
+
+### 定案（本人逐題作答）
+
+| # | 題目 | 定案 | 不選的選項與理由 | 弱點 |
+|---|---|---|---|---|
+| 1 | 分幾個 PR | **A：兩個 PR，長期層先**。PR①：`usage` 表、SQS、DLQ、Worker 執行角色、Worker 日誌群組、任務角色加 `usage` 與 `sqs:SendMessage`、destroy 角色加拆 Lambda 的權限與新的 Deny、`charge_queue_failed` 告警；合併後在公司電腦 apply 長期層（沒有 ALB、不用 `admin_cidr`、幾乎不花錢）。PR②：每日層（Lambda、打包、SQS 觸發、Worker 安全群組、DNS 放行 SQS、Endpoint Policy 加 `usage`、ECS 加 `CHARGE_QUEUE_URL`），演練當天在個人電腦 apply | B 一個 PR：兩層 apply 的時機和電腦不一樣，出錯分不清是哪一層。C 三個 PR（`usage` 表單獨）：單獨上去沒人用 | 多一個 PR；中間一段時間長期層有佇列沒人拿（Gateway 還沒有佇列網址，不會送） |
+| 2 | 失敗幾次進 DLQ | **B：5 次**（原 E127 定 3 次，改） | A 維持 3：比 AWS 建議少，限流時正常的帳可能被誤送進 DLQ（帳不掉，但搬回前額度沒扣）。C 10 次以上：壞訊息再試也不會過，只是越晚發現 | 演練第 5 步多等約 2 分鐘；`worker/handler.py` 的註解「三次後進 DLQ」要改成五次 |
+| 3 | Lambda 逾時與隱藏時間 | **B：逾時 20 秒、隱藏時間 120 秒**；記憶體先用預設 128 MB，演練第 0 步看 `REPORT` 那行再記實際用量 | A 10／60：比 Worker 最壞的 15 秒短，DynamoDB 慢時 Lambda 先被切掉，日誌只有 `Task timed out`、看不到原因（帳仍安全，交易全寫或全不寫）。C 30／180：多的 10 秒換不到東西 | 壞訊息進 DLQ 約要等 4 × 120 秒 ≈ 8 分鐘；卡在整點邊緣時 NAT 可能多算一小時 |
+| 4 | 交易的 IAM | **A：Worker 三個動作（`usage` PutItem、`quotas` UpdateItem、`audit` PutItem）都加 `dynamodb:EnclosingOperation = TransactWriteItems`；Gateway 任務角色新加的 `usage` PutItem 也加；Gateway 的 `quotas`、`audit` 不加（交易外也要用）**。Worker 不給 GetItem、DeleteItem，碰不到 `api_keys`。長期層 apply 完在公司電腦用 `aws iam simulate-principal-policy` 免費模擬一次 | B 不加條件：對入侵者的保護一樣，少了「只能三本一起寫」的保險。C 寬權限：推翻 E116 | 擋的是寫錯的程式，擋不了入侵者（把動作包進交易就過）；本機 DynamoDB Local 不檢查 IAM，條件寫錯要到演練第 0 步才看得到，所以先模擬；模擬過不了就退回 B |
+| 5 | Worker 安全群組 | **A：出口只開 443 到 DynamoDB 的 prefix list（Gateway Endpoint 的 `prefix_list_id`），入口不開**；不寫 `0.0.0.0/0`，不用加 Trivy AWS-0104 豁免 | B 比照 Gateway 開 `0.0.0.0/0`：Worker 只需要一個目的地，開一樣寬只靠 DNS 防火牆擋，豁免講不出理由。C 共用 Gateway 的安全群組：入口規則用不到，兩個角色門禁混在一起 | prefix list 是「東京所有 DynamoDB」，攻擊者自己帳號的表也在裡面，要靠 Endpoint Policy 鎖表（PR② 一定要把 `usage` 加進去，兩層缺一不可）；以後 Worker 多連一個服務要多開一條 |
+| 6 | `charge_queue_failed` 告警 | **A：加 metric filter 與告警，門檻「5 分鐘內 ≥ 3 筆」**；`audit_write_failed` 兩種意思這次不拆，記進 v2.11 待改、M6 處理 | B 不告警：SQS 整個壞掉時系統默默退回同步記帳，沒人知道，正是 E131 定案 5 不要的「安靜降級」。C 1 筆就響：備援的目的就是偶爾失敗不影響服務，1 筆就響久了會被關掉 | 多一組 filter 與告警（每月約 US$0.10，前 10 個免費）；Demo 的量湊不到 3 筆，演練第 6 步只聊一次告警不會響，只能看日誌與指標數字 |
+| 7 | SQS 加密 | **A：主佇列與 DLQ 都用 SSE-SQS，Terraform 明寫 `sqs_managed_sse_enabled = true`** | B 自管 KMS：每月約 US$1，Gateway、Lambda、觸發都要加 KMS 權限；SNS 當時是因為告警送不進加密主題才豁免，SQS 沒有這個問題。C 不加密：Config scan 多一個 HIGH | 鑰匙是 AWS 的，不能自己輪替或撤銷 |
+| 8 | destroy 角色拆 Lambda | **A：** Describe／Get／List 類寫 `"*"`、動作逐一列（`lambda:GetFunction`、`GetFunctionCodeSigningConfig`、`GetPolicy`、`ListVersionsByFunction`、`GetEventSourceMapping`、`ListTags`）；`lambda:DeleteFunction` 限東京、本帳號、`Layer = daily`；`lambda:DeleteEventSourceMapping` 不依賴標籤，改用 AWS 給觸發專用的條件 `lambda:FunctionArn` = Worker 函式的 ARN（10/22 更正：設計題當時說「觸發沒有標籤」不準確，觸發能不能用標籤條件沒有查到確定的說法；`lambda:FunctionArn` 不管有沒有標籤都成立）；Deny 新增兩個佇列、Worker 執行角色、Worker 日誌群組。`destroy.yml` 的 30 分鐘先不改，第 7 步實測接近上限再改 45 | B `lambda:*` 加標籤條件：觸發能不能靠標籤鎖不確定，可能拆不掉觸發；還給了 Create、UpdateFunctionCode。C 演練前用 CLI 手動刪觸發：放棄「一鍵拆光」的證據 | 缺了沒列到的 Describe 時 destroy 會卡一次，看錯誤補一個再跑（同 E121 的節奏） |
+
+### 面試可用的說法
+
+- 「我原本定失敗 3 次進 DLQ，寫 Terraform 前查 AWS 文件，發現建議至少 5 次，因為限流也會算一次接收。我改了，並把差別記進決策書。」
+- 「Lambda 逾時我設 20 秒，因為算過 Worker 最壞會卡 15 秒。逾時比它長，才一定是我的程式先決定失敗、丟出看得懂的錯誤，而不是被平台切掉只剩 `Task timed out`。」
+- 「IAM 沒有交易專用的權限，每一件照本來的動作檢查。我多加一個條件『只准在交易裡做』，把『三本帳要嘛全寫、要嘛全不寫』從程式層鎖到權限層。它擋的是寫錯的程式，擋不了入侵者，入侵者靠的是每張表只給一個動作那一層。」
+- 「Worker 從網路層就只走得到 DynamoDB，表的範圍再由 Endpoint Policy 鎖住；它連 NAT 都碰不到。Gateway 開 `0.0.0.0/0` 是因為 OpenAI 的 IP 不固定、沒得選；Worker 有得選，就選最窄的。」
+- 「佇列用 SQS 自管鑰匙加密，免費、不用改權限；SNS 那邊因為 CloudWatch 告警送不進加密主題才接受豁免，兩個決定的理由不一樣。」
+
+### 實作進度（10/22 13:56～17:07 公司電腦，17:07 前 commit 並推上分支 `feat/m5-terraform-persistent`；剩下的在個人電腦完成，見 E136）
+
+| 檔案 | 狀態 | 填空時寫錯、後來改對的地方 |
+|---|---|---|
+| `infra/persistent/dynamodb.tf` | 完成：`usage` 表（`user_id` + `ts_request`、刪除保護、時光機）；第 1～2 行註解改成四張表 | 無 |
+| `infra/persistent/sqs.tf`（新） | 完成：DLQ（保留 1209600 秒、SSE-SQS）、主佇列（隱藏 120 秒、SSE-SQS、`maxReceiveCount` 5）、DLQ 只收主佇列（`redrive_allow_policy`） | `queue_url` 寫成 `.user_id`（應為 `.id`）；`sourceQueueArns` 寫成不存在的 `aws_sqs_queue_redrive_allow_policy.charge.arn`（應為 `aws_sqs_queue.charge.arn`） |
+| `infra/persistent/worker_role.tf`（新） | 完成：信任 `lambda.amazonaws.com`（限本帳號、限 Worker 函式）；主佇列 Receive／Delete／GetQueueAttributes；三本帳各一個動作加 `EnclosingOperation`；網卡 7 個動作（`"*"`）；只寫自己的日誌群組 | 服務名少引號；SQS 資源寫成角色自己的 ARN；`usage` 寫成 `worker_trust`；日誌群組用了函式名而非群組名；`role` 指到政策自己。共同點：「要寫被操作的東西，寫成了操作的人」 |
+| `infra/persistent/logs.tf` | 完成：Worker 日誌群組（30 天、防刪）；`charge_queue_failed` 篩選（Gateway 的群組）與告警（300 秒、≥ 3） | 群組名沒引號且自己重組（改用 `local.worker_log_group`）；篩選事件名寫成 `audit_write_failed`（`validate`、`plan` 都抓不到）；描述裡的全形分號 |
+| `infra/persistent/ecs_roles.tf` | 完成：任務角色加 `usage` PutItem（交易內）、`sqs:SendMessage`（主佇列） | `sqs:ReceiveMessage`（應為 `SendMessage`：上雲後會每筆都走備援、告警會響） |
+| `infra/persistent/github_oidc.tf` | 完成（E136） | 見 E136 |
+| `infra/persistent/outputs.tf`、`worker/handler.py` 註解 | 完成（E136） | 見 E136 |
+
+---
+
+## E136. M5 第三塊（一）：PR① 長期層 Terraform 填空完成、本機驗證（2026-10-22 18:36～19:45，個人電腦，分支 `feat/m5-terraform-persistent`）
+
+**依據：** E135 定案 1、2、4、6、7、8 與「實作進度」；`docs/handoff/m5-terraform-persistent-wip-handoff.md` 第 4 節。
+
+**範圍：** 只有 Terraform 與一行註解、本機驗證；沒有登入 AWS、沒有 `plan`／`apply`、沒有開 PR。
+
+**生活比喻：** 拆除工班多拿一張「拆會計室」的工作證：每間房都能進去看，只能拆門上貼「每日」貼紙的會計室，叫人鈴線只能剪接到這間會計室的那條；管理處的禁止清單加上出單夾、問題抽屜、第四本帳與會計的員工證；收據多印三樣東西。
+
+### 開工
+
+| # | 步驟 | 結果 |
+|---|---|---|
+| 1 | 看個人電腦 repo 的狀態（Claude 讀 `.git/HEAD` 與 `refs/heads/main`） | 已在 `main` = `c82d845`；交接檔以為停在 `feat/m5-gateway-sqs`，實際已切回 `main`，所以省掉 `git switch main` |
+| 2 | 本人 `git status` → `git pull` → `git switch feat/m5-terraform-persistent` | `HEAD` 換到新分支；`infra/persistent/` 出現 `sqs.tf`、`worker_role.tf`（Claude 讀資料夾確認） |
+
+### 改了哪些檔
+
+| 檔案 | 誰寫 | 內容 |
+|---|---|---|
+| `infra/persistent/github_oidc.tf` | 本人（填空） | 檔頭註解加第四批。允許 3 條：`DescribeDailyWorker`（6 個 `lambda:` 只看的動作，`"*"`）；`DeleteDailyWorker`（`lambda:DeleteFunction`，限東京本帳號的函式＋`aws:ResourceTag/Layer = daily`）；`DeleteWorkerTrigger`（`lambda:DeleteEventSourceMapping`，資源 `event-source-mapping:*`，條件 `ArnEquals` `lambda:FunctionArn` = `local.worker_function_arn`）。Deny：`DenyPersistentTables` 加 `usage`（註解三張表改四張表）；`DenyGatewayRolesChange` 加 Worker 角色；`DenyAlertsChange` 加 `charge_queue_failed` 告警；`DenyPersistentLogsChange` 加 Worker 群組兩種寫法；新增 `DenyChargeQueues`（主佇列與 DLQ：`DeleteQueue`、`SetQueueAttributes`、`AddPermission`、`RemovePermission`、`PurgeQueue`、`ReceiveMessage`、`DeleteMessage`） |
+| `infra/persistent/outputs.tf` | 本人（填空） | `dynamodb_table_arns` 加 `usage`；新增 `charge_queue_url`（`aws_sqs_queue.charge.url`）、`worker_role_arn` |
+| `worker/handler.py` | 本人 | `process_message()` 上方註解「三次後進 DLQ」改「五次後進 DLQ」 |
+| `infra/persistent/worker_role.tf` | 本人 | 第 40 行（角色描述）、第 56 行（`sid`）的 `transcation` 改 `transaction` |
+| `infra/persistent/sqs.tf`、`worker_role.tf` | `terraform fmt` | 對齊 `maxReceiveCount`；`actions =[` 補空格 |
+
+### 新的小定案（本人 10/22 選 A）
+
+| 題目 | 定案 | 不選的選項與理由 | 弱點 |
+|---|---|---|---|
+| `DenyChargeQueues` 要不要也擋「一張張拿單、銷單」 | **A：加 `sqs:ReceiveMessage`、`sqs:DeleteMessage`**，跟四張表連「改資料」都擋的風格一致 | B 照 E135 原本的 5 個：拆除組現在沒有任何 SQS 允許、碰不到；但以後允許若寫成 `sqs:*`，工班能把還沒記的帳一張張拿走銷掉，那些花費就漏記 | 沒有額外成本；兩個動作名稱要在模擬器驗過才算數 |
+
+### 填空時寫錯、後來改對的地方（讀檔時抓到，沒有進 commit）
+
+| 位置 | 寫成 | 應該是 | 為什麼不行 |
+|---|---|---|---|
+| `DeleteWorkerTrigger` 的 `actions` | `lambda:DeleteTrigger` | `lambda:DeleteEventSourceMapping` | AWS 沒有這個動作。IAM 不檢查動作名稱，`validate`、`plan`、`apply` 都會過，只會被當成「沒給」，要到 destroy 拆觸發時才 `AccessDenied`（同 E120 的 `dynamodb:Delete`） |
+| `DeleteWorkerTrigger` 的條件值 | `local.data.aws_caller_identity.current.account_id` | `local.worker_function_arn` | 語法錯（`local.` 後面只能接 `locals` 裡的名字，`validate` 會報錯）；意思也錯：帳號 ID 永遠不等於函式 ARN，條件永遠不成立 |
+| `outputs.tf` 的 `charge_queue_url` | `aws_sqs_queue.sqs.url` | `aws_sqs_queue.charge.url` | 中間那格是自己取的名字（`charge`），不是服務名；`validate` 會報找不到這個資源 |
+| `DenyPersistentLogsChange` 的註解 | 「三種都列」 | 「兩種都列」 | 兩種是指每個群組的 ARN 有兩種寫法（結尾有沒有 `:*`），跟群組個數無關（只是註解，不影響執行） |
+
+- 跟 E135 的共同點一樣：兩個都是「種類」和「哪一個」混在一起（服務名 vs 自己取的名字；帳號 vs 函式）
+
+### 本機驗證（個人電腦，Claude 截圖確認）
+
+- `terraform fmt`：改了 `sqs.tf`、`worker_role.tf`。`logs.tf` 檔尾沒有換行，`fmt` **沒有**補（交接檔原本預期會補）
+- `terraform validate`：**`Success! The configuration is valid.`**（沿用已 `init` 的目錄，沒有登入 AWS）
+- `uv run pytest -q`：**380 passed in 35.00s**（Python 只改註解）
+- `git add infra/persistent worker/handler.py` → commit `feat: let destroy role tear down the worker and guard new persistent resources`（5 個檔）
+
+### 這一步證明了什麼、沒證明什麼
+
+- **證明：** 長期層所有資源名、`local`、`data` 的互相參照都找得到；Python 沒有被影響
+- **沒證明：** 動作名稱與條件鍵存在、寫對（`validate` 不檢查，要用模擬器）；`plan` 的數字（照檔案數預期 **9 個新增、2 個政策更新**：`usage` 表、兩個佇列、DLQ 收單政策、Worker 角色與政策、Worker 日誌群組、篩選、告警；任務角色與 destroy 角色的政策。交接檔原估約 12／3，以實際 `plan` 為準）；`EnclosingOperation` 條件在 AWS 上的實際判斷（合併後模擬）；destroy 角色真的拆得掉 Lambda 與觸發（要等 PR② 與演練第 7 步）
+
+### 面試可用的說法
+
+- 「IAM 不會檢查動作名稱存不存在。我把刪觸發的動作寫成一個不存在的名字，`validate`、`plan` 都照過，只會被當成沒給，要等到真的拆的時候才 `AccessDenied`。所以我每次改權限，都用 `simulate-principal-policy` 逐一問。」
+- 「拆除組刪 Lambda 的觸發，我不靠標籤，用 `lambda:FunctionArn` 鎖住『只能剪接到這一個函式的線』。」
+- 「拆除組現在根本沒有 SQS 權限，我還是在 Deny 裡擋了拿單和銷單。Deny 是安全帶，防的是以後有人把允許寫太寬。」
+
+---
+
 ## 目前進度（2026-10-22）
 
 - M5 七項定案完成（E127）
@@ -467,10 +591,14 @@
 - PR #22 合併（`main` = `0b05449`）
 - M5 第二塊（二）：`app/events.py` 的 SQS 連線與送出（E133），分支 `feat/m5-gateway-sqs`（`7d1e782`），個人電腦確認 22 passed／全部 370 passed
 - M5 第二塊（三）：`chat_endpoint()` 成功那一筆改送 SQS、送不進去自己記帳（E134），本機 380 passed、三個破壞實驗符合預期；分支 `feat/m5-gateway-sqs` 開 PR
+- PR #23 合併（`main` = `c82d845`，10/22 01:12 前）
+- M5 第三塊 Terraform 八個設計題定案（E135）：兩個 PR 長期層先、DLQ 5 次、逾時 20／隱藏 120、交易 IAM 加 `EnclosingOperation`、Worker 出口只到 DynamoDB prefix list、`charge_queue_failed` 告警 5 分鐘 ≥ 3、SSE-SQS、destroy 角色加 Lambda 權限
+- PR① 長期層填空全部完成（E135、E136）：`validate` 通過、380 passed；`DenyChargeQueues` 多擋 `ReceiveMessage`、`DeleteMessage`
 - 下一步：
-  1. Terraform：SQS、DLQ、Worker 角色與日誌（長期層）、Lambda（每日層）、DNS 放行 SQS、ECS 任務定義加 `CHARGE_QUEUE_URL` 與 Gateway 的 `sqs:SendMessage`、交易的 IAM 與 Endpoint Policy
-  2. 上雲演練 0～7（個人電腦；部署順序先 Worker 後 Gateway；花費照「整段＋不滿一小時進位」重估）
-- 下一筆證據是 **E135**
+  1. PR①：push → 開 PR → 三個必要檢查綠了合併 → 公司電腦 `aws login` → 長期層 `plan`（預期 9 新增、2 更新）→ `apply` → `simulate-principal-policy`（Worker 的交易條件、Gateway 的 `SendMessage`／`ReceiveMessage`、destroy 角色新加的允許與 Deny）
+  2. PR②：每日層 Terraform（Lambda、打包、觸發、Worker 安全群組、DNS 放行 SQS、Endpoint Policy 加 `usage`、ECS 加 `CHARGE_QUEUE_URL`）
+  3. 上雲演練 0～7（個人電腦；部署順序先 Worker 後 Gateway；花費照「整段＋不滿一小時進位」重估）
+- 下一筆證據是 **E137**
 
 ---
 
@@ -489,7 +617,9 @@
 | 9 | D34、PART 9「開發機」列 | 公司電腦可做不碰金鑰的事，含 `aws login`、`plan`；金鑰、`.env`、真實呼叫仍只在個人電腦；每日層 apply 注意 `admin_cidr`（E128） |
 | 10 | 3.2 `usage`、7.10 | `record_charge()` 放 `app/ledger.py`；`usage` 只存 7 個記帳欄位；回 `True`／`False`，只有每一件取消原因都是 `ConditionalCheckFailed` 才算重複（E130） |
 | 11 | 2.2 [9]、3.1 Worker 職責、3.3、7.10、PART 9 | 事件格式：信封 `version`＋`period`＋`record`；`app/events.py`；花錢前加 0 保留；Worker 看不懂的訊息往外丟、進 DLQ；部署順序先 Worker 後 Gateway；`CHARGE_QUEUE_URL` 必填（佇列網址或 `disabled`），啟動時檢查（E131） |
-| 12 | 2.2 [9]、3.3、12.5 | Gateway 成功那一筆：`save_charge()` 先送 SQS、失敗或 `disabled` 時 `record_charge()`；只有 SQS 失敗印 `charge_queue_failed`（不告警，待決）；兩條都失敗用既有 `audit_write_failed` 告警、帶 `charged: false`；`disabled` 不建 SQS 連線（boto3 建連線即解析憑證）（E134） |
+| 12 | 2.2 [9]、3.3、12.5 | Gateway 成功那一筆：`save_charge()` 先送 SQS、失敗或 `disabled` 時 `record_charge()`；只有 SQS 失敗印 `charge_queue_failed`；兩條都失敗用既有 `audit_write_failed` 告警、帶 `charged: false`；`disabled` 不建 SQS 連線（boto3 建連線即解析憑證）（E134） |
+| 13 | 3.5、5.1 兩層的表、7.10、D12、8.2 的 M5、PART 9 IaC | Terraform 八個定案：兩個 PR 長期層先；DLQ `maxReceiveCount` 5（E127 原寫 3，改）；Lambda 逾時 20 秒、隱藏時間 120 秒、記憶體 128 MB；Worker 與 Gateway 的 `usage` 交易權限加 `dynamodb:EnclosingOperation`；Worker 安全群組出口只到 DynamoDB prefix list；`charge_queue_failed` 告警 5 分鐘 ≥ 3 筆；SQS 與 DLQ 用 SSE-SQS；destroy 角色加 Lambda 的 Describe／Delete（`DeleteEventSourceMapping` 用 `lambda:FunctionArn` 條件）、Deny 新增佇列（含 `ReceiveMessage`、`DeleteMessage`）與 Worker 角色、日誌（E135、E136） |
+| 14 | 3.3、12.5 | `audit_write_failed` 兩種意思（沒花錢的稽核寫不進去／花了錢兩條都失敗）要拆成兩個事件名，M6 處理（E134、E135） |
 
 ---
 
@@ -497,7 +627,6 @@
 
 | 項目 | 目前的建議 | 何時定 |
 |---|---|---|
-| 交易的 IAM 動作與 Endpoint Policy 寫法 | 寫 Terraform 前查 AWS 文件 | M5 寫 Terraform 時 |
-| Lambda 網卡收回時間 | 第 6 題第 7 步實測；超過 destroy workflow 上限就改放 VPC 外 | M5 上雲 |
-| SQS 隱藏時間與 Lambda 逾時的數字 | 隱藏時間 = 6 × Lambda 逾時（查證後定） | M5 寫 Terraform 時 |
-| `charge_queue_failed` 要不要告警、`audit_write_failed` 要不要拆成兩個事件名 | 寫 Terraform 時一起決定（多一組 metric filter 與告警） | M5 寫 Terraform 時 |
+| DynamoDB Gateway Endpoint Policy 與交易的配合 | 加 `usage` 表；動作維持 `GetItem`、`PutItem`、`UpdateItem`（交易照每件的動作檢查）；AWS 文件沒寫清楚 Endpoint Policy 是否認得 `EnclosingOperation`，先不在 Endpoint Policy 加條件 | PR② 寫每日層時 |
+| Lambda 網卡收回時間 | 第 6 題第 7 步實測；超過 destroy workflow 上限（30 分鐘）就先改 45，再不夠就改放 VPC 外 | M5 上雲 |
+| Lambda 記憶體實際用量 | 預設 128 MB；演練第 0 步看 `REPORT` 那行 | M5 上雲 |

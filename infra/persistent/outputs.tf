@@ -17,6 +17,7 @@ output "dynamodb_table_arns" {
     api_keys = aws_dynamodb_table.api_keys.arn
     quotas   = aws_dynamodb_table.quotas.arn
     audit    = aws_dynamodb_table.audit.arn
+    usage    = aws_dynamodb_table.usage.arn
   }
 }
 
@@ -48,4 +49,16 @@ output "alerts_topic_arn" {
 output "dns_query_log_config_id" {
   description = "ID of the Resolver query log configuration the daily VPC is attached to"
   value       = aws_route53_resolver_query_log_config.dns.id
+}
+
+# 每日層 ECS 的環境變數 CHARGE_QUEUE_URL 要填這個；網址含帳號 ID，只印出給人核對，不寫進任何紀錄
+output "charge_queue_url" {
+  description = "URL of the queue the Gateway sends charge events to"
+  value       = aws_sqs_queue.charge.url
+}
+
+# 每日層的 Worker Lambda 用這個角色；ARN 含帳號 ID，每日層用名字自己組，這裡印出來給人核對
+output "worker_role_arn" {
+  description = "ARN of the role the charge Worker Lambda runs as"
+  value       = aws_iam_role.worker.arn
 }

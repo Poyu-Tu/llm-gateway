@@ -1,6 +1,8 @@
 # GitHub Actions 向 AWS 借臨時身分的鑰匙（OIDC）。放在長期層：destroy 不能把自己的鑰匙也拆掉
-# 第一批只開「讀寫每日層的帳本」（E120 定案 2）；第二批加拆每日層骨架的權限（E121）；
-# 第三批加拆 D 段（NAT、DNS 防火牆、ALB、ECS）的權限（E123）
+# 第一批只開「讀寫每日層的帳本」（E120 定案 2）；
+# 第二批加拆每日層骨架的權限（E121）；
+# 第三批加拆 D 段（NAT、DNS 防火牆、ALB、ECS）的權限（E123）；
+# 第四批加拆 Worker（Lambda 與 SQS 觸發）的權限（E135）
 
 locals {
   # GitHub 2026/7/15 之後建立的 repo，身分證明的 sub 是「名字@編號」的新格式（本 repo 9/29 建立）
@@ -254,9 +256,54 @@ data "aws_iam_policy_document" "destroy_permissions" {
     resources = [aws_route53_resolver_query_log_config.dns.arn]
   }
 
+  # ---- 第四批（E135）：拆 Worker（Lambda 函式與 SQS 觸發）----
+
+  # 拆之前先看現況：只看不改，寫 "*"（跟前兩批的 Describe 同一個做法）
+  statement {
+    sid    = "DescribeDailyWorker"
+    effect = "Allow"
+    actions = [
+      "lambda:GetFunction",
+      "lambda:GetFunctionCodeSigningConfig",
+      "lambda:GetPolicy",
+      "lambda:ListVersionsByFunction",
+      "lambda:GetEventSourceMapping",
+      "lambda:ListTags",
+    ]
+    resources = ["*"]
+  }
+
+  # 刪函式：只准刪貼著 Layer = daily 的
+  statement {
+    sid       = "DeleteDailyWorker"
+    effect    = "Allow"
+    actions   = ["lambda:DeleteFunction"]
+    resources = ["arn:aws:lambda:${local.account_region}:function:*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Layer"
+      values   = ["daily"]
+    }
+  }
+
+  # 刪觸發：不靠標籤，改看「這條觸發接的是哪個函式」，只限 Worker 那一個
+  statement {
+    sid       = "DeleteWorkerTrigger"
+    effect    = "Allow"
+    actions   = ["lambda:DeleteEventSourceMapping"]
+    resources = ["arn:aws:lambda:${local.account_region}:event-source-mapping:*"]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "lambda:FunctionArn"
+      values   = [local.worker_function_arn]
+    }
+  }
+
   # ---- 以下是明文 Deny：之後不管加了什麼允許，長期層都碰不到（Deny 一定贏過 Allow）----
 
-  # 三張表：不准刪表、不准關刪除保護（UpdateTable）、不准關時光機、不准改資料
+  # 四張表：不准刪表、不准關刪除保護（UpdateTable）、不准關時光機、不准改資料
   statement {
     sid    = "DenyPersistentTables"
     effect = "Deny"
@@ -273,6 +320,7 @@ data "aws_iam_policy_document" "destroy_permissions" {
       aws_dynamodb_table.api_keys.arn,
       aws_dynamodb_table.quotas.arn,
       aws_dynamodb_table.audit.arn,
+      aws_dynamodb_table.usage.arn,
     ]
   }
 
@@ -342,6 +390,7 @@ data "aws_iam_policy_document" "destroy_permissions" {
   }
 
   # 第三批（E123）：Gateway 的兩個角色、告警、日誌、DNS 查詢日誌的設定，一樣碰不到
+  # 第四批（E135）：Worker 的角色、記帳失敗告警、Worker 日誌、兩個佇列，一樣碰不到
   statement {
     sid    = "DenyGatewayRolesChange"
     effect = "Deny"
@@ -356,7 +405,11 @@ data "aws_iam_policy_document" "destroy_permissions" {
       "iam:PutRolePermissionsBoundary",
       "iam:DeleteRolePermissionsBoundary",
     ]
-    resources = [aws_iam_role.task_execution.arn, aws_iam_role.task.arn]
+    resources = [
+      aws_iam_role.task_execution.arn,
+      aws_iam_role.task.arn,
+      aws_iam_role.worker.arn,
+    ]
   }
 
   statement {
@@ -371,7 +424,11 @@ data "aws_iam_policy_document" "destroy_permissions" {
       "cloudwatch:PutMetricAlarm",
       "cloudwatch:DisableAlarmActions",
     ]
-    resources = [aws_sns_topic.alerts.arn, aws_cloudwatch_metric_alarm.audit_write_failed.arn]
+    resources = [
+      aws_sns_topic.alerts.arn,
+      aws_cloudwatch_metric_alarm.audit_write_failed.arn,
+      aws_cloudwatch_metric_alarm.charge_queue_failed.arn,
+    ]
   }
 
   statement {
@@ -390,6 +447,8 @@ data "aws_iam_policy_document" "destroy_permissions" {
       "${aws_cloudwatch_log_group.gateway.arn}:*",
       aws_cloudwatch_log_group.dns_queries.arn,
       "${aws_cloudwatch_log_group.dns_queries.arn}:*",
+      aws_cloudwatch_log_group.worker.arn,
+      "${aws_cloudwatch_log_group.worker.arn}:*",
     ]
   }
 
@@ -398,6 +457,22 @@ data "aws_iam_policy_document" "destroy_permissions" {
     effect    = "Deny"
     actions   = ["route53resolver:DeleteResolverQueryLogConfig"]
     resources = [aws_route53_resolver_query_log_config.dns.arn]
+  }
+
+  # 出單夾與問題單抽屜：不准刪佇列、改設定（含 DLQ 次數、加密、抽屜收誰的單）、改存取政策、清空、一張張拿單銷單
+  statement {
+    sid    = "DenyChargeQueues"
+    effect = "Deny"
+    actions = [
+      "sqs:DeleteQueue",
+      "sqs:SetQueueAttributes",
+      "sqs:AddPermission",
+      "sqs:RemovePermission",
+      "sqs:PurgeQueue",
+      "sqs:ReceiveMessage",
+      "sqs:DeleteMessage",
+    ]
+    resources = [aws_sqs_queue.charge_dlq.arn, aws_sqs_queue.charge.arn]
   }
 
   statement {
