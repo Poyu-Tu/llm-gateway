@@ -37,7 +37,7 @@ data "aws_iam_policy_document" "worker_trust" {
 
 resource "aws_iam_role" "worker" {
   name               = "llm-gateway-charge-worker"
-  description        = "Used by charge Worker Lambda: read the charge queue and write the three ledgers in one transcation"
+  description        = "Used by charge Worker Lambda: read the charge queue and write the three ledgers in one transaction"
   assume_role_policy = data.aws_iam_policy_document.worker_trust.json
 }
 
@@ -53,7 +53,7 @@ data "aws_iam_policy_document" "worker_permissions" {
   # 三本帳：每張表只給 record_charge() 用到的那一個動作，而且只准在交易裡做（E135 定案 4）
   # IAM 沒有「交易」這個權限，交易裡每一件照本來的動作檢查；EnclosingOperation 把它鎖在交易裡
   statement {
-    sid       = "InsertUsageInTranscation"
+    sid       = "InsertUsageInTransaction"
     effect    = "Allow"
     actions   = ["dynamodb:PutItem"]
     resources = [aws_dynamodb_table.usage.arn]
@@ -96,7 +96,7 @@ data "aws_iam_policy_document" "worker_permissions" {
   statement {
     sid    = "ManageNetworkInterfaces"
     effect = "Allow"
-    actions =[
+    actions = [
       "ec2:CreateNetworkInterface",
       "ec2:DescribeNetworkInterfaces",
       "ec2:DeleteNetworkInterface",

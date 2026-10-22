@@ -26,7 +26,7 @@ resource "aws_sqs_queue" "charge" {
   # 失敗幾次進 DLQ：AWS 建議至少 5，因為 Lambda 被限流時也算收過一次（E135 定案 2）
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.charge_dlq.arn
-    maxReceiveCount = 5
+    maxReceiveCount     = 5
   })
 }
 

@@ -26,7 +26,7 @@ def log_charge(event_name: str, record: dict) -> None:
     print(json.dumps(entry), flush=True) # 馬上送出，不等緩衝
 
 
-# 處理一則訊息：拆信封 → 三本帳一起寫；看不懂或寫不進去就往外丟，讓 SQS 重送、三次後進 DLQ
+# 處理一則訊息：拆信封 → 三本帳一起寫；看不懂或寫不進去就往外丟，讓 SQS 重送、五次後進 DLQ
 def process_message(client: BaseClient, body: str) -> bool:
     """Write one charge event into the ledger. Return False if it was already recorded."""
     record, period = parse_event(body)
