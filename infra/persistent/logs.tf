@@ -1,4 +1,4 @@
-# 兩個日誌群組、DNS 查詢日誌的設定、稽核寫失敗的告警：都放長期層（E123 定案 7 推出來的安排）
+# 三個日誌群組、DNS 查詢日誌的設定、兩個告警：都放長期層（E123 定案 7 推出來的安排；M5 加 Worker 的群組與 SQS 告警）
 #   不需要拆除組多拿 logs:DeleteLogDelivery 那種只能寫 "*" 的刪除權限（DNS 查詢日誌刪設定時要用）
 #   日誌在每日層拆掉之後還在：S08 的封鎖紀錄、稽核寫失敗的那一行，事後查得到
 #   日誌群組、查詢日誌設定、指標篩選都不跳錶；告警每個每月約 US$0.10（前 10 個免費）
@@ -19,6 +19,15 @@ resource "aws_cloudwatch_log_group" "gateway" {
 # 每一筆 DNS 查詢都會記：查了哪個網域、DNS 防火牆放行、告警還是封鎖（S08 的證據）
 resource "aws_cloudwatch_log_group" "dns_queries" {
   name                        = "/llm-gateway/dns-queries"
+  retention_in_days           = 30
+  deletion_protection_enabled = true
+}
+
+# ---- Worker（Lambda）的日誌 ----
+# 每則訊息一行 charge_recorded／charge_already_recorded，只有單號與金額（E131 預設值）
+# 名字照 Lambda 的規定：/aws/lambda/<函式名>；函式在每日層，群組在這裡先建好，拆每日層時日誌還在
+resource "aws_cloudwatch_log_group" "worker" {
+  name                        = local.worker_log_group
   retention_in_days           = 30
   deletion_protection_enabled = true
 }
@@ -57,6 +66,39 @@ resource "aws_cloudwatch_metric_alarm" "audit_write_failed" {
   period              = 60
   evaluation_periods  = 1
   threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+}
+
+# ---- SQS 送不進去的告警（E135 定案 6）----
+# Gateway 送不進 SQS 時改走備援、帳是對的，只在日誌印一行 {"event": "charge_queue_failed", ...}
+# 偶爾一次不響；5 分鐘內 3 次以上代表持續故障（DNS 漏網域、IAM 少權限），才通知
+resource "aws_cloudwatch_log_metric_filter" "charge_queue_failed" {
+  name           = "llm-gateway-charge-queue-failed"
+  log_group_name = aws_cloudwatch_log_group.gateway.name
+  pattern        = "{ $.event = \"charge_queue_failed\" }"
+
+  metric_transformation {
+    name      = "ChargeQueueFailed"
+    namespace = "LLMGateway"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "charge_queue_failed" {
+  alarm_name        = "llm-gateway-charge-queue-failed"
+  alarm_description = "The Gateway keeps failing to send charge events to SQS; charges fall back to the synchronous ledger"
+
+  namespace   = "LLMGateway"
+  metric_name = "ChargeQueueFailed"
+  statistic   = "Sum"
+  # 5 分鐘一格、看 1 格、≥ 3 筆就響
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 3
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
 

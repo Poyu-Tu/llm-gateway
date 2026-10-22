@@ -1,5 +1,5 @@
-# 三張表的名字要和 app/db.py 一模一樣（API_KEYS_TABLE、QUOTAS_TABLE、AUDIT_TABLE），Gateway 才找得到
-# 主鍵照 scripts/create_tables.py；usage 表等 M5 的 Worker 再建
+# 四張表的名字要和 app/db.py 一模一樣（API_KEYS_TABLE、QUOTAS_TABLE、AUDIT_TABLE、USAGE_TABLE），Gateway 與 Worker 才找得到
+# 主鍵照 scripts/create_tables.py；四張表都在這裡（usage 是 M5 加的）
 
 # 查 Key：主鍵是 Key 的雜湊
 resource "aws_dynamodb_table" "api_keys" {
@@ -53,6 +53,31 @@ resource "aws_dynamodb_table" "audit" {
 
   attribute {
     name = "request_id"
+    type = "S"
+  }
+
+  deletion_protection_enabled = true
+
+  point_in_time_recovery {
+    enabled = true
+  }
+}
+
+# 用量明細（M5）：一筆記帳一列，按人查、照時間排（E130 定案 2）
+# 由 Worker 與 Gateway 備援透過 record_charge() 的交易寫入
+resource "aws_dynamodb_table" "usage" {
+  name         = "usage"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "user_id"
+  range_key    = "ts_request"
+
+  attribute {
+    name = "user_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "ts_request"
     type = "S"
   }
 

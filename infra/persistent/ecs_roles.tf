@@ -1,6 +1,6 @@
 # Gateway 在 Fargate 上用的兩個身分（E123 定案 2：放長期層）
 #   執行角色：給 ECS 平台用。拉映像、寫日誌、把 SSM 的機密交給容器，容器裡的程式拿不到它
-#   任務角色：給 Gateway 程式用。讀寫三張表、向 STS 要身分證明去換 OpenAI 的通行證
+#   任務角色：給 Gateway 程式用。讀寫四張表、送記帳事件進 SQS、向 STS 要身分證明去換 OpenAI 的通行證
 # 放長期層的理由：IAM 免費；任務角色的 ARN 不變，OpenAI 那邊的對應設一次就好；
 # destroy 角色完全不需要任何 IAM 刪除權限
 # 指到每日層的東西（日誌群組、SSM 參數）用寫死的名字，每日層那邊要用一模一樣的名字
@@ -150,6 +150,29 @@ data "aws_iam_policy_document" "task_permissions" {
     effect    = "Allow"
     actions   = ["dynamodb:PutItem"]
     resources = [aws_dynamodb_table.audit.arn]
+  }
+
+  # 用量明細：只有 record_charge() 的交易會寫（SQS 送不進去時的備援，E134），所以只准在交易裡新增（E135 定案 4）
+  # quotas、audit 不加這個條件：花錢前的「加 0」與沒花錢的三條路都在交易外面寫
+  statement {
+    sid       = "InsertUsageInTransaction"
+    effect    = "Allow"
+    actions   = ["dynamodb:PutItem"]
+    resources = [aws_dynamodb_table.usage.arn]
+
+    condition {
+      test     = "ForAnyValue:StringEquals"
+      variable = "dynamodb:EnclosingOperation"
+      values   = ["TransactWriteItems"]
+    }
+  }
+
+  # 成功那一筆送進出單夾（app/events.py 的 send_event）；只准送，不准收、不准刪，也碰不到 DLQ
+  statement {
+    sid       = "SendChargeEvents"
+    effect    = "Allow"
+    actions   = ["sqs:SendMessage"]
+    resources = [aws_sqs_queue.charge.arn]
   }
 
   # 向 STS 要身分證明去換 OpenAI 的通行證（E113）。這個動作 AWS 規定 Resource 寫 "*"；
