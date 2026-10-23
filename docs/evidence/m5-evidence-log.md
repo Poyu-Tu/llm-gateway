@@ -3,7 +3,7 @@
 > 依決策書 11.5 遮蔽：AWS 帳號 ID、存取金鑰 ID、公開 IP；OpenAI 的 Project ID、金鑰 Tracking ID、金鑰末 4 碼、建立者 user ID；個人帳號名稱（含終端機提示字元與路徑中的使用者資料夾名稱，一律寫成 `<user>`）。
 > 本檔收錄「文字型」證據；截圖另存於 `docs/screenshots/`（檔名以 `m5-` 開頭，正式清單照決策書 11.4 的 S 編號），日誌另存於 `docs/logs/`。
 > E 編號接續 `m4-evidence-log.md`（E108～E126），M5 從 E127 開始。
-> 紀錄日期：2026-10-20 建立，10-21 更新（E130～E133），10-22 更新（E134～E137），10-23 更新（E138～E140）（M4 於 10/20 結案；M5 檢查點併入 11/1 的 M6 檢查點，本人目標 10/25 前完成 M5）
+> 紀錄日期：2026-10-20 建立，10-21 更新（E130～E133），10-22 更新（E134～E137），10-23 更新（E138～E140、晚上 E141～E144）（M4 於 10/20 結案；M5 檢查點併入 11/1 的 M6 檢查點，本人目標 10/25 前完成 M5）
 
 ---
 
@@ -767,6 +767,259 @@ Claude 讀 `plan.txt`（存在 `infra/daily/build/`，`.gitignore` 已擋）逐�
 
 ---
 
+## E141. 上雲演練準備：映像推 ECR 與 Windows 認證管理員的長度上限（2026-10-23 21:00～21:19，個人電腦，`main` = `016d6b0`）
+
+**依據：** `docs/handoff/m5-daily-merged-handoff.md` 第 3 節 A～C；M4 證據紀錄的 ECR 登入（PowerShell 5 管線會壞掉密碼）。
+
+**生活比喻：** 去寄物櫃放東西，櫃子太小塞不進去，手上拿的還是上次的舊號碼牌；換一個臨時置物袋放，用完就丟。
+
+| # | 步驟 | 結果 |
+|---|---|---|
+| A | 清 `AWS_*` → `aws login` → `git pull` → `$tag = git rev-parse --short HEAD` | `main` 已是最新；`$tag` = `016d6b0`；`$a.Length` = 12（帳號 ID 不印） |
+| B | `docker build --platform linux/amd64 --provenance=false --sbom=false` | 成功，結尾沒有 `exporting attestation manifest` |
+| B | `$pw = aws ecr get-login-password` → `docker login --password $pw` | **`error storing credentials … The stub received bad data.`**；接著 `push` 回 `Your authorization token has expired`（用到以前存的舊通行證） |
+| B | 改用臨時 `DOCKER_CONFIG`（空的 `config.json`） | 同樣錯誤：設定檔沒寫 `credsStore` 時，Docker 會自己找 `docker-credential-wincred`，它跟 `docker.exe` 在同一個資料夾 |
+| B | 查原因 | **`$pw.Length` = 2,644**；M4 時是 2,252。Windows 認證管理員一筆約 2,560 字元的上限，這次的通行證超過了 |
+| B | 解法：只在這個終端機把 Docker 資料夾從 `PATH` 拿掉，用完整路徑叫 `docker`，通行證寫進臨時 `config.json`，推完連資料夾刪掉、還原 `PATH` | `Login Succeeded`（提示「沒加密存放」，臨時檔隨即刪除）；推送 5 層 `Layer already exists`（與 M4 共用的底層）、1 層 `Pushed`；`016d6b0: digest: sha256:221a3699…`，與本機建置相同，大小 1814 |
+| B | `describe-image-scan-findings` | **HIGH 3、MEDIUM 9、LOW 3**，與 M4 相同，沒有 CRITICAL |
+| B2 | `$env:TF_VAR_admin_cidr` | 不印 IP |
+| C | `plan -no-color > infra/daily/build/plan.txt`，Claude 讀檔逐項核對 | **`Plan: 40 to add, 0 to change, 0 to destroy.`**；映像 `016d6b0`、`handler` = `worker.handler.handler`、`python3.12`、`CHARGE_QUEUE_URL` 指到 `llm-gateway-charge`、放行清單有 `sqs.ap-northeast-1.amazonaws.com.`、防火牆 `ALERT`、Endpoint Policy 有 `usage`、ALB 只放行 `/32` |
+
+**學到的：** ECR 通行證的長度會變（跟 `aws login` 的暫時憑證有關）。PowerShell 5 不能用管線傳密碼（M4），個人電腦的認證管理員又塞不下（M5），兩個坑疊在一起；之後在這台電腦推映像，照上表最後一個做法。
+
+---
+
+## E142. Worker 建不起來：信任政策的來源條件擋住 Lambda 服務（2026-10-23 21:19～21:40，個人電腦，PR #26）
+
+**依據：** E135 定案 4（Worker 角色）；`infra/persistent/worker_role.tf`。
+
+**生活比喻：** 會計的員工證上寫「只有拿著這位會計名牌的人才能借」。Lambda 服務替會計「裝座位」（建網卡）、去出單夾拿單時，身上不帶會計的名牌，所以借不到證。
+
+### 發生什麼
+
+第一次每日層 `apply`：
+
+```
+Error: waiting for Lambda Function (llm-gateway-charge-worker) create: unexpected state 'Failed', wanted target 'Active, ActiveNonInvocable'.
+last error: InsufficientRolePermissions: The function's execution role doesn't have permission to perform this operation.
+```
+
+NAT、ALB 等已建好（**計費約 21:19 開始**）；ECS 服務因為 `depends_on` SQS 觸發，還沒建。
+
+### 查原因
+
+| 證據 | 內容 |
+|---|---|
+| `worker_role.tf` 的信任政策 | 兩個條件：`aws:SourceAccount` = 本帳號、`ArnLike aws:SourceArn` = Worker 函式 ARN |
+| AWS 文件（Lambda 開發者指南「Using source function ARN to control function access behavior」） | Lambda 替 VPC 函式**建網卡**、從 **SQS 事件來源拉訊息**時，呼叫裡不帶來源函式的 ARN |
+| AWS re:Post「lambda vpc deployment error」 | 同一個錯誤、同樣在 CloudTrail 看到 `DryRunOperation`；拿掉信任政策的 `ArnLike` 條件後解決 |
+| CloudTrail（`lookup-events`，免費） | 13:19:52Z Lambda 服務 `AssumeRole` Worker 角色**成功**；同一秒 `CreateNetworkInterface` 回 `Client.DryRunOperation`（「如果不是預演就會成功」）；之後**沒有任何真正的建網卡紀錄**。被擋的那一次借證沒有出現在帳號的紀錄裡（推測，沒有直接證據） |
+
+**為什麼之前的驗證沒抓到：** 權限模擬器與 `validate-policy`（E138）驗的是身分政策（「這張證能開哪些門」），不驗信任政策（「誰能借這張證」），而且條件文法完全正確。
+
+### 修正（本人選 A）
+
+| 選項 | 內容 | 結果 |
+|---|---|---|
+| **A（選）** | 兩個條件都拿掉，只留 `lambda.amazonaws.com` 能借；`sid` `LambdaInThisAccount` → `LambdaService`；註解寫明原因 | 要把這張證交給函式，建函式的人必須有本帳號的 `iam:PassRole`，外面拿不到；文件沒說建網卡時會帶 `aws:SourceAccount`，留著可能再失敗一輪 |
+| B | 只拿掉 `aws:SourceArn` | 沒選：可能再撞一次 |
+
+雲上的東西先留著（本人選）：拆掉重建比多跑 20 分鐘還慢，多花約 US$0.05。
+
+| # | 步驟 | 結果 |
+|---|---|---|
+| 1 | 分支 `fix/worker-trust`，本人改 `worker_role.tf` 第 12～36 行 | `validate` 通過 |
+| 2 | 長期層 `plan`（寫進檔案讓 Claude 讀） | `0 to add, 2 to change`：`aws_iam_role.worker` 拿掉 `Condition`、換 `Sid`；`aws_iam_role_policy.destroy` 顯示整段 `-` → `(known after apply)`，原因是 destroy 角色的政策文件引用 Worker 角色的 ARN，角色有改動時要等 apply 才重算 |
+| 3 | commit `205f195`（1 檔，+4／−14）；這台電腦沒有 GitHub CLI，Claude 用網址帶入中文標題與說明，本人按 Create | PR #26；**6 個檢查全過**；本人合併 → `main` = `1e96356`；本機與遠端分支刪除 |
+| 4 | 長期層 `apply` → `plan` | **`0 added, 1 changed, 0 destroyed`**（destroy 政策重算後與原本相同，所以不用改）；**`No changes.`** |
+| 5 | 每日層 `apply`（`$tag` 維持 `016d6b0`） | **`3 added, 0 changed, 1 destroyed`**：換掉失敗的 Lambda、建 SQS 觸發（24 秒）、ECS 服務（**1 分 19 秒**穩定）；任務定義 `llm-gateway:2`。**Lambda 這次建得起來，證實原因就是信任政策的條件** |
+
+### 面試可用的說法
+
+- 「我在 Lambda 的信任政策加了 `aws:SourceArn`，想做到只有這個函式能借這個角色。結果 Lambda 建不起來：AWS 替 VPC 函式建網卡、從 SQS 拉訊息時，不帶來源函式的 ARN。我查了 CloudTrail：建函式時那一次借證成功、建網卡的預演也說會成功，之後就沒有真正建網卡的紀錄，跟 AWS 論壇上的案例一樣。」
+- 「為什麼權限模擬器沒抓到？它驗的是身分政策，也就是這張證能開哪些門；我寫錯的是信任政策，也就是誰能借這張證。所以上雲演練是必要的，本機和模擬器都證明不了這一層。」
+
+---
+
+## E143. 上雲演練 0～7（2026-10-23 21:40～22:52，個人電腦，`main` = `1e96356`，映像 `016d6b0`）
+
+**依據：** E127 定案 6 的演練順序；E135 定案 2、3、6；E139 定案 4；`docs/handoff/m5-daily-merged-handoff.md` 第 3 節。
+
+**生活比喻：** 出單夾與後台會計正式開工，然後照消防演習的劇本一項一項演：會計停工、外場倒掉、字跡糊掉的單、出單夾整個拿不到，最後打烊拆店計時。
+
+### 觀察 1：DNS 網域結尾加點之後的假改動（M4 帶來）
+
+每日層 `apply` 後馬上 `plan`：**`No changes.`** 切 BLOCK 時清單只有 1 項（M4 是 3 項，多的 2 項就是結尾點造成的假改動）。**已消除。**
+
+### 拿 Key（`scripts/seed.py`）
+
+- 先讀程式：**每跑一次就發一張新 Key，舊 Key 不會停用**；只重設 `limit` 那一列，**不歸零本月已花**
+- 本人 10/23 定：如果 alice 本月已花超過上限，**A：上限調成「已花 + 1,000」**（只改規定、不改已發生的帳）。實際查到 alice 10 月一筆都沒有，不用調
+- 匯出暫時憑證 → `DYNAMODB_TARGET=aws` → 輸出收進變數；兩把 Key 長度 `67`、`67`；跑完清掉 `AWS_*`
+
+### 第 0 步：bob 問一題（21:42:58）
+
+| 檢查 | 結果 |
+|---|---|
+| 回答 | `Bonsoir.`、`gpt-6-luna`，`request_id` `ae9dad30…` |
+| Worker 日誌 | 21:43:04 `{"event": "charge_recorded", "request_id": "ae9dad30…", "cost_micro_usd": 4}` |
+| `REPORT` | `Duration: 2417.64 ms`、`Billed Duration: 2786 ms`、`Memory Size: 128 MB`、**`Max Memory Used: 89 MB`**、`Init Duration: 368.20 ms`（冷啟動） |
+| Gateway 日誌 | 只有啟動時的 `{"event": "charge_queue_mode", "mode": "sqs"}`，沒有 `charge_queue_failed` |
+| `usage` | 1 列：`2026-10-23T13:42:58…#ae9dad30…`、`gpt-6-luna`、`4` |
+| `quotas` | bob 10 月 23 → **27** |
+| `audit`（`scripts.show_audit`，**S14**） | `charged: True`、`status: ok`、`cost_micro_usd: 4`、64 字 `prompt_hash`、`summary: Say good evening in French`、`pii_types: []`；**沒有原文** |
+| 時間線 | 13:42:58 收到請求 → 13:43:01 Gateway 查 SQS 網域、送出 → 13:43:04 Worker 寫好三本帳 |
+
+**這一步同時證明：** `handler` 字串、Lambda import 打包的 6 個檔、Worker 的 `EnclosingOperation` 條件在雲上放行、Endpoint Policy 讓交易通過、SQS 觸發把訊息交給 Worker。**記憶體：** 128 MB 用了 89 MB，維持 128。
+
+### 第 E 步：SQS 實際查的網域
+
+DNS 查詢日誌 21:43:01：`sqs.ap-northeast-1.amazonaws.com.` 的 A、AAAA，`NOERROR`，來源是 Gateway 的任務。與放行清單相同，**不用改 `dns_firewall.tf`**。
+
+### 第 F 步：切 BLOCK
+
+`apply -var=dns_firewall_action=BLOCK` → **`0 added, 1 changed, 0 destroyed`**（只有 `everything_else`）；再聊一次 `Gracias.`。
+
+### 第 1、2 步：停觸發、alice 連問 4 題（約 22:05，錄影 `m5-s12-worker-off.mp4`，**S12**）
+
+- 改在另一個 PowerShell 視窗錄影（字比較大）；變數用暫存檔從 VS Code 搬過去、讀完即刪（不經剪貼簿）；提示字元改成 `PS> `
+- 錄影前先把觸發開回來，錄影中 `--no-enabled` → `"Disabling"` → `"Disabled"`
+- alice 用 `Compare … in one sentence.` 4 題（含關鍵字 `compare`，走強模型；只要一句，控制花費）：**每題都有回答**
+- `depth`（`ApproximateNumberOfMessages`）= **4**；`quota alice` 的 `2026-10` 列已花 **0**：這一列是花錢前的「加 0」建出來的，錢付了、帳還沒記
+- 第一次打成 `ask $ka$_`（少一個空格），4 題都是 401 `Authentication failed`，在驗票口就擋下、沒有呼叫 OpenAI；剪片時剪掉
+
+### 第 3 步：停掉 Gateway（錄影 `m5-step3-gateway-stopped.mp4`）
+
+`aws ecs stop-task` → `"STOPPED"`；`depth` 還是 **4**。外場倒了，4 張單都還在出單夾。對照 M0.5：LiteLLM 在寫帳前被停掉，帳就掉了。ECS 服務自己補一個新任務。
+
+### 第 4 步：觸發開回來，帳補上
+
+- `"Enabling"` → `"Enabled"`；**22:14:30 同一秒 4 行 `charge_recorded`：248、358、318、350**（強模型；便宜模型一題是個位數）
+- alice 10 月已花 **1,274**，上限 1,000 → **實際超扣 274 micro-USD（27.4%）**
+- 第一次查 `depth` 還是 4（SQS 計數有幾秒延遲），下一次是 0
+- 之後 alice 再問 → **429 `Monthly quota exceeded`**：帳晚到的那段時間會超扣，帳一到門禁馬上生效
+- 決策書「強模型一次最多超扣約 28,000」是輸出上限寫滿的最壞情況；這次是「每題都很短」的實際情況。Claude 事前估「一題上千」，估太高
+
+### 第 5 步：壞訊息進 DLQ（錄影 `m5-s13-dlq-1.mp4`、`m5-s13-dlq-2.mp4`，**S13**）
+
+| 時間 | 事件 |
+|---|---|
+| 約 22:23 | `aws sqs send-message --message-body "not json"`（`MessageId` `fbbb4759…`） |
+| 同時 | bob `Say hello in Italian` → `Ciao!`；bob 已花 31 → **35**：正常的帳照記 |
+| 22:23:16、22:25:16、22:27:16、22:29:16、22:31:16 | Worker 日誌 **5 次** `[ERROR] InvalidEventError: Message is not JSON`（`worker/handler.py` 第 46 行 → `process_message` 第 32 行 → `app/events.py` 第 41 行），間隔 120 秒 = 隱藏時間 |
+| 22:36 | `dlq` = **1**；主佇列 `depth` = **0**；DLQ 裡的內容 `"not json"` |
+
+證明 `maxReceiveCount` 5（E135 定案 2）、隱藏時間 120 秒（定案 3）在雲上生效；壞訊息不會卡住後面的單。
+
+### 第 6.5 步：拆除前的除錯紀錄（免費）
+
+`TF_LOG=DEBUG` 跑 `plan -destroy`，Claude 從紀錄整理 Terraform 實際呼叫的讀取 API：
+
+- **Lambda：** `GetFunction`、`GetFunctionCodeSigningConfig`、`ListVersionsByFunction`、`ListTags`、`GetEventSourceMapping`，全部在 destroy 角色的 `DescribeDailyWorker` 裡；交接檔擔心的 `GetFunctionConfiguration`、`GetFunctionRecursionConfig` **沒有被呼叫**
+- **EC2：** `DescribeVpcs`、`DescribeVpcAttribute`、`DescribeSubnets`、`DescribeRouteTables`、`DescribeInternetGateways`、`DescribeSecurityGroups`、`DescribeSecurityGroupRules`、`DescribeNetworkAcls`、`DescribeVpcEndpoints`、`DescribePrefixLists`、`DescribeNatGateways`、`DescribeAddresses`、`DescribeAddressesAttribute`，都在清單裡
+- **限制：** PowerShell 5 把錯誤輸出照視窗寬度折行，部分行被切斷，ECS、ALB 沒有逐一對完（M4 已實拆過）
+- 紀錄第一行顯示個人電腦的 Terraform 是 **1.16.5**（E128 的升級是在公司電腦做的）；`versions.tf` 允許 1.16.x，不影響
+- 紀錄含帳號 ID，讀完由本人刪除
+
+### 第 6 步：SQS 網域拿掉，Gateway 自己記帳
+
+| # | 步驟 | 結果 |
+|---|---|---|
+| ① | `apply … -var=dns_firewall_action=BLOCK -var=allow_sqs_domain=false` | `0 added, 1 changed, 0 destroyed`（放行清單少了 SQS 網域，45 秒） |
+| ② | bob `Say good night in German` | `Gute Nacht!`，`request_id` `490357fe…` |
+| ② | Gateway 日誌 | 22:43:24 **`{"event": "charge_queue_failed", "request_id": "490357fe…", "error_type": "EndpointConnectionError"}`** |
+| ② | DNS 查詢日誌 | **同一秒** 22:43:24：`sqs.ap-northeast-1.amazonaws.com.` 的 A、AAAA 被 `BLOCK`（另有作業系統自動接 `.ap-northeast-1.compute.internal.` 再查的兩筆，一樣被擋） |
+| ② | Worker 日誌 | 空的 |
+| ② | `quota bob` | 35 → **40**：Gateway 用同一支交易自己記好帳 |
+| ③ | 不帶 `allow_sqs_domain` 再 `apply`（維持 BLOCK） | `0 added, 1 changed, 0 destroyed`（33 秒） |
+
+- DNS 被擋與改走備援在同一秒：SQS 連線逾時設短（E127 預設值「DNS 被擋時要快速失敗」）有效
+- 剛聊完馬上查時三份日誌都是空的：CloudWatch 收日誌有幾秒到一分鐘的延遲，第二次查才出現
+- 有一次在第二個分頁打 `apply`：那裡沒有 `$tag`，被 `image_tag` 的格式檢查擋下（`var.image_tag is ""`），什麼都沒改；另一次在 PowerShell 分頁 apply 被問 `admin_cidr`，同樣沒改到東西
+
+### 第 7 步：destroy workflow（本人 22:47 按 Run workflow，destroy #3）
+
+| 項目 | 結果 |
+|---|---|
+| 總時間 | **4 分 11 秒**全綠（Destroy 那一步 4 分 5 秒） |
+| 結果 | `Destroy complete! Resources: 40 destroyed.`、`The daily state is empty` |
+| Terraform 1.16.6 | 「Install Terraform and check its fingerprint」1 秒通過（`sha256sum --check --strict`，E128 帶來的待驗） |
+| Lambda 相關 | 觸發 2 秒、Lambda 5 秒、**Worker 安全群組 53 秒、私有子網 54 秒** |
+| 其他 | ECS 服務 2 分 36 秒、IGW 1 分 45 秒、NAT 1 分 11 秒、ALB 17 秒 |
+| 一鍵拆光 | 第一次就成功（M4 帶來的 PR #16 修正） |
+
+- **Lambda 網卡收回約 1 分鐘**（E127 定案 5 的弱點），離 30 分鐘上限很遠：**`timeout-minutes` 不用改，Lambda 不用搬出 VPC**
+
+### 演練中發現的新問題
+
+- **公開的 Actions 日誌印出本人的 IP：** destroy 在列出「要拆掉什麼」時，ALB 安全群組放行的 `/32` 位址以明文出現（帳號 ID 有被 `add-mask` 遮住）。repo 是公開的。處理：本人刪除這次 run 的日誌；程式根治方法待定（例如 `admin_cidr` 變數加 `sensitive = true`），M4 的 destroy run 也要檢查
+- **seed 重跑留下多把有效的 Key：** M4 與這次各發一組，舊的都沒停用
+
+### 花費（初估，待 Cost Explorer）
+
+- 計費資源從約 21:19 建到約 22:51，約 1 小時 32 分；按小時計費、不滿一小時進位：NAT 2 × 0.062、ALB 2 × 0.0243，加公有 IPv4、Fargate → **約 US$0.2**
+- OpenAI：bob 4 題便宜模型、alice 4 題強模型 1,274 micro-USD，合計約 US$0.0013
+
+### 這次證明了什麼、沒證明什麼
+
+- **證明：** 成功那一筆走 SQS → Worker 寫三本帳；Worker 停工時回答照給、單子留在佇列；Gateway 被停時佇列不掉帳；帳補上後門禁生效、實際超扣 274；壞訊息 5 次後進 DLQ、不影響正常的帳；SQS 拿不到時 Gateway 同一秒改走備援並留日誌；Lambda 網卡約 1 分鐘收回；一鍵拆光
+- **沒證明：** `charge_queue_failed` 告警真的響（門檻 5 分鐘 ≥ 3 筆，只聊一次）；高流量下 Worker 的同時執行數；「拿到 OpenAI 回答之後、送 SQS 之前」Gateway 當掉的空窗（E127，靠 M6 對帳）
+
+### 面試可用的說法
+
+- 「我讓會計停工，連問四題，每題都有回答，佇列堆了四則、額度一毛都沒動。重開之後同一秒四筆入帳，使用者實際超出上限 27%。這就是不做預扣的代價，我量過、寫進決策書；硬上限要靠預扣，我知道它的成本。」
+- 「我故意丟一則不是 JSON 的訊息。Worker 每兩分鐘試一次、試了五次，第六次被收的時候進了 DLQ；同一時間另一個人的正常帳照記。」
+- 「我用 DNS 防火牆把 SQS 的網域拿掉，Gateway 在同一秒查不到網域、改走同步記帳，回答照給，日誌留一行 `charge_queue_failed`。」
+- 「Lambda 放在 VPC 裡，大家擔心拆除時網卡要很久才收回。我實測：約一分鐘，整個每日層四分鐘拆完。」
+
+---
+
+## E144. 收尾：公開日誌的 IP、PR #27、Cost Explorer、文件（2026-10-23 22:55～，個人電腦）
+
+**依據：** E143「演練中發現的新問題」；決策書 v2.10 的 11.5（遮蔽規範）。
+
+**生活比喻：** 信封上的地址塗掉了，郵局的收件紀錄卻又抄了一份原文；兩個地方都要處理。
+
+### 公開 Actions 日誌
+
+| # | 步驟 | 結果 |
+|---|---|---|
+| 1 | Claude 讀 destroy #3 的日誌 | `aws_security_group.alb` 的 `ingress` 清單與 `aws_vpc_security_group_ingress_rule.alb_http_from_admin` 的 `cidr_ipv4` 兩處印出本人 IP（帳號 ID 有被 `add-mask` 遮住） |
+| 2 | 本人刪除 destroy #3 的日誌 | Claude 確認步驟點開已沒有內容 |
+| 3 | Claude 查 M4 的 destroy #1、#2 | #2（10/19）同樣印出當時的 IP；#1 畫面被截斷、看不到完整內容 |
+| 4 | 本人刪除 #1、#2 的日誌 | Claude 確認 #2 已查不到 IP |
+
+### PR #27（分支 `fix/admin-cidr-sensitive`）
+
+| 檔案 | 改動（本人打字） |
+|---|---|
+| `infra/daily/variables.tf` | `admin_cidr` 加 `sensitive = true` 與一行註解 |
+| `.github/workflows/destroy.yml` | `terraform destroy … 2>&1 \| sed -u -E 's#([0-9]{1,3}\.){3}[0-9]{1,3}/32#x.x.x.x/32#g'` 與一行註解；`set -o pipefail` 讓 destroy 失敗時這一步照樣失敗 |
+
+- **只加 `sensitive` 不夠：** `aws_security_group.alb` 的 `ingress` 是 Terraform 從 AWS 讀回來的值，Terraform 不知道它跟變數有關，`sensitive` 管不到
+- 驗證：`validate` 通過；每日層 `plan` 放行規則顯示 `cidr_ipv4 = (sensitive value)`（`0.0.0.0/0` 照常顯示）；過濾規則用假資料在本人電腦試過（`/32` 被換掉，`0.0.0.0/0`、`10.0.10.0/24` 不受影響）
+- commit `03356ef`（2 檔、+5／−1，縮排 Claude 讀檔核對）；這台電腦沒有 GitHub CLI，Claude 用網址帶入中文標題與說明，本人按 Create；**6 個檢查全過**；本人合併 → `main` = `32e1fcd`；本機與遠端分支刪除
+- **沒證明：** destroy workflow 的過濾要等下一次上雲、真的 destroy 才看得到
+
+### Cost Explorer（10/23 23:2x，一次 US$0.01）
+
+| UTC 日期 | UnblendedCost（USD） |
+|---|---|
+| 10/21 | 0.0002035965 |
+| 10/22 | 0.0002426365 |
+| 10/23 | 0.000032116 |
+
+- 10/23 那一格（演練在 UTC 13:19～14:51）**還沒進帳**；實際金額隔天再查
+- 10/21、10/22：長期層新增的表、佇列、角色、日誌閒置幾乎為 0
+
+### 文件
+
+- `docs/milestones/m5-report.md`（新，格式同 M4）：花費時間由本人確認約 **19 小時**；AWS 實際金額待補
+- `docs/decision-book/decision-book-v2.11.md`（新）：v2.11 變更紀錄；2.1、2.2、3.1、3.2、3.3、3.5、5.1、6.3、7.9、7.10、8.2、8.5、PART 9、10.2、11.4、12.5 同步；新增 12.12（D98～D122）
+- 本檔 E141～E144 隨文件 PR 進 repo
+
+---
+
 ## 目前進度（2026-10-23）
 
 - M5 七項定案完成（E127）
@@ -786,10 +1039,17 @@ Claude 讀 `plan.txt`（存在 `infra/daily/build/`，`.gitignore` 已擋）逐�
 - 長期層新權限：權限模擬器 6 組全照預期；`validate-policy` 三個角色沒有任何發現，破壞實驗確認它抓得到錯名字（E138）
 - PR② 四個設計題定案（E139）：照清單打包、Gateway 等 Worker、走廊加 `usage`、SQS 網域用變數開關
 - PR② 填空完成（E140）：`validate` 通過、`plan` 40 to add；9 格寫錯都在讀檔時改掉
+- PR #25 合併（`main` = `016d6b0`），每日層程式進 repo
+- 上雲演練準備（E141）：映像 `016d6b0` 推 ECR（Windows 認證管理員塞不下 2,644 字元的通行證，改用臨時設定檔）；掃描 HIGH 3、MEDIUM 9、LOW 3；`plan` 40 to add
+- Worker 信任政策修正（E142）：`aws:SourceArn`／`aws:SourceAccount` 條件讓 Lambda 建不起網卡；PR #26 合併（`main` = `1e96356`），長期層 1 changed、每日層 3 added 1 destroyed
+- **上雲演練 0～7 全部完成（E143）**：Worker 寫三本帳、S14；SQS 網域確認；BLOCK；S12（停觸發照樣回答、佇列 4）；停 Gateway 不掉帳；實際超扣 274（27.4%）；S13（5 次後進 DLQ、正常帳不受影響）；SQS 拿不到時同一秒改走備援；destroy 4 分 11 秒、Lambda 網卡約 1 分鐘收回
+- 收尾（E144）：destroy #1～#3 的日誌刪除；PR #27（`sensitive` ＋ 過濾 `/32`）合併，`main` = `32e1fcd`；Cost Explorer 10/23 尚未進帳；M5 報告與決策書 v2.11 完成
+- **M5 ✅（10/23）**
 - 下一步：
-  1. PR②：每日層 Terraform（Lambda、打包、觸發、Worker 安全群組、DNS 放行 SQS、Endpoint Policy 加 `usage`、ECS 加 `CHARGE_QUEUE_URL`）；本檔 E137～E140 隨這個 PR 進 repo
-  2. 上雲演練 0～7（個人電腦；部署順序先 Worker 後 Gateway；花費照「整段＋不滿一小時進位」重估）
-- 下一筆證據是 **E141**
+  1. 文件 PR（本檔、`m5-report.md`、決策書 v2.11）
+  2. 10/24 之後 Cost Explorer 補實際金額（報告第 8 節、決策書 6.3）
+  3. 問本人要不要開始整理練習本；簡報補非同步記帳頁與 M5 花費；S14 截圖放進 `docs/screenshots/`、S12／S13 從錄影擷取
+- 下一筆證據是 **E145**（M6 開新的證據紀錄時從 E145 接續）
 
 ---
 
@@ -812,6 +1072,11 @@ Claude 讀 `plan.txt`（存在 `infra/daily/build/`，`.gitignore` 已擋）逐�
 | 13 | 3.5、5.1 兩層的表、7.10、D12、8.2 的 M5、PART 9 IaC | Terraform 八個定案：兩個 PR 長期層先；DLQ `maxReceiveCount` 5（E127 原寫 3，改）；Lambda 逾時 20 秒、隱藏時間 120 秒、記憶體 128 MB；Worker 與 Gateway 的 `usage` 交易權限加 `dynamodb:EnclosingOperation`；Worker 安全群組出口只到 DynamoDB prefix list；`charge_queue_failed` 告警 5 分鐘 ≥ 3 筆；SQS 與 DLQ 用 SSE-SQS；destroy 角色加 Lambda 的 Describe／Delete（`DeleteEventSourceMapping` 用 `lambda:FunctionArn` 條件）、Deny 新增佇列（含 `ReceiveMessage`、`DeleteMessage`）與 Worker 角色、日誌（E135、E136） |
 | 14 | 3.3、12.5 | `audit_write_failed` 兩種意思（沒花錢的稽核寫不進去／花了錢兩條都失敗）要拆成兩個事件名，M6 處理（E134、E135） |
 | 15 | PART 9 IaC、改權限的驗證步驟 | 改完 IAM 政策後兩個都跑：`simulate-principal-policy` 驗邏輯（帶與不帶條件各一次）、`validate-policy` 驗動作名稱；模擬器抓不到拼錯的名字（E138） |
+| 16 | 3.5、D12、改權限的驗證步驟 | Worker 執行角色的信任政策**不加** `aws:SourceArn`／`aws:SourceAccount`：Lambda 建網卡、拉 SQS 時不帶來源函式（PR #26）；模擬器與 `validate-policy` 都驗不到信任政策，只能上雲驗（E142） |
+| 17 | 7.10、7.9「預扣」、8.2 的 M5 | 演練實測：Worker 停工時 4 題強模型（一句話）全部照答，帳補上後 alice 1,274／1,000，**超扣 274（27.4%）**；帳一到 429 生效；最壞情況（輸出寫滿）仍是約 28,000（E143） |
+| 18 | 3.5、D12、6.2 | Lambda 128 MB 實用 89 MB（維持）；冷啟動 0.37 秒；網卡收回約 1 分鐘，`destroy.yml` 30 分鐘不改、Lambda 留在 VPC；每日層 destroy 4 分 11 秒（E143） |
+| 19 | 8.2 的 M5、PART 9 CI/CD | 演練 0～7 的實際結果；SQS 實際網域 `sqs.ap-northeast-1.amazonaws.com`；DNS 被擋時同一秒改走備援；`maxReceiveCount` 5 × 隱藏 120 秒實測（E143） |
+| 20 | 11.5 遮蔽、PART 9 CI/CD | 公開 repo 的 destroy 日誌會印出 `admin_cidr`（ALB 放行的 IP）；處理方式待定（`sensitive = true`）；個人電腦推 ECR 的做法（臨時 `DOCKER_CONFIG`、暫時從 `PATH` 拿掉 Docker 資料夾）（E141、E143） |
 
 ---
 
@@ -819,6 +1084,6 @@ Claude 讀 `plan.txt`（存在 `infra/daily/build/`，`.gitignore` 已擋）逐�
 
 | 項目 | 目前的建議 | 何時定 |
 |---|---|---|
-| DynamoDB Gateway Endpoint Policy 與交易的配合 | 加 `usage` 表；動作維持 `GetItem`、`PutItem`、`UpdateItem`（交易照每件的動作檢查）；AWS 文件沒寫清楚 Endpoint Policy 是否認得 `EnclosingOperation`，先不在 Endpoint Policy 加條件 | **已定（E139 第 3 題 A）**；實際效果待演練第 0 步 |
-| Lambda 網卡收回時間 | 第 6 題第 7 步實測；超過 destroy workflow 上限（30 分鐘）就先改 45，再不夠就改放 VPC 外 | M5 上雲 |
-| Lambda 記憶體實際用量 | 預設 128 MB；演練第 0 步看 `REPORT` 那行 | M5 上雲 |
+| DynamoDB Gateway Endpoint Policy 與交易的配合 | 加 `usage` 表；動作維持 `GetItem`、`PutItem`、`UpdateItem`（交易照每件的動作檢查）；AWS 文件沒寫清楚 Endpoint Policy 是否認得 `EnclosingOperation`，先不在 Endpoint Policy 加條件 | **已定（E139 第 3 題 A）**；**演練第 0 步實證：交易經過 Endpoint Policy 照常寫入（E143）** |
+| Lambda 網卡收回時間 | 第 6 題第 7 步實測；超過 destroy workflow 上限（30 分鐘）就先改 45，再不夠就改放 VPC 外 | **已實測（E143）：約 1 分鐘，不用改** |
+| Lambda 記憶體實際用量 | 預設 128 MB；演練第 0 步看 `REPORT` 那行 | **已實測（E143）：89 MB，維持 128 MB** |
