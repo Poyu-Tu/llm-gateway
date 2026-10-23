@@ -85,8 +85,10 @@ jobs:
           # admin_cidr、image_tag 是必填變數，但拆除用不到它們的值：
           # admin_cidr 填 RFC 5737 文件專用位址（E121 定案 6）；image_tag 填一個不存在的編號（E123）
           new_token
+          # 遮掉所有 /32 位址：ALB 安全群組的放行清單是從 AWS 讀回來的，sensitive 管不到（M5 演練發現 IP 印在公開日誌）
           terraform -chdir=infra/daily destroy -auto-approve -input=false \
-            -var=admin_cidr=192.0.2.1/32 -var=image_tag=0000000
+            -var=admin_cidr=192.0.2.1/32 -var=image_tag=0000000 2>&1 \
+            | sed -u -E 's#([0-9]{1,3}\.){3}[0-9]{1,3}/32#x.x.x.x/32#g'
 
           # 拆完帳本裡必須一個資源都不剩；有剩就讓這次執行失敗
           # （任務定義設了 skip_destroy：從帳本移除、AWS 上留著不收費的版本紀錄，E123 定案 7）
