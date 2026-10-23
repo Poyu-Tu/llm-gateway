@@ -9,28 +9,18 @@ locals {
   worker_function_arn  = "arn:aws:lambda:ap-northeast-1:${data.aws_caller_identity.current.account_id}:function:${local.worker_function_name}"
 }
 
-# ---- 誰能借：只有 Lambda 服務、只限本帳號、只限這一個函式 ----
+# ---- 誰能借：只有 Lambda 服務 ----
+# 不加 aws:SourceArn／aws:SourceAccount：Lambda 替函式建網卡、從 SQS 拉訊息時不帶來源函式的 ARN（AWS 文件），
+# 加了會 InsufficientRolePermissions（M5 上雲演練撞到）。能把這張證交給函式的，只有本帳號有 iam:PassRole 的人
 data "aws_iam_policy_document" "worker_trust" {
   statement {
-    sid     = "LambdaInThisAccount"
+    sid     = "LambdaService"
     effect  = "Allow"
     actions = ["sts:AssumeRole"]
 
     principals {
       type        = "Service"
       identifiers = ["lambda.amazonaws.com"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [data.aws_caller_identity.current.account_id]
-    }
-
-    condition {
-      test     = "ArnLike"
-      variable = "aws:SourceArn"
-      values   = [local.worker_function_arn]
     }
   }
 }
