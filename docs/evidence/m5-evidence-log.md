@@ -3,7 +3,7 @@
 > 依決策書 11.5 遮蔽：AWS 帳號 ID、存取金鑰 ID、公開 IP；OpenAI 的 Project ID、金鑰 Tracking ID、金鑰末 4 碼、建立者 user ID；個人帳號名稱（含終端機提示字元與路徑中的使用者資料夾名稱，一律寫成 `<user>`）。
 > 本檔收錄「文字型」證據；截圖另存於 `docs/screenshots/`（檔名以 `m5-` 開頭，正式清單照決策書 11.4 的 S 編號），日誌另存於 `docs/logs/`。
 > E 編號接續 `m4-evidence-log.md`（E108～E126），M5 從 E127 開始。
-> 紀錄日期：2026-10-20 建立，10-21 更新（E130～E133），10-22 更新（E134～E136）（M4 於 10/20 結案；M5 檢查點併入 11/1 的 M6 檢查點，本人目標 10/25 前完成 M5）
+> 紀錄日期：2026-10-20 建立，10-21 更新（E130～E133），10-22 更新（E134～E137），10-23 更新（E138～E140）（M4 於 10/20 結案；M5 檢查點併入 11/1 的 M6 檢查點，本人目標 10/25 前完成 M5）
 
 ---
 
@@ -579,7 +579,195 @@
 
 ---
 
-## 目前進度（2026-10-22）
+## E137. PR① 合併與長期層 apply（2026-10-22 19:50～20:30，個人電腦）
+
+**依據：** E135 定案 1；E136。
+
+| # | 步驟 | 結果 |
+|---|---|---|
+| 1 | push 分支、開 PR #24（中文說明、不附署名） | 3 個 commit（`16e3aab` wip、`39110ce` 5 檔、`bcbd902` 證據紀錄）、9 個檔；三個必要檢查等 6 個檢查全過 → 本人合併，`main` = `4f5e2b9`；本機與遠端分支刪除 |
+| 2 | 個人電腦 `main` 同步 | `git pull`：9 files changed, 492 insertions(+), 20 deletions(-) |
+| 3 | `aws login` → 長期層 `terraform plan` | **`Plan: 9 to add, 2 to change, 0 to destroy.`**（Claude 截圖逐段核對）。新增：`usage` 表、主佇列（隱藏 120、保留 345600 預設）、DLQ（保留 1209600、隱藏 30 預設）、DLQ 收單政策、Worker 角色與政策、Worker 日誌群組、`charge_queue_failed` 篩選與告警；更新（in-place）：`aws_iam_role_policy.task`、`aws_iam_role_policy.destroy`；兩個佇列 `sqs_managed_sse_enabled = true` |
+| 4 | `terraform apply` | **`Apply complete! Resources: 9 added, 2 changed, 0 destroyed.`**；輸出多了 `charge_queue_url`、`worker_role_arn`、`dynamodb_table_arns.usage`（含帳號 ID，不記） |
+
+- 交接檔預估 12／3，實際 9／2：照檔案數算才對
+- 還沒做：`aws iam simulate-principal-policy` 模擬（Worker 的交易條件、Gateway 的 `SendMessage`／`ReceiveMessage`、destroy 角色新加的允許與 Deny）
+
+---
+
+## E138. 長期層新權限：權限模擬器 6 組＋政策檢查（2026-10-23 15:28～16:13，個人電腦，`main` = `4f5e2b9`）
+
+**依據：** E135 定案 4、8；E136 新的小定案（`DenyChargeQueues` 加 `ReceiveMessage`、`DeleteMessage`）；E137；`infra/persistent/worker_role.tf`、`ecs_roles.tf`、`github_oidc.tf`、`sqs.tf`、`dynamodb.tf`（Claude 從個人電腦的 repo 讀）。
+
+**範圍：** 只讀，不改任何資源。`aws login` 後只呼叫 `iam:SimulatePrincipalPolicy`、`iam:GetRolePolicy`、`access-analyzer:ValidatePolicy`（都不收費）。
+
+**生活比喻：** 員工證做好、發下去之後，先拿去「門禁卡測試機」插一插：選一扇門，機器只說會不會開，門不會真的打開（模擬器）。再請「文件校對員」拿官方字典，把證上寫的每個動作名稱對一遍（`validate-policy`）。測試機懂門禁規則、不懂拼字；校對員懂拼字、不懂該不該開這扇門。
+
+### 做法
+
+- PowerShell 變數存 ARN（帳號 ID 用 `aws sts get-caller-identity` 取，`$a.Length` = 12，不印出 ID）；ARN 裡要寫 `${a}`，寫 `$a:` 會被 PowerShell 當成「磁碟:變數」
+- 小函式 `sim`：`aws iam simulate-principal-policy --query "EvaluationResults[].[EvalActionName,EvalDecision]" --output table`，再接 `--policy-source-arn`、`--action-names`、`--resource-arns`、`--context-entries`
+- 觸發的資源 ARN 用假的 `event-source-mapping:test`（政策寫 `event-source-mapping:*`）
+
+### 權限模擬器（6 組，Claude 截圖逐格確認）
+
+| # | 角色 | 動作／資源 | 帶的條件 | 預期 | 實際 |
+|---|---|---|---|---|---|
+| ① | `llm-gateway-charge-worker` | `dynamodb:PutItem`／`usage` | `dynamodb:EnclosingOperation` = `TransactWriteItems`（`stringList`） | `allowed` | **`allowed`** |
+| ② | 同上 | 同上 | 不帶 | `implicitDeny` | **`implicitDeny`** |
+| ③ | `llm-gateway-task` | `sqs:SendMessage`、`sqs:ReceiveMessage`／主佇列 | 不帶 | `allowed`、`implicitDeny` | **`allowed`、`implicitDeny`** |
+| ④ | `llm-gateway-destroy` | `lambda:DeleteEventSourceMapping`／觸發 | `lambda:FunctionArn` = Worker 函式 ARN（`string`） | `allowed` | **`allowed`** |
+| ⑤ | 同上 | 同上 | `lambda:FunctionArn` = Worker ARN 後面加 `-other` | `implicitDeny` | **`implicitDeny`** |
+| ⑥ | 同上 | `sqs:DeleteQueue`、`sqs:ReceiveMessage`、`sqs:DeleteMessage`／主佇列 | 不帶 | 三個 `explicitDeny` | **三個 `explicitDeny`** |
+
+- ①② 一起看：Worker 寫 `usage` 只能在交易裡，E135 定案 4 的 A 成立，不用退回 B
+- ④⑤ 一起看：`ArnEquals` + `lambda:FunctionArn` 鎖住「只剪得到接到 Worker 的那一條觸發」
+- ⑥：拆除組現在沒有任何 SQS 允許，三個仍是 `explicitDeny`（Deny 有命中，不是只靠「沒給」）
+
+### 政策檢查（`aws accessanalyzer validate-policy`，Claude 截圖確認）
+
+- 小函式 `v`：`aws iam get-role-policy` 把政策抓下來，`Set-Content -Encoding ascii` 存到 `$env:TEMP\p.json`（不進 repo，內容有帳號 ID），再交給 `validate-policy --policy-type IDENTITY_POLICY`，只印 `findingType`、`issueCode`
+- `v destroy`、`v task`、`v charge-worker`：**三個都空白、沒有錯誤訊息**（沒有任何 `ERROR`、`SECURITY_WARNING`、`WARNING`、`SUGGESTION`）
+- **破壞實驗：** 手寫一張只有 `lambda:DeleteTrigger`（E136 寫錯的那個名字）的小政策交給它 → **`ERROR` ｜ `INVALID_ACTION`**。證明這個檢查員抓得到不存在的動作名稱，前面三個空白可以當作「三個角色的動作名稱都存在」
+
+### 更正：E136「面試可用的說法」第一句
+
+E136 寫「所以我每次改權限，都用 `simulate-principal-policy` 逐一問」，意思像是模擬器能抓出寫錯的動作名稱。**不準確：** 模擬器照字面比對，政策寫 `lambda:DeleteTrigger`、問的也是 `lambda:DeleteTrigger`，一樣會算出 `allowed`。抓錯名字要靠 `validate-policy`。改權限後的驗證要兩個都做：
+
+| 工具 | 驗什麼 | 抓不到 |
+|---|---|---|
+| 權限模擬器 | 條件、Deny、資源範圍的邏輯（題目要用正確的名字問） | 政策和題目寫同一個錯名字：照字面比對，照樣 `allowed` |
+| `validate-policy` | 動作名稱存不存在、政策文法 | 這張證該不該開這扇門（不懂設計） |
+
+### 這一步證明了什麼、沒證明什麼
+
+- **證明：** 長期層三個角色的政策，照 AWS 的判斷邏輯算出來都符合設計（6 組）；三個政策裡的動作名稱都存在、文法沒有問題
+- **沒證明：**
+  - 真的呼叫時的結果：模擬器只看身分政策，不看 SQS 佇列政策、DynamoDB Endpoint Policy（PR② 才建）
+  - Lambda 服務代拉訊息時，`EnclosingOperation` 是不是真的由 DynamoDB 帶上：要等演練第 0 步真的寫進三本帳
+  - Gateway 的 `usage` 交易權限：沒有另外模擬，條件寫法與 Worker 相同
+  - destroy 角色真的拆得掉 Lambda 與觸發：要等 PR② 與演練第 7 步
+  - 本機 DynamoDB Local 不檢查 IAM，所以交易條件只有這一次模擬是證據
+
+### 面試可用的說法
+
+- 「我改完權限會驗兩件事。第一件是邏輯：用 `simulate-principal-policy`，帶條件、不帶條件各問一次。Worker 在交易裡寫用量明細是 `allowed`，交易外是 `implicitDeny`。第二件是拼字：模擬器照字面比對，名字寫錯一樣算得出結果，所以我再用 Access Analyzer 的 `validate-policy` 對官方動作清單。我故意餵它一個寫錯的名字，它回 `INVALID_ACTION`，證明它真的抓得到。」
+- 「拆除角色現在根本沒有 SQS 權限，模擬時三個動作還是 `explicitDeny`，不是 `implicitDeny`，代表黑名單真的有命中。以後就算有人把允許寫成 `sqs:*`，佇列也拆不掉。」
+
+---
+
+## E139. M5 第三塊（二）：PR② 每日層的四個設計題（2026-10-23 16:15～16:22，個人電腦，只讀程式）
+
+**依據：** E127 定案 5、6；E131 定案 4（部署順序先 Worker 後 Gateway）；E135 定案 1、3、5；E138；`infra/daily/`、`worker/handler.py`、`app/db.py`、`app/events.py`、`.gitignore`、`.gitattributes`、`Dockerfile`（Claude 從個人電腦的 repo 讀）。
+
+**範圍：** 只有定案；`infra/daily/worker.tf` 的填空骨架由 Claude 放進 repo（12 格），還沒填。
+
+**生活比喻：** 出單夾和會計的員工證已經放在管理處（長期層）；今天在店裡（每日層）擺會計的座位（Lambda）、拉一條出單夾到座位的線（觸發），再告訴外場出單夾在哪（`CHARGE_QUEUE_URL`）。
+
+### 定案（本人 10/23 照建議全選）
+
+| # | 題目 | 定案 | 不選的選項與理由 | 弱點 |
+|---|---|---|---|---|
+| 1 | zip 裡放哪些檔 | **A：`archive_file` 用 `source` 一個一個列 6 個檔**（`app/__init__.py`、`db.py`、`ledger.py`、`events.py`、`worker/__init__.py`、`handler.py`） | B 整個資料夾打包加排除清單：漏一個，`.env`、`.venv` 就上雲，而且不會報錯。C 另寫打包腳本：多一支要維護，destroy workflow 也要先跑它 | Worker 多 import 一個檔要記得加一段；漏了的話 Lambda 一跑就 `ModuleNotFoundError`（演練第 0 步看得到，不會安靜地錯） |
+| 2 | Gateway 要不要等 Worker | **A：ECS 服務 `depends_on` 加 SQS 觸發**：建立與更新都先 Worker、後 Gateway，把 E131 的部署順序寫進程式 | B 不加：第一次 apply 沒差（單子在佇列等），但以後改信封格式要靠人記順序。C 分兩次 apply（`-target`）：指令多、易打錯，官方不建議平常用 | Lambda 建網卡要一點時間，Gateway 晚一兩分鐘起來（NAT 多跑一兩分鐘，不到一分錢） |
+| 3 | DynamoDB Endpoint Policy 怎麼加 `usage` | **A：表的清單加 `usage`，動作維持 `GetItem`、`PutItem`、`UpdateItem`**；走廊只管「去得了哪幾張表」，每張表的動作由 IAM 逐張管（E138 已驗） | B 走廊也逐張表、逐個動作寫：同一份對照表要在兩處維護，改一邊忘另一邊就是難查的 `AccessDenied` | 走廊放行 `usage` 的 `GetItem`（沒人需要）；交易經過走廊時是否照每件的動作檢查，文件沒寫清楚，演練第 0 步才知道（原列「待決」，本題定案） |
+| 4 | 演練第 6 步怎麼拿掉 SQS 網域 | **B：變數 `allow_sqs_domain`（預設 `true`），第 6 步 `-var=allow_sqs_domain=false` apply**；同 `dns_firewall_action` 的做法 | A 當場改檔、apply、再改回：雲上跑的是沒 commit 的版本，事後說不清。C 拿掉任務角色的 `SendMessage`：要動長期層，演練完還要改回 | 多一個只給演練用的變數 |
+
+### 照做的預設值（Claude 提出，本人沒有異議）
+
+| 項目 | 預設 |
+|---|---|
+| Lambda | Python 3.12（同 Dockerfile 與本機）、x86_64（同 ECS）、128 MB、逾時 20 秒、`worker.handler.handler`、`DYNAMODB_TARGET=aws` |
+| 觸發 | 批次 1、建好就啟用；放每日層：待命時會持續問佇列，算 SQS 請求數 |
+| ARN 與佇列網址 | 用名字自己組，不讀長期層帳本（同 E121） |
+| `archive` 外掛 | `= 2.8.1`（Terraform Registry：2026-09-11 發佈，已過冷卻期） |
+| zip | `infra/daily/build/worker.zip`：`.gitignore` 已擋 `build/`；`.gitattributes` `eol=lf`，兩台電腦打出來一樣 |
+| 新 output | 觸發的 UUID：演練第 1 步停觸發時要用 |
+| 順手 | `app/events.py` 的註解「三次後進 DLQ」改五次（E136 只改了 `worker/handler.py`） |
+
+### 讀程式時發現、寫進演練順序的事
+
+- DNS 防火牆預設 `ALERT`（只記不擋）：第 6 步一定要在 `BLOCK` 下做，否則拿掉網域也照樣連得到。順序：ALERT apply → 聊一次 → 查詢日誌確認 SQS 實際網域 → BLOCK apply → 第 6 步
+- 演練前要先推一版含 M5 程式（`main` ≥ `c82d845`）的映像到 ECR；ECS 的 `image_tag` 用那個 commit
+
+---
+
+## E140. M5 第三塊（三）：PR② 每日層填空、本機驗證與 `plan`（2026-10-23 16:30～17:31，個人電腦，分支 `feat/m5-terraform-daily`）
+
+**依據：** E139 四個定案與預設值；E135 定案 3、5。
+
+**範圍：** 只有 Terraform、一行註解與本機驗證；`plan` 只算不建（`aws login`，沒有 apply）。
+
+**生活比喻：** 照清單把會計的工作用品裝箱（zip）、在店裡擺好座位與門禁（Lambda、安全群組）、拉一條出單夾到座位的線（觸發），再把出單夾的位置貼給外場（`CHARGE_QUEUE_URL`）。`plan` 是開工前把施工清單整份印出來核對，一根釘子都還沒釘。
+
+### 改了哪些檔
+
+| 檔案 | 誰寫 | 內容 |
+|---|---|---|
+| `infra/daily/worker.tf`（新） | 本人（填空 12 格；骨架由 Claude 放進 repo） | `archive_file`（6 個 `source`）、Worker 安全群組＋一條出口規則（443 → DynamoDB prefix list）、Lambda（Python 3.12、x86_64、128 MB、20 秒、私有子網、`DYNAMODB_TARGET=aws`）、SQS 觸發（批次 1） |
+| `infra/daily/versions.tf` | 本人 | `hashicorp/archive` `= 2.8.1` |
+| `infra/daily/.terraform.lock.hcl` | `terraform init` | 加 archive 2.8.1 |
+| `infra/daily/endpoints.tf` | 本人 | 表的清單加 `usage`；兩行註解（三張表 → 四張表；交易的動作與 IAM 的分工） |
+| `infra/daily/dns_firewall.tf` | 本人（填空 3 格） | `local.sqs_domain`（`var.allow_sqs_domain` 為真才放 SQS 網域）、`variable "allow_sqs_domain"`（`bool`、預設 `true`）、`domains = concat(local.allowed_domains, local.sqs_domain)` |
+| `infra/daily/ecs.tf` | 本人 | `local.charge_queue_url`（用名字組）、環境變數 `CHARGE_QUEUE_URL`、服務 `depends_on` 加 SQS 觸發 |
+| `infra/daily/outputs.tf` | 本人 | `charge_trigger_uuid` |
+| `app/events.py` | 本人 | 第 12 行註解「三次後進 DLQ」→「五次」 |
+
+### 填空時寫錯、後來改對的地方（Claude 讀檔時抓到，沒有進 commit）
+
+| 位置 | 寫成 | 應該是 | 為什麼不行 | `validate` 抓得到 |
+|---|---|---|---|---|
+| `worker.tf` ③ | `aws_vpc_endpoint.dynamodb.id` | `.prefix_list_id` | `id` 是走廊本身（`vpce-`），門禁要的是 DynamoDB 的 IP 清單（`pl-`） | 否，apply 才報錯 |
+| `worker.tf` ④ | `"python:3.12"` | `"python3.12"` | 冒號是 Docker 映像標籤的寫法；Lambda 的執行環境名稱沒有冒號 | 改完後一起過，沒有單獨確認 |
+| `worker.tf` ⑤ | `"worker.handler"` | `"worker.handler.handler"` | 少了函式名：Lambda 會在 `worker` 套件裡找 `handler`，找不到 | **否**，apply 也會成功；每則訊息都失敗、5 次後全進 DLQ（安靜的錯） |
+| `worker.tf` ⑥ | `data.archive_file.worker.sha256` | `.output_base64sha256` | 沒有這個屬性；算出來的值都以 `output_` 開頭 | 是（`Unsupported attribute`） |
+| `worker.tf` ⑧ | `["private_a"]` | `[aws_subnet.private_a.id]` | 加引號只是一串字，AWS 會去找 ID 叫 `private_a` 的子網 | 否，apply 才報錯 |
+| `worker.tf` ⑨ | `["worker"]` | `[aws_security_group.worker.id]` | 同上 | 否，apply 才報錯 |
+| `worker.tf` ⑪ | `charge_queue_arn` | `local.charge_queue_arn` | `locals` 的名字要加 `local.` | 是 |
+| `dns_firewall.tf` Ⓐ | `var.allowed_domains` → 改成 `var.allowed_sqs_domain` | `var.allow_sqs_domain` | 前者是 `locals` 的清單名；後者多一個 d。`validate` 第二次回「Did you mean "allow_sqs_domain"?」 | 是 |
+| `dns_firewall.tf` Ⓒ | `charge(...)` | `concat(...)` | Terraform 沒有 `charge` 這個函式 | 是 |
+
+- 共同點同 E135、E136：③⑧⑨ 是「種類」和「哪一個」混在一起（名字 vs 那個東西本人的 ID）
+- 9 格裡 4 格 `validate` 抓不到；⑤ 連 apply 都抓不到，要靠演練第 0 步的 Worker 日誌
+
+### 本機驗證（個人電腦，Claude 截圖與讀檔確認）
+
+| # | 指令 | 結果 |
+|---|---|---|
+| 1 | `git switch -c feat/m5-terraform-daily` | 成功 |
+| 2 | `terraform init`（`infra/daily`） | `Installing hashicorp/archive v2.8.1`、`Installed hashicorp/archive v2.8.1 (signed by HashiCorp)`、沿用 aws v6.68.0；鎖檔更新 |
+| 3 | `terraform fmt` | 改了 `versions.tf` |
+| 4 | `terraform validate`（改完 9 格後） | **`Success! The configuration is valid.`** |
+| 5 | `terraform plan -no-color "-var=admin_cidr=192.0.2.1/32" -var=image_tag=4f5e2b9 > build/plan.txt` | **`Plan: 40 to add, 0 to change, 0 to destroy.`**（M4 驗收的 36 個 + Worker 安全群組、出口規則、Lambda、觸發） |
+
+`plan` 時遇到的兩個坑：
+
+- `build/` 資料夾不存在：PowerShell 在 `plan` 開始前就要開輸出檔，`DirectoryNotFoundException`；先 `mkdir build`
+- **PowerShell 會把以 `-` 開頭、含 `.` 的參數在點的地方切開**：`-var=admin_cidr=192.0.2.1/32` 變成兩個參數，Terraform 回 `Too many command line arguments`；整個參數加雙引號就好。上雲那天填真實 IP 時一樣要加
+
+Claude 讀 `plan.txt`（存在 `infra/daily/build/`，`.gitignore` 已擋）逐項核對：
+
+- Lambda：`function_name` = `llm-gateway-charge-worker`、`handler` = `worker.handler.handler`、`runtime` = `python3.12`、`x86_64`、128 MB、20 秒、`DYNAMODB_TARGET = "aws"`、`vpc_config` 有子網與安全群組、`tags_all` 有 `Layer = daily`（destroy 角色刪函式的條件）
+- 觸發：佇列 ARN 指到 `llm-gateway-charge`、批次 1、啟用、`Layer = daily`
+- Worker 安全群組只有一條出口規則：443、目的地是 prefix list
+- DNS 放行清單 10 個網域，多了 `sqs.ap-northeast-1.amazonaws.com.`
+- DynamoDB Endpoint Policy：四張表、三個動作
+- ECS 環境變數：`CHARGE_QUEUE_URL` = `https://sqs.ap-northeast-1.amazonaws.com/<帳號>/llm-gateway-charge`
+- zip：6 個檔（`app/__init__.py` 0、`db.py` 2338、`events.py` 3223、`ledger.py` 4239、`worker/__init__.py` 0、`handler.py` 1690 bytes），沒有 `.env`、`.venv`、`main.py`；每個檔的時間固定為 1980-01-01，同樣的程式打出來的 zip 一樣
+
+### 這一步證明了什麼、沒證明什麼
+
+- **證明：** 每日層的參照都找得到；40 個資源照設計；zip 只有 6 個檔
+- **沒證明：** ③⑧⑨ 這類「值的格式」只有 apply 才驗得到；Lambda 真的 import 得到（`handler` 字串對不對，要等第一則訊息）；Endpoint Policy 對交易的實際判斷；Lambda 網卡收回時間；destroy 角色拆 Lambda 時缺不缺其他讀取權限（演練第 7 步）
+
+### 面試可用的說法
+
+- 「Lambda 的 `handler` 寫錯，`validate`、`plan`、`apply` 全部都會過，函式也建得起來，要到第一則訊息進來才 `ImportModuleError`。我的佇列失敗 5 次會進 DLQ，帳不會掉，但會一直記不進去。所以演練第 0 步一定先看 Worker 的日誌有沒有 `charge_recorded`，不是看 apply 成功就算。」
+- 「zip 我用清單一個一個列，不整個資料夾打包。打包資料夾再列排除清單，漏一條 `.env` 就上雲了，而且不會報錯。」
+
+---
+
+## 目前進度（2026-10-23）
 
 - M5 七項定案完成（E127）
 - Terraform 1.16.6：PR #17 合併（`main` = `46fd3eb`），6 個檢查全過（E128）
@@ -594,11 +782,14 @@
 - PR #23 合併（`main` = `c82d845`，10/22 01:12 前）
 - M5 第三塊 Terraform 八個設計題定案（E135）：兩個 PR 長期層先、DLQ 5 次、逾時 20／隱藏 120、交易 IAM 加 `EnclosingOperation`、Worker 出口只到 DynamoDB prefix list、`charge_queue_failed` 告警 5 分鐘 ≥ 3、SSE-SQS、destroy 角色加 Lambda 權限
 - PR① 長期層填空全部完成（E135、E136）：`validate` 通過、380 passed；`DenyChargeQueues` 多擋 `ReceiveMessage`、`DeleteMessage`
+- PR #24 合併（`main` = `4f5e2b9`）；個人電腦長期層 apply：9 added、2 changed（E137）
+- 長期層新權限：權限模擬器 6 組全照預期；`validate-policy` 三個角色沒有任何發現，破壞實驗確認它抓得到錯名字（E138）
+- PR② 四個設計題定案（E139）：照清單打包、Gateway 等 Worker、走廊加 `usage`、SQS 網域用變數開關
+- PR② 填空完成（E140）：`validate` 通過、`plan` 40 to add；9 格寫錯都在讀檔時改掉
 - 下一步：
-  1. PR①：push → 開 PR → 三個必要檢查綠了合併 → 公司電腦 `aws login` → 長期層 `plan`（預期 9 新增、2 更新）→ `apply` → `simulate-principal-policy`（Worker 的交易條件、Gateway 的 `SendMessage`／`ReceiveMessage`、destroy 角色新加的允許與 Deny）
-  2. PR②：每日層 Terraform（Lambda、打包、觸發、Worker 安全群組、DNS 放行 SQS、Endpoint Policy 加 `usage`、ECS 加 `CHARGE_QUEUE_URL`）
-  3. 上雲演練 0～7（個人電腦；部署順序先 Worker 後 Gateway；花費照「整段＋不滿一小時進位」重估）
-- 下一筆證據是 **E137**
+  1. PR②：每日層 Terraform（Lambda、打包、觸發、Worker 安全群組、DNS 放行 SQS、Endpoint Policy 加 `usage`、ECS 加 `CHARGE_QUEUE_URL`）；本檔 E137～E140 隨這個 PR 進 repo
+  2. 上雲演練 0～7（個人電腦；部署順序先 Worker 後 Gateway；花費照「整段＋不滿一小時進位」重估）
+- 下一筆證據是 **E141**
 
 ---
 
@@ -620,6 +811,7 @@
 | 12 | 2.2 [9]、3.3、12.5 | Gateway 成功那一筆：`save_charge()` 先送 SQS、失敗或 `disabled` 時 `record_charge()`；只有 SQS 失敗印 `charge_queue_failed`；兩條都失敗用既有 `audit_write_failed` 告警、帶 `charged: false`；`disabled` 不建 SQS 連線（boto3 建連線即解析憑證）（E134） |
 | 13 | 3.5、5.1 兩層的表、7.10、D12、8.2 的 M5、PART 9 IaC | Terraform 八個定案：兩個 PR 長期層先；DLQ `maxReceiveCount` 5（E127 原寫 3，改）；Lambda 逾時 20 秒、隱藏時間 120 秒、記憶體 128 MB；Worker 與 Gateway 的 `usage` 交易權限加 `dynamodb:EnclosingOperation`；Worker 安全群組出口只到 DynamoDB prefix list；`charge_queue_failed` 告警 5 分鐘 ≥ 3 筆；SQS 與 DLQ 用 SSE-SQS；destroy 角色加 Lambda 的 Describe／Delete（`DeleteEventSourceMapping` 用 `lambda:FunctionArn` 條件）、Deny 新增佇列（含 `ReceiveMessage`、`DeleteMessage`）與 Worker 角色、日誌（E135、E136） |
 | 14 | 3.3、12.5 | `audit_write_failed` 兩種意思（沒花錢的稽核寫不進去／花了錢兩條都失敗）要拆成兩個事件名，M6 處理（E134、E135） |
+| 15 | PART 9 IaC、改權限的驗證步驟 | 改完 IAM 政策後兩個都跑：`simulate-principal-policy` 驗邏輯（帶與不帶條件各一次）、`validate-policy` 驗動作名稱；模擬器抓不到拼錯的名字（E138） |
 
 ---
 
@@ -627,6 +819,6 @@
 
 | 項目 | 目前的建議 | 何時定 |
 |---|---|---|
-| DynamoDB Gateway Endpoint Policy 與交易的配合 | 加 `usage` 表；動作維持 `GetItem`、`PutItem`、`UpdateItem`（交易照每件的動作檢查）；AWS 文件沒寫清楚 Endpoint Policy 是否認得 `EnclosingOperation`，先不在 Endpoint Policy 加條件 | PR② 寫每日層時 |
+| DynamoDB Gateway Endpoint Policy 與交易的配合 | 加 `usage` 表；動作維持 `GetItem`、`PutItem`、`UpdateItem`（交易照每件的動作檢查）；AWS 文件沒寫清楚 Endpoint Policy 是否認得 `EnclosingOperation`，先不在 Endpoint Policy 加條件 | **已定（E139 第 3 題 A）**；實際效果待演練第 0 步 |
 | Lambda 網卡收回時間 | 第 6 題第 7 步實測；超過 destroy workflow 上限（30 分鐘）就先改 45，再不夠就改放 VPC 外 | M5 上雲 |
 | Lambda 記憶體實際用量 | 預設 128 MB；演練第 0 步看 `REPORT` 那行 | M5 上雲 |

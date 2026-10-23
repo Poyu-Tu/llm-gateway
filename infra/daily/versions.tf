@@ -9,5 +9,11 @@ terraform {
       # 6.68.0：10/7 發佈，已過 3 天冷卻期（6.69.0 是 10/14，還沒過）
       version = "= 6.68.0"
     }
+
+    # 打包 Worker 的 zip（E139 第 1 題）；2.8.1：9/11 發佈，已過 3 天冷卻期
+    archive = {
+      source  = "hashicorp/archive"
+      version = "= 2.8.1"
+    }
   }
 }
