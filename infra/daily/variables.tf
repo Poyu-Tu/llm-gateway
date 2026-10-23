@@ -1,8 +1,10 @@
 # ALB 只放行這一個位址（E117 定案 4）。本機用環境變數 TF_VAR_admin_cidr 給值（E121 定案 6 補充），不存檔
 # destroy workflow 填 RFC 5737 的文件專用位址：拆除用不到這個值（E121 定案 6）
+# sensitive：plan／destroy 的輸出不印這個值（公開 repo 的 destroy 日誌曾印出 IP，M5 演練發現）
 variable "admin_cidr" {
   description = "The only address allowed to reach the ALB, as a /32 (for example 198.51.100.7/32)"
   type        = string
+  sensitive   = true
 
   # 只收單一位址；0.0.0.0/0 或一整段網段都會被擋，ALB 不會意外對全世界開放
   validation {
