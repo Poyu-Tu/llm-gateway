@@ -25,3 +25,9 @@ output "task_definition" {
   description = "Task definition family and revision currently used by the service"
   value       = "${aws_ecs_task_definition.gateway.family}:${aws_ecs_task_definition.gateway.revision}"
 }
+
+# 演練第 1、4 步停、開觸發要用（aws lambda update-event-source-mapping --uuid ...）
+output "charge_trigger_uuid" {
+  description = "UUID of the SQS trigger of the charge Worker"
+  value       = aws_lambda_event_source_mapping.charge.uuid
+}

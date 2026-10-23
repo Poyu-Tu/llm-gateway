@@ -9,7 +9,7 @@ from botocore.config import Config
 
 from app.db import CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS, REGION, TOTAL_MAX_ATTEMPTS
 
-# 信封格式的版本：改格式時加一；Worker 看到不認得的版本就往外丟，三次後進 DLQ（M5 第 1、4 題）
+# 信封格式的版本：改格式時加一；Worker 看到不認得的版本就往外丟，五次後進 DLQ（M5 第 1、4 題）
 EVENT_VERSION = 1
 
 # 佇列設定寫這個字，就是不用 SQS（本機、測試）：成功那條路直接記三本帳

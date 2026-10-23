@@ -6,7 +6,7 @@ data "aws_caller_identity" "current" {}
 
 locals {
   # 表名寫死，要和 infra/persistent/dynamodb.tf、app/db.py 一模一樣；改名要三邊一起改
-  gateway_tables = ["api_keys", "quotas", "audit"]
+  gateway_tables = ["api_keys", "quotas", "audit", "usage"]
 
   gateway_table_arns = [
     for name in local.gateway_tables :
@@ -42,8 +42,8 @@ resource "aws_vpc_endpoint" "s3" {
   tags = { Name = "llm-gateway-s3" }
 }
 
-# ---- DynamoDB：只准碰本專案的三張表、只准程式用到的三種呼叫 ----
-# app/ 只用 get_item、put_item、update_item；M5 加 usage 表時再補
+# ---- DynamoDB：只准碰本專案的四張表、只准程式用到的三種呼叫 ----
+# app/ 只用 get_item、put_item、update_item；交易裡每一件也是這三種動作；走廊只管表，每張表的動作由 IAM 管（E139 第 3 題）
 
 data "aws_iam_policy_document" "dynamodb_endpoint" {
   statement {

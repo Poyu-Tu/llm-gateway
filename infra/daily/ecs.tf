@@ -11,6 +11,8 @@ locals {
   task_role              = "arn:aws:iam::${local.account_id}:role/llm-gateway-task"
   gateway_log_group_name = "/ecs/llm-gateway"
   ssm_parameter_prefix   = "arn:aws:ssm:ap-northeast-1:${local.account_id}:parameter/llm-gateway"
+  # 長期層 sqs.tf 的主佇列網址；Gateway 啟動時檢查，沒寫或寫錯就起不來（E131 定案 5）
+  charge_queue_url = "https://sqs.ap-northeast-1.amazonaws.com/${local.account_id}/llm-gateway-charge"
 }
 
 resource "aws_ecs_cluster" "main" {
@@ -61,6 +63,8 @@ resource "aws_ecs_task_definition" "gateway" {
         # 用 AWS 的身分換 OpenAI 的通行證，不用金鑰（E113、E123 定案 4）
         { name = "OPENAI_AUTH", value = "workload_identity" },
         { name = "OPENAI_WIF_AUDIENCE", value = "llm-gateway-capstone" },
+        # 成功那一筆送進出單夾（E134）
+        { name = "CHARGE_QUEUE_URL", value = local.charge_queue_url }
       ]
 
       # 機密：ECS 啟動時用執行角色從 SSM 拿值，直接交給容器；任務定義與帳本裡只有參數的名字（E123 定案 3、4）
@@ -127,5 +131,6 @@ resource "aws_ecs_service" "gateway" {
   tags = { Name = "llm-gateway" }
 
   # 先有 ALB 的入口，服務才把任務登記上去
-  depends_on = [aws_lb_listener.http]
+  # 先 Worker、後 Gateway（E131、E139 第 2 題）：建立與更新都等觸發好了，Gateway 才開始送單
+  depends_on = [aws_lb_listener.http, aws_lambda_event_source_mapping.charge]
 }

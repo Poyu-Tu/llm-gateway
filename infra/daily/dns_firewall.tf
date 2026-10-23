@@ -24,6 +24,9 @@ locals {
     # 資料庫：雖然走 Gateway Endpoint 不經 NAT，但程式還是要先查這個網域，查不到就連不上
     "dynamodb.ap-northeast-1.amazonaws.com.",
   ]
+
+  # 送記帳事件進出單夾（M5）；演練第 6 步用 -var=allow_sqs_domain=false 暫時拿掉，看 Gateway 走備援（E139 第 4 題）
+  sqs_domain = var.allow_sqs_domain ? ["sqs.ap-northeast-1.amazonaws.com."] : []
 }
 
 variable "dns_firewall_action" {
@@ -37,9 +40,15 @@ variable "dns_firewall_action" {
   }
 }
 
+variable "allow_sqs_domain" {
+  description = "Put the SQS domain on the allow list; set false only for rehearsal step 6"
+  type        = bool
+  default     = true
+}
+
 resource "aws_route53_resolver_firewall_domain_list" "allowed" {
   name    = "llm-gateway-allowed"
-  domains = local.allowed_domains
+  domains = concat(local.allowed_domains, local.sqs_domain)
 }
 
 # 「其他全部」：*. 代表任何網域（結尾的點同上）；排在放行清單後面，所以只會抓到名單外的
