@@ -1,0 +1,21 @@
+# Prometheus 的抄表設定：多久抄一次、去哪裡抄
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # 本機：主機上的 Gateway（uvicorn 或 docker compose --profile gateway，都是 8000 埠）
+  - job_name: gateway-local
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          env: local
+
+  # 雲端：經過 ALB 抄 Fargate 上的 Gateway（4.3）
+  # ALB 只放行本人 IP，而且要帶 X-Metrics-Token 才轉給 Gateway，沒帶直接 403
+  # 目標（ALB 的網址）與通行證都放在 secrets/，那個資料夾不進 repo；沒有這兩個檔時這一段只是沒有目標，不影響本機那段
+  - job_name: gateway-cloud
+    file_sd_configs:
+      - files: ["/etc/prometheus/secrets/cloud-targets.json"]
+    http_headers:
+      X-Metrics-Token:
+        files: ["/etc/prometheus/secrets/metrics-token"]

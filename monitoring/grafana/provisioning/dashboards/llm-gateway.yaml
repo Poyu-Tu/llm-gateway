@@ -1,0 +1,9 @@
+# 從資料夾讀儀表板 JSON；畫面上不能存檔，要改就改 repo 裡的 JSON
+apiVersion: 1
+providers:
+  - name: llm-gateway
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
