@@ -134,7 +134,7 @@ def test_chat_returns_503_before_spending_when_usage_cannot_be_written(tmp_path,
 
 
 # 模型已經回答、記帳才失敗：回答照給（錢已經付了）；交易要嘛全寫、要嘛全不寫，所以三本帳一本都沒寫，
-# 只在日誌印一行 audit_write_failed（已有告警），帶著這筆的成本與 charged=false，事後補收得到
+# 只在日誌印一行 charge_record_failed（M6 從 audit_write_failed 拆出來，有自己的告警），帶著這筆的成本與 charged=false，事後補收得到
 def test_chat_still_answers_when_charge_fails_after_the_model_replied(tmp_path, dynamodb, capsys):
     client, _, _ = make_quota_test_client(tmp_path, dynamodb)
     put_limit(dynamodb, 1000)
@@ -145,7 +145,7 @@ def test_chat_still_answers_when_charge_fails_after_the_model_replied(tmp_path, 
     assert response.status_code == 200
     assert response.json()["reply"] == "Hi there"
     entry = json.loads(capsys.readouterr().err)
-    assert entry["event"] == "audit_write_failed"
+    assert entry["event"] == "charge_record_failed"
     assert entry["request_id"] == response.json()["request_id"]
     assert entry["cost_micro_usd"] == COST
     assert entry["charged"] is False

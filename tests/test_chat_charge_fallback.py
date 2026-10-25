@@ -105,7 +105,7 @@ def test_chat_answers_when_the_fallback_finds_the_charge_already_recorded(tmp_pa
     assert events == ["charge_queue_failed"]
 
 
-# 兩條都失敗：回答照給（錢已經付了），三本帳都沒寫；日誌先一行 charge_queue_failed，再一行 audit_write_failed（有告警）帶成本與 charged=false
+# 兩條都失敗：回答照給（錢已經付了），三本帳都沒寫；日誌先一行 charge_queue_failed，再一行 charge_record_failed（M6 拆出來的事件名，有告警）帶成本與 charged=false
 def test_chat_logs_the_uncharged_cost_when_sqs_and_the_fallback_both_fail(tmp_path, dynamodb, capsys):
     client = make_fallback_charge_test_client(tmp_path, dynamodb)
     app.dependency_overrides[get_dynamodb] = lambda: TransactionFailsDynamoDB(dynamodb)
@@ -115,7 +115,7 @@ def test_chat_logs_the_uncharged_cost_when_sqs_and_the_fallback_both_fail(tmp_pa
     assert response.status_code == 200
     assert response.json()["reply"] == "Hi there"
     lines = read_log_lines(capsys)
-    assert [line["event"] for line in lines] == ["charge_queue_failed", "audit_write_failed"]
+    assert [line["event"] for line in lines] == ["charge_queue_failed", "charge_record_failed"]
     assert lines[1]["request_id"] == response.json()["request_id"]
     assert lines[1]["cost_micro_usd"] == COST
     assert lines[1]["charged"] is False

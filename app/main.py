@@ -181,7 +181,7 @@ def report_queue_failure(record: dict, error: Exception) -> None:
 
 
 # 成功那一筆的記帳：先送 SQS 交給 Worker；送不進去或不用 SQS，就自己一次寫三本帳
-# 兩條都失敗時印 audit_write_failed（已有告警），回答照給：錢已經付給 OpenAI 了
+# 兩條都失敗時印 charge_record_failed（有自己的告警），回答照給：錢已經付給 OpenAI 了
 def save_charge(sqs: BaseClient | None, queue_url: str | None, dynamodb: BaseClient, record: dict, period: str) -> None:
     """Send the charge event to SQS, or record it here if that fails or SQS is disabled."""
     if queue_url is not None:
@@ -195,7 +195,7 @@ def save_charge(sqs: BaseClient | None, queue_url: str | None, dynamodb: BaseCli
         record_charge(dynamodb, record, period)
     except (BotoCoreError, ClientError) as exc:
         record["charged"] = False
-        report_audit_failure(record, exc)
+        report_audit_failure(record, exc, event="charge_record_failed")
 
 
 # 對話入口：開單號 → 遮罩 → 呼叫模型 → 寫稽核紀錄 → 回傳
@@ -310,8 +310,24 @@ def chat_endpoint(
     cost = cost_micro_usd(outcome.settings, result.input_tokens, result.output_tokens)
     record["cost_micro_usd"] = cost
     save_charge(sqs, queue_url, dynamodb, record, period)
+    # 回應除了回答，也把 Console 要顯示的東西一起帶回去：路由理由、有沒有降級、用量、成本、額度
+    # 額度的已用＝呼叫前讀到的已用＋這次成本：帳由 Worker 非同步記，回頭讀資料庫可能還沒入帳
     return {
         "request_id": request_id,
         "reply": result.text,
         "model": outcome.model,
+        "route": {
+            "reason": decision.reason,
+            "fallback": outcome.fallback,
+        },
+        "usage": {
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "reasoning_tokens": result.reasoning_tokens,
+        },
+        "cost_micro_usd": cost,
+        "quota": {
+            "limit_micro_usd": limit_micro_usd,
+            "used_micro_usd": used_micro_usd + cost,
+        },
     }
