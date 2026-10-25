@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -10,21 +11,23 @@ from functools import lru_cache
 
 from botocore.client import BaseClient
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from openai import APIError, OpenAI, RateLimitError
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
 from app.audit import save_audit, hash_prompt, make_summary, mask, detect_pii_types, report_audit_failure
 from app.auth import extract_bearer_token, find_user_id, hash_api_key
+from app.config import CONFIG_PATH, GatewayConfig, load_config
 from app.db import make_dynamodb_client
 from app.events import make_sqs_client, read_queue_url, send_event
-from app.ledger import record_charge
-from app.openai_auth import make_openai_client, read_openai_auth
-from app.config import CONFIG_PATH, GatewayConfig, load_config
-from app.router import choose_model
-from app.pricing import ModelNotConfiguredError, cost_micro_usd, find_model_config
 from app.fallback import chat_with_fallback, is_budget_exhausted, retry_after_seconds
+from app.ledger import record_charge
+from app.metrics import REGISTRY, observe_request
+from app.openai_auth import make_openai_client, read_openai_auth
+from app.pricing import ModelNotConfiguredError, cost_micro_usd, find_model_config
 from app.quota import add_usage, is_over_quota, period_of, read_limit, read_used, seconds_until_next_period
+from app.router import choose_model
 
 # 啟動時就把設定讀進來並檢查：設定有問題，Gateway 直接起不來
 CONFIG = load_config(CONFIG_PATH)
@@ -169,6 +172,13 @@ def health_check():
     return {"status": "ok"}
 
 
+# 監控端點：Prometheus 來抄數字；雲端由 ALB 檢查通行證，沒帶就 403、碰不到容器（4.3）
+@app.get("/metrics")
+def metrics() -> Response:
+    """Return the counters in the Prometheus text format."""
+    return Response(generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)
+
+
 # SQS 送不進去、改走備援時印一行：帳是對的（Gateway 自己記了），只是要知道佇列出了問題；不印摘要與指紋
 def report_queue_failure(record: dict, error: Exception) -> None:
     """Print one JSON line saying the charge event could not be sent."""
@@ -214,6 +224,8 @@ def chat_endpoint(
     config: GatewayConfig = Depends(get_config),
 ):
     """Send the masked message to the model and write an audit record."""
+    # 開始計時：每條路結束前把花了多久記進監控
+    started = time.perf_counter()
     request_id = str(uuid.uuid4())
     masked = mask(request.message)
 
@@ -232,6 +244,7 @@ def chat_endpoint(
     if is_over_quota(limit_micro_usd, used_micro_usd):
         record["status"] = "quota_exceeded"
         write_audit_record(record)
+        observe_request(record, time.perf_counter() - started)
         raise HTTPException(
             status_code=429,
             detail="Monthly quota exceeded",
@@ -256,6 +269,7 @@ def chat_endpoint(
         record["status"] = "error"
         record["error_type"] = type(exc).__name__
         write_audit_record(record)
+        observe_request(record, time.perf_counter() - started)
         raise HTTPException(status_code=500, detail="Internal server error")
 
     # 呼叫模型：強模型被限流時改用便宜模型一次；不論成功失敗，都交回一個結果（不往外丟錯誤）
@@ -281,6 +295,7 @@ def chat_endpoint(
         if isinstance(outcome.error, APIError):
             record["error_code"] = outcome.error.code
         write_audit_record(record)
+        observe_request(record, time.perf_counter() - started)
         # 供應商回 429（限流或預算用完）：回 503
         if isinstance(outcome.error, RateLimitError):
             # 供應商的預算用完：多久會恢復無從得知，要有人處理，所以不附 Retry-After
@@ -310,6 +325,7 @@ def chat_endpoint(
     cost = cost_micro_usd(outcome.settings, result.input_tokens, result.output_tokens)
     record["cost_micro_usd"] = cost
     save_charge(sqs, queue_url, dynamodb, record, period)
+    observe_request(record, time.perf_counter() - started)
     # 回應除了回答，也把 Console 要顯示的東西一起帶回去：路由理由、有沒有降級、用量、成本、額度
     # 額度的已用＝呼叫前讀到的已用＋這次成本：帳由 Worker 非同步記，回頭讀資料庫可能還沒入帳
     return {
