@@ -120,9 +120,10 @@ def write_audit(client: BaseClient, record: dict) -> None:
 
 
 # 寫不進資料庫時的退路：印一行 JSON 到 stderr（Fargate 會送進 CloudWatch Logs），只留中繼資料
-def report_audit_failure(record: dict, error: Exception) -> None:
+# event 預設 audit_write_failed（沒花錢的稽核寫不進去）；花了錢、記帳兩條路都失敗時由呼叫的人改成 charge_record_failed
+def report_audit_failure(record: dict, error: Exception, event: str = "audit_write_failed") -> None:
     """Print one JSON line with the record's metadata, without the summary or hash."""
-    entry = {"event": "audit_write_failed"}
+    entry = {"event": event}
     for name in FAILURE_LOG_FIELDS:
         entry[name] = record.get(name)
     entry["error_type"] = type(error).__name__

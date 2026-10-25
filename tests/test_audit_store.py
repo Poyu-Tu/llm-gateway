@@ -121,6 +121,15 @@ def test_report_audit_failure_prints_one_json_line(capsys):
     assert entry["error_type"] == "ClientError"
 
 
+# M6：花了錢、記帳兩條路都失敗的那一種，由呼叫的人指定事件名；其他欄位照舊
+def test_report_audit_failure_can_use_another_event_name(capsys):
+    report_audit_failure(make_record(), make_client_error(), event="charge_record_failed")
+
+    entry = json.loads(capsys.readouterr().err)
+    assert entry["event"] == "charge_record_failed"
+    assert entry["error_type"] == "ClientError"
+
+
 # 只印中繼資料：摘要、指紋、個資類別都不能出現在日誌（D7）
 def test_report_audit_failure_leaves_out_summary_and_hash(capsys):
     report_audit_failure(make_record(), make_client_error())
