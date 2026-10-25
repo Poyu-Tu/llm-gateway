@@ -1,0 +1,14 @@
+# 上雲那天才用：複製到 monitoring/secrets/cloud-scrape.yml，把 <ALB 的 DNS 名稱> 換掉；
+# 通行證（SSM 裡那串）另存成 monitoring/secrets/metrics-token，只有一行、不要多空白
+# secrets/ 整個資料夾不進 repo（.gitignore）
+#
+# 經過 ALB 抄 Fargate 上的 Gateway（4.3）：ALB 只放行本人 IP，而且要帶 X-Metrics-Token 才轉給 Gateway，沒帶直接 403
+scrape_configs:
+  - job_name: gateway-cloud
+    static_configs:
+      - targets: ["<ALB 的 DNS 名稱>:80"]
+        labels:
+          env: cloud
+    http_headers:
+      X-Metrics-Token:
+        files: ["/etc/prometheus/secrets/metrics-token"]

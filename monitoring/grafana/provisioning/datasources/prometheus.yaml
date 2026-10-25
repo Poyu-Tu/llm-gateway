@@ -1,0 +1,10 @@
+# Grafana 的資料來源：同一個 compose 裡的 Prometheus（容器之間用服務名稱找對方）
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

@@ -1,0 +1,48 @@
+# M6 本機監控：Prometheus 每 15 秒來抄 Gateway 的 /metrics，Grafana 把數字畫成曲線
+# 平常關著；要看的時候在 repo 根目錄跑：docker compose -f monitoring/compose.yaml up -d
+# 只綁本機（127.0.0.1），別台電腦連不到
+services:
+  prometheus:
+    # 版本與指紋都鎖定（D19）：v3.15.1，Docker Hub 10/21 推送，已過 3 天冷卻期
+    image: prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      # 抄來的數字只留 7 天：本機示範用，不需要更久
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      # 抄表設定唯讀掛進去；雲端的目標與通行證放在沒進 repo 的兩個檔（見 prometheus.yml）
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./secrets:/etc/prometheus/secrets:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    # 讓容器找得到主機上的 Gateway（Windows 的 Docker Desktop 本來就有，寫上是為了別的系統也能用）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    # 版本與指紋都鎖定（D19）：13.2.4，Docker Hub 10/13 推送
+    image: grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
+    environment:
+      # 本機示範：不用登入、只能看不能改；登入表單與帳密驗證都關掉，預設的 admin 帳號用不了
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_BASIC_ENABLED: "false"
+      # 不回報使用統計、不檢查更新（不連外）
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      # 打開就是 LLM Gateway 的儀表板
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/llm-gateway.json
+    volumes:
+      # 資料來源與儀表板都用檔案預先設定好（provisioning），不在畫面上手動點
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:

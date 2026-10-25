@@ -26,3 +26,5 @@ data/
 *.tfvars
 *.tfplan
 crash.log
+# 雲端監控的目標與通行證（不進 repo）
+monitoring/secrets/
