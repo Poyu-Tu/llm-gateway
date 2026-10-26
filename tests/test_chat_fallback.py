@@ -1,5 +1,7 @@
 """Tests for fallback on POST /v1/chat: what the caller gets, what is charged, and what the audit log says."""
 
+import json
+
 import httpx2
 import pytest
 from fastapi.testclient import TestClient
@@ -338,3 +340,44 @@ def test_chat_audits_no_fallback_when_the_routed_model_has_no_settings(tmp_path)
     assert response.status_code == 500
     assert completions.models_called() == []
     assert "fallback" not in read_audit(audit_path)
+
+
+# ---------- 預算用完的日誌：長期層的告警看這一行 ----------
+
+
+# 預算用完：stderr 印一行 provider_budget_exhausted，帶單號、模型與代碼
+def test_chat_logs_one_line_when_the_provider_budget_is_exhausted(tmp_path, capsys):
+    client, _, audit_path, _, _ = make_fallback_test_client(tmp_path, errors={"big": make_budget_error()})
+
+    response = client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    assert response.status_code == 503
+    lines = capsys.readouterr().err.splitlines()
+    entries = [json.loads(line) for line in lines if '"provider_budget_exhausted"' in line]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["request_id"] == read_audit(audit_path)["request_id"]
+    assert entry["routed_model"] == "big"
+    assert entry["error_code"] == "project_spend_limit_exceeded"
+
+
+# 日誌只留中繼資料：不能出現使用者的問題，也不能有供應商的錯誤訊息
+def test_budget_log_leaves_out_the_message_and_the_provider_text(tmp_path, capsys):
+    client, _, _, _, _ = make_fallback_test_client(tmp_path, errors={"big": make_budget_error()})
+
+    client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    text = capsys.readouterr().err
+    assert STRONG_MESSAGE not in text
+    assert "fake" not in text
+
+
+# 只是限流（不是預算用完）：不印這一行，告警才不會把限流當成要加值
+def test_chat_does_not_log_budget_exhausted_when_only_rate_limited(tmp_path, capsys):
+    errors = {"big": make_rate_limit_error(), "small": make_rate_limit_error()}
+    client, _, _, _, _ = make_fallback_test_client(tmp_path, errors=errors)
+
+    response = client.post("/v1/chat", json={"message": STRONG_MESSAGE})
+
+    assert response.status_code == 503
+    assert "provider_budget_exhausted" not in capsys.readouterr().err

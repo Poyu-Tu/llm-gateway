@@ -1,5 +1,6 @@
 ﻿# destroy 角色的權限模擬器（E123 定案 5：第三批，NAT／ALB／ECS／DNS 防火牆的拆除，與保護長期層的 Deny；
-# E124 補第 11、12 題：拔公開 IP 不能限標籤、刪公開 IP 仍限 daily）
+# E124 補第 11、12 題：拔公開 IP 不能限標籤、刪公開 IP 仍限 daily；
+# M6 補第 13～16 題：拆 /metrics 的規則、讀通行證只限那一個參數、deploy 角色碰不到）
 # 用 IAM 的 simulate-principal-policy 問 AWS：「這個角色能不能對這個東西做這件事？」，不會真的動到任何資源
 # 標籤用 --context-entries 餵 aws:ResourceTag/Layer（模擬器不會自己去看資源身上真正的標籤）
 # 用法（repo 根目錄、aws login 之後）：.\scripts\simulate_destroy_role.ps1
@@ -32,7 +33,11 @@ $cases = @(
   @(9,  '刪 DNS 查詢日誌設定',           'route53resolver:DeleteResolverQueryLogConfig',  "arn:aws:route53resolver:${p}:resolver-query-log-config/$queryLog",       '',           'explicitDeny'),
   @(10, '把查詢日誌從 VPC 拆開',         'route53resolver:DisassociateResolverQueryLogConfig', "arn:aws:route53resolver:${p}:resolver-query-log-config/$queryLog",  '',           'allowed'),
   @(11, '把公開 IP 從機器上拔下來',      'ec2:DisassociateAddress',                       '*',                                                                      '',           'allowed'),
-  @(12, '刪公開 IP（沒標籤）',           'ec2:ReleaseAddress',                            "arn:aws:ec2:${p}:elastic-ip/eipalloc-test",                              '',           'implicitDeny')
+  @(12, '刪公開 IP（沒標籤）',           'ec2:ReleaseAddress',                            "arn:aws:ec2:${p}:elastic-ip/eipalloc-test",                              '',           'implicitDeny'),
+  @(13, '拆 /metrics 的規則（daily）',   'elasticloadbalancing:DeleteRule',               "arn:aws:elasticloadbalancing:${p}:listener-rule/app/test/0123456789abcdef/0123456789abcdef/0123456789abcdef", 'daily', 'allowed'),
+  @(14, '讀 /metrics 的通行證',          'ssm:GetParameter',                              "arn:aws:ssm:${p}:parameter/llm-gateway/metrics-token",                   '',           'allowed'),
+  @(15, '讀稽核的 HMAC 金鑰',            'ssm:GetParameter',                              "arn:aws:ssm:${p}:parameter/llm-gateway/audit-hmac-key",                  '',           'implicitDeny'),
+  @(16, '刪 deploy 角色',                'iam:DeleteRole',                                "arn:aws:iam::${acct}:role/llm-gateway-deploy",                           '',           'explicitDeny')
 )
 
 $cases | ForEach-Object {
