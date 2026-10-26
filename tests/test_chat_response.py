@@ -38,7 +38,7 @@ def test_chat_response_shows_route_usage_cost_and_quota(tmp_path):
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"request_id", "reply", "model", "route", "usage", "cost_micro_usd", "quota"}
+    assert set(body) == {"request_id", "reply", "model", "route", "usage", "cost_micro_usd", "pii_types", "quota"}
     assert body["reply"] == "Hi there"
     assert body["model"] == "small"
     assert body["route"] == {"reason": "default", "fallback": False}
@@ -78,3 +78,15 @@ def test_chat_response_shows_fallback(tmp_path):
     assert body["route"] == {"reason": "keyword", "fallback": True}
     assert body["cost_micro_usd"] == CHEAP_COST
     assert body["quota"]["used_micro_usd"] == 100 + CHEAP_COST
+
+
+# 個資標籤：回應帶回「有哪幾類被遮掉」（跟稽核同一份），沒有個資時是空的；個資本身不出現在回應裡
+def test_chat_response_lists_masked_pii_types(tmp_path):
+    client = make_client_with_quota(tmp_path)
+
+    with_phone = client.post("/v1/chat", json={"message": "Call me at 0912-345-678"})
+    without = client.post("/v1/chat", json={"message": SIMPLE_MESSAGE})
+
+    assert with_phone.json()["pii_types"] == ["PHONE"]
+    assert "0912-345-678" not in with_phone.text
+    assert without.json()["pii_types"] == []
