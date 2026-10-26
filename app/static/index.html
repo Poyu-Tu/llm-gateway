@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>LLM Gateway Console</title>
+  <link rel="stylesheet" href="/static/console.css">
+  <script src="/static/console.js" defer></script>
+</head>
+<body>
+  <!-- 圖示：畫在這裡一次，各處用 <use> 引用（不寫 style 屬性，CSP 才能維持 style-src 'self'） -->
+  <svg class="sprite" aria-hidden="true">
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z" fill="currentColor"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.5" fill="currentColor"/><g stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8"/></g></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m8.5 12 2.5 2.5 4.5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z" fill="currentColor"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M4 12 20 4l-4 16-4-6-8-2Z" fill="currentColor"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 16l-4-4 4-4M6 12h10"/></g></symbol>
+    <symbol id="i-orbit" viewBox="0 0 48 48"><ellipse cx="24" cy="24" rx="21" ry="9" fill="none" stroke="currentColor" stroke-width="1.6" opacity=".55"/><ellipse cx="24" cy="24" rx="12" ry="5" fill="none" stroke="currentColor" stroke-width="1.6" opacity=".8"/><circle cx="24" cy="24" r="4.2" fill="currentColor"/><circle cx="36" cy="22" r="2.2" fill="#c9d4ff"/><circle cx="6" cy="27" r="2.6" fill="#ffc65c"/></symbol>
+  </svg>
+
+  <!-- 星空背景：純 CSS 畫的，不載入任何圖片 -->
+  <div class="sky" aria-hidden="true"><div class="stars s1"></div><div class="stars s2"></div></div>
+
+  <!-- 第 1 頁：歡迎頁（一個分頁只播一次；不自動跳轉，點一下或按任何鍵才進登入頁） -->
+  <section id="view-welcome" class="view" hidden>
+    <div class="welcome">
+      <svg class="system" viewBox="0 0 600 320" aria-hidden="true">
+        <defs>
+          <radialGradient id="core-glow">
+            <stop offset="0" stop-color="#ffffff"/>
+            <stop offset=".35" stop-color="#9fb4ff"/>
+            <stop offset="1" stop-color="#9fb4ff" stop-opacity="0"/>
+          </radialGradient>
+        </defs>
+        <path id="orbit-luna" class="orbit luna" d="M150 160a150 58 0 1 0 300 0a150 58 0 1 0 -300 0"/>
+        <path id="orbit-sol" class="orbit sol" d="M40 160a260 120 0 1 0 520 0a260 120 0 1 0 -520 0"/>
+        <circle class="core-halo" cx="300" cy="160" r="70" fill="url(#core-glow)"/>
+        <circle class="core" cx="300" cy="160" r="16"/>
+        <g class="body luna-body">
+          <circle r="11"/>
+          <animateMotion dur="7s" repeatCount="indefinite" rotate="0"><mpath href="#orbit-luna"/></animateMotion>
+        </g>
+        <g class="body sol-body">
+          <circle r="15"/>
+          <animateMotion dur="13s" repeatCount="indefinite" rotate="0"><mpath href="#orbit-sol"/></animateMotion>
+        </g>
+      </svg>
+      <h1 class="title">LLM Gateway Console</h1>
+      <p class="subtitle">企業級大語言模型調度與成本治理平台</p>
+      <p class="legend"><span class="tag luna"><svg class="ic"><use href="#i-moon"/></svg>luna 便宜模型</span><span class="tag sol"><svg class="ic"><use href="#i-sun"/></svg>sol 強模型</span></p>
+      <p class="skip">點一下或按任意鍵繼續</p>
+    </div>
+  </section>
+
+  <!-- 第 2 頁：登入（驗證 API Key → 問候 → 進入操作頁） -->
+  <section id="view-login" class="view" hidden>
+    <form id="login-form" class="login-card" autocomplete="off">
+      <svg class="logo spin-slow" aria-hidden="true"><use href="#i-orbit"/></svg>
+      <h2>登入 LLM Gateway</h2>
+      <p class="muted">請輸入管理員發給你的 API Key</p>
+      <label for="api-key" class="sr-only">API Key</label>
+      <input id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="API Key">
+      <button id="login-button" type="submit" class="primary">驗證並登入</button>
+      <p id="login-error" class="error" role="alert"></p>
+      <p class="fine">Key 只存在這個分頁，關掉分頁就會清除。</p>
+    </form>
+    <div id="greeting" class="greeting" hidden>
+      <svg class="logo burst" aria-hidden="true"><use href="#i-orbit"/></svg>
+      <p id="greeting-text" class="greeting-text"></p>
+      <p class="muted">正在進入控制台…</p>
+    </div>
+  </section>
+
+  <!-- 第 3 頁：操作頁（左：問與答；右：這一題的調度明細） -->
+  <section id="view-app" class="view" hidden>
+    <header class="topbar">
+      <!-- 點左上角或「新對話」：清掉畫面上的問答、回到三個範例題（這次登入的累計與額度不變） -->
+      <button id="home" type="button" class="brand" title="回到開始畫面"><svg class="logo-sm" aria-hidden="true"><use href="#i-orbit"/></svg><span>LLM Gateway Console</span></button>
+      <div class="who">
+        <span id="user-avatar" class="avatar"></span>
+        <span class="who-text"><span class="muted">已登入</span><strong id="user-name"></strong></span>
+        <button id="new-chat" type="button" class="ghost" title="清掉畫面、回到範例題"><svg class="ic"><use href="#i-plus"/></svg>新對話</button>
+        <button id="logout" type="button" class="ghost" title="登出"><svg class="ic"><use href="#i-logout"/></svg>登出</button>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <!-- 第 2 塊：問與答 -->
+      <section class="chat panel" aria-label="問與答">
+        <div id="messages" class="messages" aria-live="polite">
+          <div id="empty" class="empty">
+            <svg class="logo-lg" aria-hidden="true"><use href="#i-orbit"/></svg>
+            <p class="empty-title">今天想問什麼？</p>
+            <p class="muted">Gateway 會依題目難度，把問題分給月亮或太陽。</p>
+            <div class="examples">
+              <button type="button" class="example luna" data-text="台灣的首都是哪裡？"><svg class="ic"><use href="#i-moon"/></svg>簡單題</button>
+              <button type="button" class="example sol" data-text="請比較 SQS 和 Kafka 的優缺點，用三點說明"><svg class="ic"><use href="#i-sun"/></svg>需要分析</button>
+              <button type="button" class="example pii" data-text="我的手機是 0912-345-678，請原樣唸一次給我聽"><svg class="ic"><use href="#i-shield"/></svg>含個資</button>
+            </div>
+          </div>
+        </div>
+        <div class="composer">
+          <label for="message" class="sr-only">問題</label>
+          <textarea id="message" rows="1" maxlength="4000" placeholder="輸入你的問題…"></textarea>
+          <button id="send" type="button" class="send" title="送出"><svg class="ic"><use href="#i-send"/></svg></button>
+        </div>
+        <p class="composer-hint"><span>Enter 送出 · Shift+Enter 換行 · 每題各自獨立，不會記得上一題</span><span id="char-count" class="num">0 / 4000</span></p>
+      </section>
+
+      <!-- 第 3 塊：路由、用量、額度 -->
+      <aside class="dash" aria-label="調度明細">
+        <section class="panel card">
+          <h3>路由決策</h3>
+          <div id="route-box" class="route idle">
+            <span id="route-orb" class="orb"><svg class="ic"><use id="route-icon" href="#i-orbit"/></svg></span>
+            <div>
+              <p id="route-model" class="route-model">等待第一題</p>
+              <p id="route-reason" class="muted">送出後，這裡會顯示分給哪一顆模型、為什麼</p>
+            </div>
+          </div>
+          <p id="route-flags" class="flags"></p>
+        </section>
+
+        <section class="panel card">
+          <h3>本次用量 <span id="usage-of" class="muted small"></span></h3>
+          <div class="stats">
+            <div class="stat"><span class="label">輸入</span><span id="tok-in" class="num big">—</span></div>
+            <div class="stat"><span class="label">輸出</span><span id="tok-out" class="num big">—</span></div>
+            <div class="stat"><span class="label">思考</span><span id="tok-think" class="num big">—</span></div>
+          </div>
+          <p class="cost-line"><span class="label">成本</span><span id="cost-usd" class="num money">—</span><span id="cost-ntd" class="ntd" hidden></span></p>
+        </section>
+
+        <section class="panel card">
+          <h3>剩餘額度 <span class="muted small">本月</span></h3>
+          <p class="quota-left"><span id="quota-left" class="num money big">—</span><span id="quota-left-ntd" class="ntd" hidden></span></p>
+          <div class="bar"><div id="quota-fill" class="fill"></div></div>
+          <p id="quota-text" class="muted small">—</p>
+        </section>
+
+        <section class="panel card session">
+          <h3>這次登入</h3>
+          <p class="session-row"><span class="label">已問</span><span id="session-count" class="num">0</span><span class="label">題</span>
+            <span class="tag luna"><svg class="ic"><use href="#i-moon"/></svg><span id="session-luna" class="num">0</span></span>
+            <span class="tag sol"><svg class="ic"><use href="#i-sun"/></svg><span id="session-sol" class="num">0</span></span></p>
+          <p class="session-row"><span class="label">累計</span><span id="session-usd" class="num money">US$0</span><span id="session-ntd" class="ntd">≈ NT$0</span></p>
+        </section>
+      </aside>
+    </div>
+  </section>
+</body>
+</html>

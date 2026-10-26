@@ -8,10 +8,13 @@ import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 from functools import lru_cache
+from pathlib import Path
 
 from botocore.client import BaseClient
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from openai import APIError, OpenAI, RateLimitError
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
@@ -59,6 +62,30 @@ log_queue_mode(CHARGE_QUEUE_URL)
 
 # 說明頁（/docs、/redoc、/openapi.json）一律關閉：使用者用不到，只會把 API 的地圖交給想攻擊的人
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+# Demo Console 的檔案（HTML、CSS、JS）跟著 Gateway 打包，不另開 S3（決策書 3.1）
+STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+# 每個回應都加上的安全標頭（決策書 4.4）
+# CSP：只准載入自己網站的程式與樣式、不准內嵌程式、不准被別的網站嵌進 iframe
+SECURITY_HEADERS = {
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    # 瀏覽器每次都要先問伺服器「檔案有沒有換」：改版後不會繼續用舊的 CSS、JS（沒換就回 304，不重傳）
+    "Cache-Control": "no-cache",
+}
+
+
+# 中介層：每個請求處理完、回應送出前，把安全標頭貼上去
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for name, value in SECURITY_HEADERS.items():
+        response.headers[name] = value
+    return response
 
 
 # 請求格式：只收 message，沒有 model 欄位，使用者不能指定模型（D9）
@@ -170,6 +197,30 @@ def health_check():
     version would help attackers look up known vulnerabilities.
     """
     return {"status": "ok"}
+
+
+# 首頁就是 Demo Console
+@app.get("/")
+def console() -> FileResponse:
+    """Return the Demo Console page."""
+    return FileResponse(STATIC_DIR / "index.html")
+
+
+# 登入用：只驗 Key、回名稱與額度；不呼叫模型、一毛不花（Console 的登入頁與角落的名稱）
+@app.get("/v1/me")
+def me(
+    user_id: str = Depends(get_user_id),
+    quota: tuple[int, int] = Depends(get_quota),
+):
+    """Return who the caller is and their quota this month, without calling the model."""
+    limit_micro_usd, used_micro_usd = quota
+    return {
+        "user_id": user_id,
+        "quota": {
+            "limit_micro_usd": limit_micro_usd,
+            "used_micro_usd": used_micro_usd,
+        },
+    }
 
 
 # 監控端點：Prometheus 來抄數字；雲端由 ALB 檢查通行證，沒帶就 403、碰不到容器（4.3）
@@ -342,6 +393,8 @@ def chat_endpoint(
             "reasoning_tokens": result.reasoning_tokens,
         },
         "cost_micro_usd": cost,
+        # 只回「有哪幾類個資被遮掉」，不回個資本身（跟稽核紀錄同一份）
+        "pii_types": record["pii_types"],
         "quota": {
             "limit_micro_usd": limit_micro_usd,
             "used_micro_usd": used_micro_usd + cost,
