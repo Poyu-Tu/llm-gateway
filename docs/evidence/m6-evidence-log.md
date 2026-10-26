@@ -3,7 +3,7 @@
 > 依決策書 11.5 遮蔽：AWS 帳號 ID、存取金鑰 ID、公開 IP；OpenAI 的 Project ID、金鑰 Tracking ID、金鑰末 4 碼、建立者 user ID；個人帳號名稱（含終端機提示字元與路徑中的使用者資料夾名稱，一律寫成 `<user>`）。
 > 本檔收錄「文字型」證據；截圖另存於 `docs/screenshots/`（檔名以 `m6-` 開頭，正式清單照決策書 11.4 的 S 編號），日誌另存於 `docs/logs/`。
 > E 編號接續 `m5-evidence-log.md`（E127～E144），從 E145 開始。E145 是 M5 的收尾（實際花費），因為 M5 的紀錄已隨結案合併，照交接約定記在這裡。
-> 紀錄日期：2026-10-25 建立（E145～E148）；10/26 補 E149～E151
+> 紀錄日期：2026-10-25 建立（E145～E148）；10/26～10/27 補 E149～E152
 
 ---
 
@@ -185,7 +185,7 @@
 
 ---
 
-## E151. `/metrics` 的門禁：SSM 通行證＋ALB 兩條規則（2026-10-26，個人電腦；只到 `plan`，沒有建每日層）
+## E151. `/metrics` 的門禁：SSM 通行證＋ALB 兩條規則（2026-10-26 23:00～23:55，個人電腦；PR #36，`main` = `ff870e7`；只到 `plan`，沒有建每日層）
 
 **範圍：** E146 第 3 項（決策書 4.3）的程式與通行證（PR B）。實際擋不擋得住要等上雲那天驗。
 
@@ -212,3 +212,32 @@
 **上雲那天要驗的（驗收）：** 不帶標頭 → 403；帶錯 → 403；帶對 → 200 與 Prometheus 文字；`/metrics/` → 403；`/health`、`/` 照常 200；Prometheus `gateway-cloud` 目標 up（S15）。
 
 **後續：** PR C（`deploy.yml`、environment `deploy`）；決策書 M6 結案版 4.3 補「十六進位通行證、兩條規則、明文的弱點」。
+
+---
+
+## E152. CD：`deploy.yml` 與部署前守門（2026-10-26 23:55～10-27 01:11，個人電腦；寫完、還沒合併、還沒跑）
+
+**範圍：** E146 第 4 項（PR C）。程式寫完、本機測試；GitHub environment `deploy`、兩個 secret、第一次試跑在下一段。
+
+| 檔案 | 內容 |
+|---|---|
+| `scripts/check_deploy_plan.py`（新） | `disallowed_changes(plan)`：讀 `terraform show -json`，列出「換映像以外」的每個改變；允許清單是「資源＋動作」的組合，只有 `aws_ecs_task_definition.gateway` 的 `delete/create`（或 `create/delete`）與 `aws_ecs_service.gateway` 的 `update`；`no-op`、`read` 不算改變。`main(path)` 有問題印出並回 1 |
+| `tests/test_check_deploy_plan.py`（新） | 8 個：只換映像放行；沒改變放行；安全群組規則要換（IP 變了、secret 沒更新）擋；每日層沒建（全部 `create`）擋且全部列出；Worker 要更新擋；服務刪掉重建擋；`main` 回 1 並印出、回 0 |
+| `.github/workflows/deploy.yml`（新） | `workflow_dispatch`；`permissions: {}`、工作上才開 `id-token: write`、`contents: read`；`environment: deploy`；`concurrency` 排隊不取消；Terraform 1.16.6 官方 zip＋SHA256（同 `destroy.yml`）；遮帳號 ID、`admin_cidr`（含不帶 `/32` 的寫法）；標籤＝`GITHUB_SHA` 前 7 碼；`docker build --provenance=false --sbom=false` → Trivy（同 CI 門檻）→ ECR（標籤已存在就沿用，IMMUTABLE）→ `init` → `plan -out` → `show -json` → 守門 → `apply` 那份計畫檔（不重算）；每個 Terraform 指令前重要一張身分證明；`plan`／`apply` 輸出過濾 `/32` |
+
+**設計重點：**
+- **兩道防線：** 守門（看計畫）先擋，deploy 角色的 IAM（E150）再擋；每日層沒建時守門列出所有 `create` 後停，apply 不開始
+- **apply 照存好的計畫：** 守門看過什麼就做什麼，中間有人改了東西也不會被偷偷帶上
+- **計畫檔與 JSON 含通行證、IP 原值：** 只在 runner 暫存區，不上傳 artifact、不印
+
+**驗證（目前只有本機與 Claude 的驗證複本）：**
+- Claude 的驗證複本：守門 8 個測試通過；破壞實驗：拿掉「在允許清單裡就放行」那一行 → 5 個失敗；`deploy.yml` 每個 `run` 區塊 `bash -n` 語法檢查通過
+- 本人打的 `deploy.yml` 與驗證版逐字一致；`check_deploy_plan.py` 只差一處空白（`problems =[]`），不影響行為
+
+**已知風險（誠實記錄）：**
+- **Worker 的 zip 跨系統：** 本人 Windows、runner Linux；`archive_file` 打出的 zip 指紋若不同，`plan` 會要更新 Lambda → 守門擋下（安全地失敗，但部署做不下去）。`.gitattributes` 已規定 LF，要等第一次對著真的每日層跑才知道
+- 守門只看「哪個資源、哪種動作」，不看改了哪個欄位（例如服務的 `desired_count`）；每日層設定都來自同一份 `main`，目前接受
+- runner 連不到 ALB（只放本人 IP），CD 沒有部署後的煙霧測試；靠 `wait_for_steady_state`＋ALB 健康檢查＋部署斷路器，再由本人從電腦打 `/health`
+- `deploy` 與 `destroy` 是兩個 `concurrency` 群組；同時按的話靠 Terraform 的 S3 鎖擋第二個
+
+**下一步（驗收計畫）：** 合併 → 本人開 environment `deploy`（只准 `main`、取消管理員略過）、放 `AWS_DEPLOY_ROLE_ARN`、`ADMIN_CIDR` 兩個 environment secret → **每日層拆著的時候先跑一次**：預期建映像、Trivy、推 ECR 都綠，`plan` 列出約 42 個 `create`，**守門擋下、workflow 紅**；一次驗 OIDC、ECR 推送、讀帳本與通行證、守門、遮蔽。之後別的分支按一次（environment 擋）。上雲那天再按一次真的換版。

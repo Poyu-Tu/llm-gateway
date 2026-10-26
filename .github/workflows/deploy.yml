@@ -1,0 +1,146 @@
+name: deploy
+
+# 換 Gateway 的映像（CD，M6）：手動觸發，只准 main（D20、E146 定案 4、5）
+# 建映像（標籤 = commit 編號）→ Trivy → 推 ECR → plan → 守門 → apply（D92、E150 定案 A）
+# 每日層要先由本人電腦建好；沒建時守門擋下、deploy 角色也沒有建東西的權限（安全地失敗）
+# 借角色的方式跟 destroy.yml 一樣：只把 GitHub 的身分證明存成檔案，Terraform 與 AWS CLI 自己換臨時憑證
+on:
+  workflow_dispatch:
+
+# 整個 workflow 預設什麼權限都沒有；需要的工作自己開
+permissions: {}
+
+# 同一時間只准部署一次；第二次排隊，不取消正在換版的那次（換到一半被取消，帳本會留下鎖）
+concurrency:
+  group: deploy-daily
+  cancel-in-progress: false
+
+env:
+  # 跟 destroy.yml 同一個版本與指紋；升級時兩個檔一起改
+  TF_VERSION: 1.16.6
+  TF_SHA256: 38034b38d03096399a7a1264a14561a8029b2b496fd1f169452656e53968f1b7
+  TF_IN_AUTOMATION: "1"
+  AWS_REGION: ap-northeast-1
+
+jobs:
+  deploy:
+    name: Deploy the Gateway image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # 只有掛這個 environment 的工作借得到 deploy 角色；environment 只准 main（GitHub 端設定）
+    environment: deploy
+    permissions:
+      id-token: write # 跟 GitHub 要身分證明
+      contents: read # 取出程式碼
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Terraform and check its fingerprint
+        run: |
+          set -euo pipefail
+          curl -sSfL -o "$RUNNER_TEMP/terraform.zip" \
+            "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+          echo "${TF_SHA256}  $RUNNER_TEMP/terraform.zip" | sha256sum --check --strict -
+          unzip -q -o "$RUNNER_TEMP/terraform.zip" terraform -d "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/terraform" version
+
+      # 帳號 ID 會出現在映像網址、計畫裡的 ARN：從角色 ARN 取出來，之後每一行都遮成 ***
+      # admin_cidr 本身是 secret（GitHub 自動遮），只寫 IP 不帶 /32 的寫法也遮掉
+      # 映像標籤 = 這次 main 的 commit 編號前 7 碼（D92）
+      - name: Hide the account ID and address, and set the image tag
+        env:
+          ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          ADMIN_CIDR: ${{ secrets.ADMIN_CIDR }}
+        run: |
+          set -euo pipefail
+          account_id=$(echo "$ROLE_ARN" | cut -d: -f5)
+          echo "::add-mask::${account_id}"
+          echo "::add-mask::${ADMIN_CIDR%/32}"
+          echo "IMAGE_TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          echo "REGISTRY=${account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com" >> "$GITHUB_ENV"
+
+      # 跟 CI 一樣的建法，加上推 ECR 要的兩個參數（D92：單一 OCI 映像，不附出廠證明）
+      - name: Build the image
+        run: docker build --provenance=false --sbom=false -t "llm-gateway:${IMAGE_TAG}" .
+
+      # 跟 CI 的 Image scan 同一個門檻：有修補版的 HIGH、CRITICAL 就停，不推、不部署
+      - name: Scan the image with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: llm-gateway:${{ env.IMAGE_TAG }}
+          version: v0.74.0
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      # ECR 是 IMMUTABLE：同一個標籤推過就不能再推。推過（例如本人電腦推的）就沿用，那份也是從同一個 commit 建的
+      - name: Push the image to ECR
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          AWS_WEB_IDENTITY_TOKEN_FILE: ${{ runner.temp }}/token
+          AWS_ROLE_SESSION_NAME: deploy-push-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' > "$AWS_WEB_IDENTITY_TOKEN_FILE"
+          echo "::add-mask::$(cat "$AWS_WEB_IDENTITY_TOKEN_FILE")"
+
+          if aws ecr describe-images --repository-name llm-gateway --image-ids "imageTag=${IMAGE_TAG}" > /dev/null 2>&1; then
+            echo "Image ${IMAGE_TAG} is already in ECR; using it"
+            exit 0
+          fi
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY"
+          docker tag "llm-gateway:${IMAGE_TAG}" "${REGISTRY}/llm-gateway:${IMAGE_TAG}"
+          docker push "${REGISTRY}/llm-gateway:${IMAGE_TAG}"
+          docker logout "$REGISTRY"
+
+      # plan → 守門 → apply。計畫檔與 JSON 含通行證、IP 的原值：只放在這台用完即丟的機器的暫存區，不上傳、不印
+      - name: Plan, check and apply with Terraform
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          AWS_WEB_IDENTITY_TOKEN_FILE: ${{ runner.temp }}/token
+          AWS_ROLE_SESSION_NAME: deploy-${{ github.run_id }}
+          TF_VAR_admin_cidr: ${{ secrets.ADMIN_CIDR }}
+        run: |
+          set -euo pipefail
+          export TF_VAR_image_tag="$IMAGE_TAG"
+          plan_file="$RUNNER_TEMP/deploy.tfplan"
+          plan_json="$RUNNER_TEMP/deploy-plan.json"
+
+          # GitHub 的證明約 5 分鐘過期：每個 Terraform 指令之前重新要一張（同 destroy.yml）
+          new_token() {
+            curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' > "$AWS_WEB_IDENTITY_TOKEN_FILE"
+            echo "::add-mask::$(cat "$AWS_WEB_IDENTITY_TOKEN_FILE")"
+          }
+          # 從 AWS 讀回來的 /32 位址再遮一次（destroy 學到的：sensitive 管不到讀回來的值）
+          hide_addresses() {
+            sed -u -E 's#([0-9]{1,3}\.){3}[0-9]{1,3}/32#x.x.x.x/32#g'
+          }
+
+          echo "::group::terraform init"
+          new_token
+          terraform -chdir=infra/daily init -input=false
+          echo "::endgroup::"
+
+          new_token
+          terraform -chdir=infra/daily plan -input=false -out="$plan_file" 2>&1 | hide_addresses
+
+          # 守門：只准「任務定義換新版＋服務改指新版本」；其他任何改變（含每日層沒建）都停在這裡
+          terraform -chdir=infra/daily show -json "$plan_file" > "$plan_json"
+          python3 scripts/check_deploy_plan.py "$plan_json"
+          rm -f "$plan_json"
+
+          # apply 照剛剛檢查過的那份計畫做，不重算；等到 ECS 服務穩定才算成功（wait_for_steady_state）
+          new_token
+          terraform -chdir=infra/daily apply -input=false "$plan_file" 2>&1 | hide_addresses
+          rm -f "$plan_file"
+
+          echo "Deployed llm-gateway:${IMAGE_TAG}"
