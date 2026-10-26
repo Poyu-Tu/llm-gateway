@@ -3,7 +3,7 @@
 > 依決策書 11.5 遮蔽：AWS 帳號 ID、存取金鑰 ID、公開 IP；OpenAI 的 Project ID、金鑰 Tracking ID、金鑰末 4 碼、建立者 user ID；個人帳號名稱（含終端機提示字元與路徑中的使用者資料夾名稱，一律寫成 `<user>`）。
 > 本檔收錄「文字型」證據；截圖另存於 `docs/screenshots/`（檔名以 `m6-` 開頭，正式清單照決策書 11.4 的 S 編號），日誌另存於 `docs/logs/`。
 > E 編號接續 `m5-evidence-log.md`（E127～E144），從 E145 開始。E145 是 M5 的收尾（實際花費），因為 M5 的紀錄已隨結案合併，照交接約定記在這裡。
-> 紀錄日期：2026-10-25 建立（E145～E148）；10/26 補 E149、E150
+> 紀錄日期：2026-10-25 建立（E145～E148）；10/26 補 E149～E151
 
 ---
 
@@ -136,7 +136,7 @@
 
 ---
 
-## E150. 長期層：兩組告警、deploy 角色、destroy 角色第五批（2026-10-26 11:46～12:56，個人電腦）
+## E150. 長期層：兩組告警、deploy 角色、destroy 角色第五批（2026-10-26 11:46～13:03，個人電腦；PR #35，`main` = `80320c4`）
 
 **範圍：** E146 第 3～5 項的「長期層＋程式」那一段（PR A）。每日層的 `/metrics` 規則（PR B）、`deploy.yml`（PR C）還沒做；這次沒有建每日層、沒有部署。
 
@@ -182,3 +182,33 @@
 - 通行證參數還沒建（PR B 由本人 CLI 建）；兩個新告警還沒實際響過
 
 **後續：** PR B（每日層 `/metrics` 規則、本人建通行證）→ PR C（`deploy.yml`、environment `deploy`）；決策書 M6 結案版：4.2 的 CI/CD 層、5.1、D20、12.5 的預算告警改「M6 已做」；練習本：`report_budget_exhausted()`、deploy 角色、`daily_read.tf`。
+
+---
+
+## E151. `/metrics` 的門禁：SSM 通行證＋ALB 兩條規則（2026-10-26，個人電腦；只到 `plan`，沒有建每日層）
+
+**範圍：** E146 第 3 項（決策書 4.3）的程式與通行證（PR B）。實際擋不擋得住要等上雲那天驗。
+
+| 項目 | 內容 |
+|---|---|
+| 通行證 | 本人用 CLI 建 `/llm-gateway/metrics-token`（`SecureString`、AWS 預設 `aws/ssm` 金鑰、標準參數不收費）；值用 `secrets.token_hex(32)` 產生（64 個十六進位字元、256 位元），只放在 PowerShell 變數、建完就刪，沒有出現在畫面與任何檔案 |
+| `infra/daily/metrics_access.tf`（新） | `data "aws_ssm_parameter"` 讀通行證；規則 **10**：路徑 `/metrics` **而且** 標頭 `X-Metrics-Token` 對 → 轉給 Gateway；規則 **20**：路徑 `/metrics`、`/metrics/*` → ALB 自己回 `403 Forbidden`（`fixed-response`），不轉給容器；其他請求照 listener 原本的轉給 Gateway |
+
+**為什麼是兩條、順序為什麼這樣排：** ALB 從號碼小的比，第一條符合就停。放行那條要兩個條件同時成立；沒過的掉到 20 號一律 403。順序反過來，所有人都先被 403 擋。
+
+**為什麼通行證是十六進位：** ALB 比對標頭**不分大小寫**、`*` `?` 是萬用字元、值最長 128 字（開工前讀文件發現）。十六進位只有 0～9、a～f，不會撞到萬用字元，大小寫也不影響強度。
+
+**驗證（不花錢）：**
+- 本人打的檔與 Claude 驗證版逐字一致
+- `terraform validate` 通過；`plan`（`admin_cidr` 用文件專用位址 `192.0.2.1/32`、`image_tag` 填 `80320c4`，只算不建）：**`Plan: 42 to add, 0 to change, 0 to destroy`**（M5 的 40 個＋2 條規則）；`data.aws_ssm_parameter` 讀得到（本人的身分）
+- 計畫裡規則 10 的兩個 `condition` 顯示 `At least one attribute in this block is (or was) sensitive, so its contents will not be displayed`：**通行證沒有出現在 `plan` 輸出**；規則 20 印出 `403`、`/metrics`、`/metrics/*`
+
+**限制（誠實記錄）：**
+- ALB 規則的條件要寫明文：通行證在每日層帳本、ALB 主控台的規則頁看得到；有讀這兩處權限的人就拿得到
+- Demo 走 HTTP（7.8）：通行證在網路上是明文，靠 ALB 只放本人一個 IP 撐住
+- 本機 `compose` 裡的 Gateway `/metrics` 仍然沒有保護（只綁 127.0.0.1）
+- 換通行證要 apply 每日層（規則才會更新）；destroy 角色、deploy 角色都只准讀這一個參數（E150 模擬器第 14、17 題）
+
+**上雲那天要驗的（驗收）：** 不帶標頭 → 403；帶錯 → 403；帶對 → 200 與 Prometheus 文字；`/metrics/` → 403；`/health`、`/` 照常 200；Prometheus `gateway-cloud` 目標 up（S15）。
+
+**後續：** PR C（`deploy.yml`、environment `deploy`）；決策書 M6 結案版 4.3 補「十六進位通行證、兩條規則、明文的弱點」。
