@@ -62,3 +62,9 @@ output "worker_role_arn" {
   description = "ARN of the role the charge Worker Lambda runs as"
   value       = aws_iam_role.worker.arn
 }
+
+# deploy workflow 要借的角色；值含帳號 ID，存進 GitHub environment deploy 的 secret（公開的 log 會遮掉）
+output "deploy_role_arn" {
+  description = "ARN of the role the GitHub deploy workflow assumes"
+  value       = aws_iam_role.deploy.arn
+}

@@ -3,7 +3,7 @@
 > 依決策書 11.5 遮蔽：AWS 帳號 ID、存取金鑰 ID、公開 IP；OpenAI 的 Project ID、金鑰 Tracking ID、金鑰末 4 碼、建立者 user ID；個人帳號名稱（含終端機提示字元與路徑中的使用者資料夾名稱，一律寫成 `<user>`）。
 > 本檔收錄「文字型」證據；截圖另存於 `docs/screenshots/`（檔名以 `m6-` 開頭，正式清單照決策書 11.4 的 S 編號），日誌另存於 `docs/logs/`。
 > E 編號接續 `m5-evidence-log.md`（E127～E144），從 E145 開始。E145 是 M5 的收尾（實際花費），因為 M5 的紀錄已隨結案合併，照交接約定記在這裡。
-> 紀錄日期：2026-10-25 建立（E145～E148）
+> 紀錄日期：2026-10-25 建立（E145～E148）；10/26 補 E149、E150
 
 ---
 
@@ -99,3 +99,86 @@
 **撞到的一次：** `python scripts/seed.py` → `ModuleNotFoundError: No module named 'app'`（直接跑檔案時只從 `scripts/` 找模組）；改 `python -m scripts.seed`。
 
 **還沒做：** S15 正式截圖等上雲那天拍雲端的曲線；額度擋下（429）在 Grafana 上的樣子等 Console 錄影時一起看。
+
+---
+
+## E149. Demo Console 完成（2026-10-26 08:30～11:27，個人電腦；PR #34，`main` = `acb5707`）
+
+**範圍：** 決策書 3.1 的 Console 與 4.4 的前端安全；10/26 10:30 本人看過第一版後改需求（三頁、聊天式、主題動畫），先講理解、問四題才動工。
+
+**本人 10/26 的四個選擇：** 主題「日月軌道」（luna＝月亮銀藍、sol＝太陽金色；另兩個候選：光纖流量、收費站）；這次 `console.js` 由 Claude 放、本人讀懂（`main.py` 仍由本人打）；台幣顯示兩位有效數字（看得出便宜與強模型差幾倍）；要個資標籤。
+
+| 檔案 | 內容 |
+|---|---|
+| `app/main.py` | `StaticFiles` 掛 `/static`；`GET /` 回 Console；中介層 `add_security_headers()` 每個回應加 CSP（`default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`）、`X-Frame-Options: DENY`、`nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-cache`；**新增 `GET /v1/me`**（只驗 Key、回名稱與額度，不呼叫模型、不花錢，給登入頁用）；`/v1/chat` 回應加 `pii_types`（只加不改，跟稽核同一份） |
+| `app/static/` | 三頁：歡迎頁（SVG 軌道動畫，一個分頁只播一次，**不自動跳轉**，點一下或按任意鍵才進登入）→ 登入（`/v1/me` 驗證，五種問候輪流）→ 操作頁（左：聊天式問答，送出清空、保留歷史、Enter 送出、Shift+Enter 換行、注音選字的 Enter 不送；右：路由、用量、成本、剩餘額度、這次登入累計；左上角圖示與「新對話」回到三個範例題）；US$ 去掉尾巴的 0、附約略台幣（匯率 32.6 寫死，2026-10-20 台北收盤 32.617）；錯誤訊息依狀態碼改中文；429 寫出恢復日期時間 |
+| 測試 | `tests/test_console.py` 10 個、`tests/test_me.py` 3 個、`tests/test_chat_response.py` 加 1 個；**390 → 404** |
+
+**驗證：**
+- 本機 `pytest -q` 404 passed；PR #34 的 `ci`、`CodeQL` 綠燈後合併
+- Claude 在自己的環境（同一份程式＋Playwright，`/v1/*` 用假回應）：開頁沒有 CSP 錯誤；回答塞 `<img src=x onerror=alert(1)>` 被當文字印出、沒有執行；手機寬度 390 不會橫向捲動；歡迎頁等 7 秒仍停留、按鍵才進登入
+- 推上去的 7 個檔案與 Claude 驗證版逐檔一致
+- 本機容器（`--profile gateway --build`）：bob 問簡單題（luna）、分析題（sol）、含個資題（標籤「已遮罩 電話 才送出」）；alice 額度已用完 → 429，畫面顯示「11/1（日）00:00 恢復」
+- 破壞實驗：拿掉 `pii_types`（2 個失敗）、`/v1/me` 改路徑（2 個失敗）、HTML 加 `style=`（1 個失敗）、拿掉 `Cache-Control`（1 個失敗）
+
+**撞到的：**
+1. **CSP 標頭名稱打錯**（`Content-Security-Poilcy`、`scripts-src`、`base-url`）：前者讓兩個測試失敗；後兩個瀏覽器只會默默略過、不報錯 → 測試補檢查 `base-uri 'none'`
+2. **VS Code 自動完成把 `.value` 換成 `.ariaValueMax`**（4 處）、`bosy`、`$("message"),value`、漏打整個函式：8 個測試都抓不到（只檢查伺服器標頭與字串），靠逐行比對找到
+3. **新 JS 配到瀏覽器快取的舊 CSS，畫面全亂**：沒有 `Cache-Control` 時 Chrome 依檔案年齡自己猜能用多久（舊 CSS 是前一天的檔、新 JS 是當天的）→ 加 `Cache-Control: no-cache`（用前先問伺服器，沒換就回 304、不重傳）；上雲用 CD 改版時也會遇到
+4. **額度恢復時間**：Claude 一度說額度照 UTC 換月（台灣 08:00 恢復），實際 `app/quota.py` 的 `period_of()` 照台北時間 → 畫面「00:00」才對，前端備用計算也改照台北時間
+5. **alice 一題就變紅**：強模型輸出每 token 10 micro-USD，一題分析題就超過 1,000 的月額度；只在呼叫前檢查、不預扣（決策書 7.10）
+
+**設計取捨（本人要求寫進練習本）：沒有上下文記憶**——`chat_endpoint()` 只送這一句。有記憶的代價：每輪重送全部歷史、成本與額度難預估；要保存可能含個資的對話；多台容器要共用狀態。弱點：不能追問 → 畫面寫「每題各自獨立，不會記得上一題」。
+
+**限制：** 登入仍是貼 API Key；本人提的「公司帳號登入後自動換 Key」只放簡報「未來」頁，沒做。台幣是固定匯率的參考值。`/v1/me` 跟 `/v1/chat` 一樣可以拿來試 Key（401 不花錢），靠 Key 是 256 位元亂數撐住；沒有登入次數限制。
+
+**後續：** 上雲那天用 Console 錄三章（節費、個資、額度，D65）；決策書 M6 結案版：3.1 的畫面圖、4.4 加 `Cache-Control` 與 `/v1/me`、介面清單加 `GET /`、`GET /v1/me`；練習本待整理清單在 Project `claude/m6-console-draft/practice-book-todo.md`。
+
+---
+
+## E150. 長期層：兩組告警、deploy 角色、destroy 角色第五批（2026-10-26 11:46～12:56，個人電腦）
+
+**範圍：** E146 第 3～5 項的「長期層＋程式」那一段（PR A）。每日層的 `/metrics` 規則（PR B）、`deploy.yml`（PR C）還沒做；這次沒有建每日層、沒有部署。
+
+**開工前讀程式發現、交接沒寫到的：**
+- 預算用完（`project_spend_limit_exceeded`）原本只寫稽核的 `error_code`、回 503，**沒有日誌**，指標篩選抓不到 → `main.py` 加一行事件
+- 每日層加 Listener Rule 與 SSM 讀取後，destroy 角色拆之前也要讀它們（D87），所以 destroy 角色要跟著加權限
+- ALB 比對標頭**不分大小寫**、`*` `?` 當萬用字元、值最長 128 字 → 通行證用 64 個十六進位字元（PR B 用）
+
+**定案（本人 10/26 11:46）：CD 的 apply 範圍選 A「整份 plan＋守門」**
+
+| 選項 | 做法 | 結果 |
+|---|---|---|
+| **A（選）** | 整份 `plan`，用 `terraform show -json` 檢查只准「新增任務定義＋更新 ECS 服務」，其他任何變動（含每日層沒建、要新建一堆）就停；`admin_cidr` 放 environment `deploy` 的 secret | 兩道防線：守門先擋、IAM 再擋 |
+| B | `-target=aws_ecs_service.gateway`，`admin_cidr` 填假值 | 官方說 `-target` 只給例外用；範圍外的差異看不到，只剩 IAM 一道 |
+| C | 不用 Terraform，`aws ecs` 直接換任務定義 | 違反 D92：帳本跟 AWS 對不上 |
+
+弱點：多一個 secret 要記得換（家裡 IP 會變；對不上時 plan 會出現安全群組變動 → 守門擋下，是安全地失敗）；IP 要過濾，不能印進公開日誌。
+
+| 檔案 | 內容 |
+|---|---|
+| `app/main.py` | `report_budget_exhausted()`：印 `{"event": "provider_budget_exhausted", "request_id", "routed_model", "error_code"}`，不記錯誤訊息；`chat_endpoint()` 判斷預算用完那條路呼叫它 |
+| `infra/persistent/logs.tf` | `charge_record_failed`、`provider_budget_exhausted` 兩組指標篩選＋告警，都是 1 分鐘 ≥ 1 筆就響（前者錢花了帳沒記到、後者每個請求都 503，都沒有備援可接）；告警共 4 個，在每月前 10 個免費內 |
+| `infra/persistent/daily_read.tf`（新） | 每日層「只看」的動作清單，destroy 與 deploy 角色共用；多 `elasticloadbalancing:DescribeRules`；通行證參數 `/llm-gateway/metrics-token` 的 ARN |
+| `infra/persistent/github_oidc.tf` | destroy 角色第五批：三段 Describe 合成 `ReadDailyLayer`；`ReadMetricsToken`（只限通行證那一個參數）；`DeleteRule`＋資源種類加 `listener-rule/app/*`（仍限 `Layer=daily`）；Deny 加 deploy 角色與兩個新告警 |
+| `infra/persistent/deploy_role.tf`（新） | `llm-gateway-deploy`：信任只限 environment `deploy`；讀寫每日層帳本與鎖檔、讀每日層、讀通行證；ECR 只准推 `llm-gateway`（含 `DescribeImages` 查標籤推過沒）；`RegisterTaskDefinition`（AWS 規定 `*`）；`TagResource` 只在 `ecs:CreateAction = RegisterTaskDefinition` 時；`PassRole` 只限 Gateway 兩個角色且只交給 `ecs-tasks`；`UpdateService` 只限那一個服務＋`Layer=daily`；Deny 改自己 |
+| `infra/persistent/outputs.tf` | `deploy_role_arn` |
+| `tests/test_chat_fallback.py` | 3 個：預算用完印一行（單號對得上稽核、模型、代碼）；日誌不含使用者問題與供應商訊息；只是限流不印 |
+| `scripts/simulate_deploy_role.ps1`（新）、`simulate_destroy_role.ps1` | deploy 22 題；destroy 補第 13～16 題 |
+
+**驗證：**
+- `pytest`：404 → **407 passed**
+- 破壞實驗（Claude 的驗證複本）：拿掉 `report_budget_exhausted(record)` 那一行 → 1 個測試失敗（`test_chat_logs_one_line_when_the_provider_budget_is_exhausted`）
+- `terraform fmt`、`validate` 通過；`plan`：**6 to add, 1 to change, 0 to destroy**（新增兩個篩選、兩個告警、deploy 角色與它的政策；更新 destroy 角色的政策）；`apply`：**Apply complete! Resources: 6 added, 1 changed, 0 destroyed.**
+- 權限模擬器：**destroy 16 題全 O**（舊的 12 題在 Describe 合併後照樣過；新的：拆規則 `allowed`、讀通行證 `allowed`、讀 HMAC 金鑰 `implicitDeny`、刪 deploy 角色 `explicitDeny`）；**deploy 22 題全 O**（推映像、登記、登記時貼標籤、交角色給 ECS、服務換版、讀通行證、讀寫每日層帳本 `allowed`；推別的倉庫、事後改標籤、交給 Lambda、交 Worker 角色、沒標籤的服務、刪／建服務、建 VPC、改安全群組、改 Worker、改規則、讀 HMAC 金鑰、寫長期層帳本 `implicitDeny`；給自己加權限 `explicitDeny`）
+
+**撞到的（逐行比對抓到，`validate` 之前）：**
+1. `logs.tf` 的 `aws_cloudwatch_log_group.gateway,name`（句點打成逗號）→ 語法錯，`validate` 會擋
+2. **`deploy_role.tf` 的 `ReadWriteDailyState` 打成下一段 `LockDailyState` 的內容**（動作多 `DeleteObject`、資源指向 `.tflock`）：語法完全正確，`validate`、`plan` 都抓不到，結果是 CD 讀不到每日層帳本，要到上雲那天 `init` 才失敗 → 模擬器補第 20～22 題（讀寫每日層帳本、寫長期層帳本），以後同樣的錯在上雲前就會變 `X`
+
+**限制：**
+- 模擬器只問「這張卡刷這扇門會不會開」，標籤與 `ecs:CreateAction`、`iam:PassedToService` 都是用參數餵的；deploy 角色真的能不能跑完一次 `plan`（讀的動作有沒有漏）要等 CD 第一次實跑
+- deploy 角色的 `RegisterTaskDefinition` 是 `Resource "*"`（AWS 規定）：能登記任何名字的任務定義，但交得出去的角色只有 Gateway 那兩個、能換版的服務只有一個
+- 通行證參數還沒建（PR B 由本人 CLI 建）；兩個新告警還沒實際響過
+
+**後續：** PR B（每日層 `/metrics` 規則、本人建通行證）→ PR C（`deploy.yml`、environment `deploy`）；決策書 M6 結案版：4.2 的 CI/CD 層、5.1、D20、12.5 的預算告警改「M6 已做」；練習本：`report_budget_exhausted()`、deploy 角色、`daily_read.tf`。

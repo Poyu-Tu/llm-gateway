@@ -1,4 +1,4 @@
-# 三個日誌群組、DNS 查詢日誌的設定、兩個告警：都放長期層（E123 定案 7 推出來的安排；M5 加 Worker 的群組與 SQS 告警）
+# 三個日誌群組、DNS 查詢日誌的設定、四個告警：都放長期層（E123 定案 7 推出來的安排；M5 加 Worker 的群組與 SQS 告警；M6 加記帳失敗與預算用完）
 #   不需要拆除組多拿 logs:DeleteLogDelivery 那種只能寫 "*" 的刪除權限（DNS 查詢日誌刪設定時要用）
 #   日誌在每日層拆掉之後還在：S08 的封鎖紀錄、稽核寫失敗的那一行，事後查得到
 #   日誌群組、查詢日誌設定、指標篩選都不跳錶；告警每個每月約 US$0.10（前 10 個免費）
@@ -99,6 +99,71 @@ resource "aws_cloudwatch_metric_alarm" "charge_queue_failed" {
   period              = 300
   evaluation_periods  = 1
   threshold           = 3
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+}
+
+# ---- 花了錢、帳卻沒記到的告警（M6，E147 拆出來的事件名）----
+# 模型已經回答、錢已經付給 OpenAI，可是送 SQS 和 Gateway 自己記帳兩條路都失敗時，
+# 只在日誌印一行 {"event": "charge_record_failed", ...}；這一筆要人工補帳，所以 1 筆就響
+resource "aws_cloudwatch_log_metric_filter" "charge_record_failed" {
+  name           = "llm-gateway-charge-record-failed"
+  log_group_name = aws_cloudwatch_log_group.gateway.name
+  pattern        = "{ $.event = \"charge_record_failed\" }"
+
+  metric_transformation {
+    name      = "ChargeRecordFailed"
+    namespace = "LLMGateway"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "charge_record_failed" {
+  alarm_name        = "llm-gateway-charge-record-failed"
+  alarm_description = "A paid answer could not be charged: both SQS and the direct ledger write failed; fix the ledger by hand"
+
+  namespace   = "LLMGateway"
+  metric_name = "ChargeRecordFailed"
+  statistic   = "Sum"
+  # 1 分鐘內有 1 筆就響：少記一筆就是少收一筆錢
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+}
+
+# ---- 供應商預算用完的告警（D32、12.5）----
+# OpenAI 回「預算用完」時不降級、回 503，日誌印一行 {"event": "provider_budget_exhausted", ...}
+# 自己不會好，要有人去加值或調上限；也代表 Gateway 的額度控管和供應商帳單對不上，所以 1 筆就響
+resource "aws_cloudwatch_log_metric_filter" "provider_budget_exhausted" {
+  name           = "llm-gateway-provider-budget-exhausted"
+  log_group_name = aws_cloudwatch_log_group.gateway.name
+  pattern        = "{ $.event = \"provider_budget_exhausted\" }"
+
+  metric_transformation {
+    name      = "ProviderBudgetExhausted"
+    namespace = "LLMGateway"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "provider_budget_exhausted" {
+  alarm_name        = "llm-gateway-provider-budget-exhausted"
+  alarm_description = "OpenAI says the project budget has run out; every request now gets 503 until someone tops it up"
+
+  namespace           = "LLMGateway"
+  metric_name         = "ProviderBudgetExhausted"
+  statistic           = "Sum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
 

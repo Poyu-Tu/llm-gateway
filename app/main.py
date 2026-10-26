@@ -241,6 +241,18 @@ def report_queue_failure(record: dict, error: Exception) -> None:
     print(json.dumps(entry), file=sys.stderr, flush=True)
 
 
+# 供應商的預算用完時印一行：要有人去加值或調上限，長期層的告警看這一行（D32）；只記單號、模型與代碼，不記錯誤訊息
+def report_budget_exhausted(record: dict) -> None:
+    """Print one JSON line saying the provider's budget has run out."""
+    entry = {
+        "event": "provider_budget_exhausted",
+        "request_id": record["request_id"],
+        "routed_model": record.get("routed_model"),
+        "error_code": record.get("error_code"),
+    }
+    print(json.dumps(entry), file=sys.stderr, flush=True)
+
+
 # 成功那一筆的記帳：先送 SQS 交給 Worker；送不進去或不用 SQS，就自己一次寫三本帳
 # 兩條都失敗時印 charge_record_failed（有自己的告警），回答照給：錢已經付給 OpenAI 了
 def save_charge(sqs: BaseClient | None, queue_url: str | None, dynamodb: BaseClient, record: dict, period: str) -> None:
@@ -351,6 +363,7 @@ def chat_endpoint(
         if isinstance(outcome.error, RateLimitError):
             # 供應商的預算用完：多久會恢復無從得知，要有人處理，所以不附 Retry-After
             if is_budget_exhausted(outcome.error):
+                report_budget_exhausted(record)
                 raise HTTPException(status_code=503, detail="Service temporarily unavailable")
             # 限流（降級後的便宜模型，或路由一開始就選便宜模型）：告訴對方大約多久後再試
             raise HTTPException(

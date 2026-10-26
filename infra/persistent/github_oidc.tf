@@ -3,6 +3,7 @@
 # 第二批加拆每日層骨架的權限（E121）；
 # 第三批加拆 D 段（NAT、DNS 防火牆、ALB、ECS）的權限（E123）；
 # 第四批加拆 Worker（Lambda 與 SQS 觸發）的權限（E135）
+# 第五批（M6）：拆 /metrics 的兩條 Listener Rule、讀通行證；三段 Describe 合成一段，清單搬到 daily_read.tf 與 deploy 角色共用
 
 locals {
   # GitHub 2026/7/15 之後建立的 repo，身分證明的 sub 是「名字@編號」的新格式（本 repo 9/29 建立）
@@ -37,6 +38,7 @@ locals {
     "${local.daily_ec2_arn_prefix}:elastic-ip/*",
     "arn:aws:elasticloadbalancing:${local.account_region}:loadbalancer/app/*",
     "arn:aws:elasticloadbalancing:${local.account_region}:listener/app/*",
+    "arn:aws:elasticloadbalancing:${local.account_region}:listener-rule/app/*",
     "arn:aws:elasticloadbalancing:${local.account_region}:targetgroup/*",
     "arn:aws:ecs:${local.account_region}:cluster/*",
     "arn:aws:ecs:${local.account_region}:service/*",
@@ -120,25 +122,20 @@ data "aws_iam_policy_document" "destroy_permissions" {
 
   # ---- 第二批（E121）：拆每日層的骨架（VPC、子網、大門、路由表、安全群組、Gateway Endpoint）----
 
-  # 拆之前要先看現況。EC2 的 Describe 不能指定資源，AWS 規定 Resource 只能寫 "*"
-  # 動作逐一列出、不寫 ec2:Describe*（E121 定案 2）；缺哪個，destroy 的錯誤訊息會寫出來，再補
+  # 拆之前要先看現況：每日層每一樣東西讀一遍。清單在 daily_read.tf，跟 deploy 角色共用（M6 把三段 Describe 合成這一段）
   statement {
-    sid    = "DescribeDailyNetwork"
-    effect = "Allow"
-    actions = [
-      "ec2:DescribeVpcs",
-      "ec2:DescribeVpcAttribute",
-      "ec2:DescribeSubnets",
-      "ec2:DescribeRouteTables",
-      "ec2:DescribeInternetGateways",
-      "ec2:DescribeSecurityGroups",
-      "ec2:DescribeSecurityGroupRules",
-      "ec2:DescribeNetworkAcls",
-      "ec2:DescribeVpcEndpoints",
-      "ec2:DescribePrefixLists",
-      "ec2:DescribeNetworkInterfaces",
-    ]
+    sid       = "ReadDailyLayer"
+    effect    = "Allow"
+    actions   = local.daily_read_actions
     resources = ["*"]
+  }
+
+  # 每日層用 data 讀 /metrics 的通行證，拆之前 Terraform 也會讀一次（M6）；只限這一個參數
+  statement {
+    sid       = "ReadMetricsToken"
+    effect    = "Allow"
+    actions   = ["ssm:GetParameter"]
+    resources = [local.metrics_token_parameter]
   }
 
   # 只准刪貼著 Layer = daily 的東西（每日層的 default_tags 會自動貼）
@@ -172,40 +169,6 @@ data "aws_iam_policy_document" "destroy_permissions" {
 
   # ---- 第三批（E123）：拆 D 段（NAT、彈性 IP、DNS 防火牆、ALB、ECS）----
 
-  # 一樣先看現況。這幾個服務的 Describe、List 有的不能指定資源；只看不改，全部寫 "*"
-  # （跟 DescribeDailyNetwork 同一個做法，動作逐一列出）
-  statement {
-    sid    = "DescribeDailyRuntime"
-    effect = "Allow"
-    actions = [
-      "ec2:DescribeNatGateways",
-      "ec2:DescribeAddresses",
-      "ec2:DescribeAddressesAttribute",
-      "elasticloadbalancing:DescribeLoadBalancers",
-      "elasticloadbalancing:DescribeLoadBalancerAttributes",
-      "elasticloadbalancing:DescribeListeners",
-      "elasticloadbalancing:DescribeListenerAttributes",
-      "elasticloadbalancing:DescribeTargetGroups",
-      "elasticloadbalancing:DescribeTargetGroupAttributes",
-      "elasticloadbalancing:DescribeTags",
-      "elasticloadbalancing:DescribeCapacityReservation",
-      "ecs:DescribeClusters",
-      "ecs:DescribeServices",
-      "ecs:DescribeTaskDefinition",
-      "ecs:ListTagsForResource",
-      "route53resolver:GetFirewallDomainList",
-      "route53resolver:ListFirewallDomains",
-      "route53resolver:GetFirewallRuleGroup",
-      "route53resolver:ListFirewallRules",
-      "route53resolver:GetFirewallRuleGroupAssociation",
-      "route53resolver:ListResolverQueryLogConfigs",
-      "route53resolver:GetResolverQueryLogConfig",
-      "route53resolver:GetResolverQueryLogConfigAssociation",
-      "route53resolver:ListTagsForResource",
-    ]
-    resources = ["*"]
-  }
-
   # 一樣只准刪貼著 Layer = daily 的東西；不給任何 Create*、Tag*
   # 任務定義不在這裡：它設了 skip_destroy，拆的時候不去 AWS 註銷（E123 定案 7）
   statement {
@@ -214,6 +177,7 @@ data "aws_iam_policy_document" "destroy_permissions" {
     actions = [
       "ec2:DeleteNatGateway",
       "ec2:ReleaseAddress",
+      "elasticloadbalancing:DeleteRule",
       "elasticloadbalancing:DeleteListener",
       "elasticloadbalancing:DeleteLoadBalancer",
       "elasticloadbalancing:DeleteTargetGroup",
@@ -257,21 +221,6 @@ data "aws_iam_policy_document" "destroy_permissions" {
   }
 
   # ---- 第四批（E135）：拆 Worker（Lambda 函式與 SQS 觸發）----
-
-  # 拆之前先看現況：只看不改，寫 "*"（跟前兩批的 Describe 同一個做法）
-  statement {
-    sid    = "DescribeDailyWorker"
-    effect = "Allow"
-    actions = [
-      "lambda:GetFunction",
-      "lambda:GetFunctionCodeSigningConfig",
-      "lambda:GetPolicy",
-      "lambda:ListVersionsByFunction",
-      "lambda:GetEventSourceMapping",
-      "lambda:ListTags",
-    ]
-    resources = ["*"]
-  }
 
   # 刪函式：只准刪貼著 Layer = daily 的
   statement {
@@ -391,6 +340,7 @@ data "aws_iam_policy_document" "destroy_permissions" {
 
   # 第三批（E123）：Gateway 的兩個角色、告警、日誌、DNS 查詢日誌的設定，一樣碰不到
   # 第四批（E135）：Worker 的角色、記帳失敗告警、Worker 日誌、兩個佇列，一樣碰不到
+  # 第五批（M6）：deploy 角色、兩個新告警，一樣碰不到
   statement {
     sid    = "DenyGatewayRolesChange"
     effect = "Deny"
@@ -409,6 +359,7 @@ data "aws_iam_policy_document" "destroy_permissions" {
       aws_iam_role.task_execution.arn,
       aws_iam_role.task.arn,
       aws_iam_role.worker.arn,
+      aws_iam_role.deploy.arn,
     ]
   }
 
@@ -428,6 +379,8 @@ data "aws_iam_policy_document" "destroy_permissions" {
       aws_sns_topic.alerts.arn,
       aws_cloudwatch_metric_alarm.audit_write_failed.arn,
       aws_cloudwatch_metric_alarm.charge_queue_failed.arn,
+      aws_cloudwatch_metric_alarm.charge_record_failed.arn,
+      aws_cloudwatch_metric_alarm.provider_budget_exhausted.arn,
     ]
   }
 
