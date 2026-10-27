@@ -3,7 +3,7 @@
 > 依決策書 11.5 遮蔽：AWS 帳號 ID、存取金鑰 ID、公開 IP；OpenAI 的 Project ID、金鑰 Tracking ID、金鑰末 4 碼、建立者 user ID；個人帳號名稱（含終端機提示字元與路徑中的使用者資料夾名稱，一律寫成 `<user>`）。
 > 本檔收錄「文字型」證據；截圖另存於 `docs/screenshots/`（檔名以 `m6-` 開頭，正式清單照決策書 11.4 的 S 編號），日誌另存於 `docs/logs/`。
 > E 編號接續 `m5-evidence-log.md`（E127～E144），從 E145 開始。E145 是 M5 的收尾（實際花費），因為 M5 的紀錄已隨結案合併，照交接約定記在這裡。
-> 紀錄日期：2026-10-25 建立（E145～E148）；10/26～10/27 補 E149～E152
+> 紀錄日期：2026-10-25 建立（E145～E148）；10/26～10/27 補 E149～E153
 
 ---
 
@@ -241,3 +241,47 @@
 - `deploy` 與 `destroy` 是兩個 `concurrency` 群組；同時按的話靠 Terraform 的 S3 鎖擋第二個
 
 **下一步（驗收計畫）：** 合併 → 本人開 environment `deploy`（只准 `main`、取消管理員略過）、放 `AWS_DEPLOY_ROLE_ARN`、`ADMIN_CIDR` 兩個 environment secret → **每日層拆著的時候先跑一次**：預期建映像、Trivy、推 ECR 都綠，`plan` 列出約 42 個 `create`，**守門擋下、workflow 紅**；一次驗 OIDC、ECR 推送、讀帳本與通行證、守門、遮蔽。之後別的分支按一次（environment 擋）。上雲那天再按一次真的換版。
+
+---
+
+## E153. CD 第一次試跑：environment `deploy`、守門擋下、別的分支被擋（2026-10-27 13:30～14:10，公司電腦；PR #37，`main` = `8bcc043`；每日層拆著，沒有建任何東西）
+
+**範圍：** E152 驗收計畫的第一段。上雲那天的「真的換版」還沒做。
+
+| 項目 | 內容 |
+|---|---|
+| PR #37 | `deploy.yml`、`scripts/check_deploy_plan.py`、`tests/test_check_deploy_plan.py`（8 個，407 → 415）、E150～E152；檢查綠燈後本人合併 |
+| environment `deploy` | 本人在 GitHub 設定：Deployment branches 選 Selected branches and tags、規則 `main`（「1 branch and 0 tags allowed」）；**取消** Allow administrators to bypass；Claude 重新整理設定頁核對過 |
+| environment secret | `AWS_DEPLOY_ROLE_ARN`；`ADMIN_CIDR` 先填文件專用位址 `192.0.2.1/32`（試跑用不到真的 IP，也不把公司 IP 放進 GitHub；上雲那天改成家裡的 IP） |
+
+**deploy #1（`main`，1 分 27 秒，紅——預期的紅）：**
+
+| 步驟 | 結果 |
+|---|---|
+| Install Terraform | 1.16.6 指紋檢查通過 |
+| Build the image | 綠（15 秒） |
+| Scan the image with Trivy | 綠（21 秒）：沒有「有修補版」的 HIGH、CRITICAL |
+| Push the image to ECR | 綠（18 秒）：OIDC 借到 deploy 角色、`Login Succeeded`、`llm-gateway:8bcc043` 推上去（ECR 原本沒有這個標籤） |
+| Plan, check and apply | `init` 讀得到每日層帳本；四個 data（`archive_file.worker`、`aws_caller_identity`、SSM 通行證、DNS 查詢日誌設定）都讀成功；**`Plan: 42 to add, 0 to change, 0 to destroy.`**；守門印出 `The plan changes more than the Gateway image, so nothing was applied:` 並逐一列出 42 個 `create`，回 1，**`apply` 沒有開始** |
+
+**deploy #2（`feat/m6-deploy-workflow`，3 秒，紅——預期的紅）：** `Branch "feat/m6-deploy-workflow" is not allowed to deploy to deploy due to environment protection rules.`；一個步驟都沒跑，沒有跟 GitHub 要身分證明，也就借不到角色。
+
+**遮蔽（逐行看過 #1 的日誌）：**
+- 帳號 ID 在映像網址、任務定義的 ARN、SQS 網址、DNS 允許清單裡都顯示 `***`
+- `admin_cidr` 在安全群組規則顯示 `(sensitive value)`；`/metrics` 放行規則的兩個 `condition` 顯示 sensitive，通行證沒有出現
+- 日誌裡沒有任何 IP
+
+**這次證明了：**
+1. 新角色 deploy 的 OIDC 信任條件（environment `deploy`）成立，別的分支連要證明的機會都沒有
+2. deploy 角色的權限夠跑完「每日層沒建時」的 `init`＋`plan`、夠推 ECR（E150 限制「能不能跑完一次 `plan` 要等實跑」解除一半）
+3. 守門在真的計畫上照設計擋下，`apply` 沒開始；E146 的「每日層沒建時安全地失敗」成立
+4. 標籤＝`main` 的 commit 前 7 碼（`8bcc043`）
+
+**還沒證明（上雲那天）：** 每日層建著時 `plan` 要 Describe 現有的 42 個資源，deploy 角色讀的權限夠不夠；只換映像時守門放不放行（Worker zip 跨系統的指紋，E152 已知風險）；`apply`、`wait_for_steady_state`、部署斷路器。
+
+**觀察：**
+- **Worker zip 跨系統（E152 已知風險）當天就驗了：** Linux runner 算出的 `source_code_hash` 是 `1z50L1kGoXaNff0iTZQ9eSbwx4gAKPbZOjKwNr8Q6k4=`；14:43 本人在公司電腦（Windows）`terraform -chdir=infra/daily plan`（同樣 `admin_cidr=192.0.2.1/32`、`image_tag=8bcc043`）算出**同一串**。打包的 6 個檔在 Windows 上沒有 CR、`git hash-object` 與 `8bcc043` 的內容逐檔相同；`worker.tf` 用 `source { content = file(...) }` 放內容，不讀檔案權限與修改時間 → 兩台系統打出同一個 zip。剩下的前提：上雲那天建每日層的個人電腦也要是 LF（同一份 `.gitattributes`），建之前用同一行指令再對一次
+- 撞到的一次：在 repo 最上層跑 `terraform plan` → `Error: No configuration files`；改用 `terraform -chdir=infra/daily ...`，不用切換資料夾
+- `docker login` 印出「credentials are stored unencrypted」：runner 用完即丟，workflow 推完會 `docker logout`，目前接受
+
+**花費：** ECR 多一個映像（ECR 儲存每 GB 每月 US$0.10，一個映像每月不到 US$0.01）；Actions 用的是公開 repo 的免費額度。
