@@ -3,7 +3,7 @@
 > 依決策書 11.5 遮蔽：AWS 帳號 ID、存取金鑰 ID、公開 IP；OpenAI 的 Project ID、金鑰 Tracking ID、金鑰末 4 碼、建立者 user ID；個人帳號名稱（含終端機提示字元與路徑中的使用者資料夾名稱，一律寫成 `<user>`）。
 > 本檔收錄「文字型」證據；截圖另存於 `docs/screenshots/`（檔名以 `m6-` 開頭，正式清單照決策書 11.4 的 S 編號），日誌另存於 `docs/logs/`。
 > E 編號接續 `m5-evidence-log.md`（E127～E144），從 E145 開始。E145 是 M5 的收尾（實際花費），因為 M5 的紀錄已隨結案合併，照交接約定記在這裡。
-> 紀錄日期：2026-10-25 建立（E145～E148）；10/26～10/27 補 E149～E153
+> 紀錄日期：2026-10-25 建立（E145～E148）；10/26～10/27 補 E149～E154
 
 ---
 
@@ -285,3 +285,38 @@
 - `docker login` 印出「credentials are stored unencrypted」：runner 用完即丟，workflow 推完會 `docker logout`，目前接受
 
 **花費：** ECR 多一個映像（ECR 儲存每 GB 每月 US$0.10，一個映像每月不到 US$0.01）；Actions 用的是公開 repo 的免費額度。
+
+---
+
+## E154. S16：舊基底映像被 Trivy 擋下、現行基底通過（2026-10-27 15:10～15:30，公司電腦；PR #39 草稿、不合併）
+
+**範圍：** 決策書 8.2 M6 的驗證「另開分支故意使用有已知漏洞的舊基底映像，看到 Trivy 擋下」、11.4 的 S16。M3 第一次 CI 已實際擋過一次（E104），這次照原計畫用分支重拍。
+
+**做法：** 分支 `test/s16-old-base`：`Dockerfile` 兩個 `FROM` 的 digest 從現行 `a6e34c59…` 換回 10/4 的 `dddfd7e0…`（git 歷史 `bcb80e6`，就是 M3 被擋的那一版），第一行加註「S16 測試分支（不合併）」；開**草稿** PR #39，只為了觸發 CI。這個 `Dockerfile` 改動由 Claude 放進本人 repo（只用來測試、不合併）。
+
+**結果（ci #85，`9fbfdf6`）：**
+
+| 檢查 | 結果 |
+|---|---|
+| `Tests` | 綠 |
+| `Config scan` | 綠 |
+| **`Image scan`** | **紅**（28 秒）：建映像成功（舊 digest 仍拉得到），Trivy 回 1 |
+
+Trivy 的表（`llm-gateway:ci (debian 13.7)`）：**`Total: 1 (HIGH: 1, CRITICAL: 0)`**
+
+| Library | Vulnerability | Severity | Status | Installed | Fixed |
+|---|---|---|---|---|---|
+| `libpcre2-8-0` | CVE-2026-103111 | HIGH | fixed | `10.46-1~deb13u2` | `10.46-1~deb13u3` |
+
+**對照（現行基底，`main` = `0d42dc9` 的 ci #84）：** `Image scan` 綠；同樣是 `debian 13.7`，弱點數 **0**（基底 10/13 換新指紋後 pcre2 已是修補版）。
+
+**這次證明了：** 同一個專案、只差基底映像的指紋，有修補版的 HIGH 就讓 `Image scan` 失敗；三個必要檢查沒全綠就合併不了，所以不會進 `main`、也不會被 CD 部署（`deploy.yml` 建映像後也跑同一個門檻的 Trivy，E152）。
+
+**誠實記錄：**
+- 擋下的是「有修補版」的 HIGH、CRITICAL（`ignore-unfixed: true`）；沒有修補版的（M4 帶著上雲的 3 個 HIGH）不會擋，只能等上游
+- 這次只驗了 CI 這一道；`deploy.yml` 裡的 Trivy 是同一套設定，沒有另外拿舊映像按 deploy（別的分支本來就被 environment 擋，E153）
+- 弱點資料庫會更新：同一個舊映像日後可能多出別的弱點，表格內容以拍攝當天為準
+
+**截圖：** `docs/screenshots/s16-trivy-block.png`（PR #39 的 Image scan：左側 Tests／Config scan 綠、Image scan 紅，右側 `Total: 1 (HIGH: 1)` 與 pcre2 那一列）、`docs/screenshots/s16-trivy-pass.png`（main 的 ci #84：三個都綠、debian 弱點 0）。由 Claude 用 Chrome 擷取，畫面不含帳號 ID 與個人資料。
+
+**收尾：** PR #39 關閉、不合併；分支 `test/s16-old-base` 刪除。
