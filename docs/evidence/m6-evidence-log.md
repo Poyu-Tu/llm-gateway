@@ -353,7 +353,8 @@ Trivy 的表（`llm-gateway:ci (debian 13.7)`）：**`Total: 1 (HIGH: 1, CRITICA
 
 **誠實記錄：**
 - 告警驗的是「日誌篩選 → 告警 → SNS」這條管線；Gateway 程式真的印出 `provider_budget_exhausted` 由單元測試驗（OpenAI 預算不能真的用完）。測試 stream `alarm-test` 留在長期層的日誌群組裡
-- 告警信是否收到：**待本人確認**
+- 告警信：**已收到**（10/28 補記）。Gmail 10/27 23:45（台北）收到 `ALARM: "llm-gateway-provider-budget-exhausted"`，23:51 收到恢復 `OK` 的信
+- `/metrics` 的 403／200 驗收**沒有截圖或錄影**（10/28 查過 repo、本人電腦的截圖與錄影資料夾）：只有上表第 9 列的文字。下次開每日層時補錄一段終端機
 - 對帳的金額只對到「約 US$0.03」（後台只顯示兩位小數）；請求數精確對上
 - deploy #3 的紅燈是真的紅（權限不足），不是預期的紅
 - 雲端 `alice`、`bob` 的 10 月額度已用的部分不會因重灌歸零（同 12.5）
@@ -361,6 +362,7 @@ Trivy 的表（`llm-gateway:ci (debian 13.7)`）：**`Total: 1 (HIGH: 1, CRITICA
 **截圖、錄影：**
 - `docs/screenshots/m6-console-1-savings-bob.png`、`m6-console-2-pii-bob.png`、`m6-console-3-quota-carol.png`（三段錄影的最後一格）
 - `docs/screenshots/s15-grafana-cloud.jpg`（Claude 用 Chrome 擷取，畫面沒有帳號 ID、IP）
+- 10/28 補（Claude 用 Chrome 擷取並裁切；帳號 ID、GitHub 使用者名稱、ALB 位址、資源 ID 都不在畫面上）：`m6-cd-1-runs.png`（deploy 四次：#1～#3 紅、#4 綠；整次 3m21s，部署那個 job 3m14s）、`m6-cd-2-deploy1-guard-blocked.png`（#1 的 `Plan: 42 to add` 與守門 `The plan changes more than the Gateway image, so nothing was applied`）、`m6-cd-3-deploy4-only-swaps.png`（#4 的 `1 to add, 1 to change, 1 to destroy` 與 `The plan only swaps the Gateway image`）、`m6-cd-4-deploy4-apply-complete.png`（`Modifications complete after 1m54s`、`Apply complete!`）、`m6-alarm-email.png`（ALARM 信；AWS Account 那一行以下裁掉）
 - 錄影存本人電腦 `Videos\llm-gateway-mp4\m6-console-*.mp4`（Key 沒有入鏡，Claude 逐段看過）
 
 **花費：** 每日層約 1 小時 40 分（22:20 apply ～ 23:55 destroy）；OpenAI 雲端那段 12,410 micro-USD。AWS 實際金額等帳單出來再補（M6 報告）。

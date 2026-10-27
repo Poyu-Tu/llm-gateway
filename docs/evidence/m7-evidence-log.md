@@ -89,3 +89,28 @@
 3. 一整題 8 步約 US$0.008：agent 每輪重送全部內容，所以比單次聊天貴，但仍不到 1 美分
 
 **PR #41 的 CodeQL（20:00～20:03）：** 三個必要檢查綠，但 `Code scanning results` 紅（6/7）：`py/clear-text-logging-sensitive-data` 抓 `scripts/seed.py` 第 55 行 `print(f"{user_id}: {key}")`（第 6 號）。同一行 10/13 已以第 3 號「won't fix」關掉（當時第 53 行，理由最後一句「若對 AWS 執行要重新檢討」）；加 carol 的兩行讓它移到第 55 行，CodeQL 視為新警告。**重新檢討的結果：** 不改程式（寫進檔案反而讓 Key 留在硬碟），本人以 won't fix 關掉第 6 號，理由更新為「現在也對 AWS 執行，但仍只印在操作者自己的終端機（不進 CI、不進 CloudWatch），資料庫只存雜湊；重灌前先 `disable_key.py --user` 停掉舊 Key」。關掉後 PR 7/7 綠。Claude 一度只看 `ci` 那一列就回報「全綠」，被本人從 PR 清單的 6/7 抓到
+
+---
+
+## E159. agent 和 Console 用的是同一本帳（2026-10-28 01:05～01:25，個人電腦；本機）
+
+**目的：** 證明 agent 不是另外開一條路：它只是 Gateway 的一個客戶，花的錢扣在同一個人、同一個月的額度上，Console 和監控都看得到。這是 M7 的第 4 段錄影（選做）。
+
+**環境：** 本機 Gateway（`CHARGE_QUEUE_URL=disabled`）、本機 DynamoDB、本機 Prometheus＋Grafana（`env=local`）；`seed` 重新發 Key（bob 上限 US$1；`seed` 不歸零本月已花）。
+
+| # | 動作 | 結果 |
+|---|---|---|
+| 1 | Console 登入 bob，問一題簡單題 | 走 `gpt-6-luna`，花 US$0.00006；剩餘額度 **US$0.98363**（已用 US$0.01637） |
+| 2 | 另一個終端機 `uv run python -m scripts.agent_demo`（bob 的 Key，`getpass`） | 8 步、停止理由「完成」、**共花 8,080 micro-USD**（每步 626～1,434）；第 3 步又自己編出 `gpt-6-mini`，工具回「沒有這個模型」，第 4 步改問 `gpt-6-luna`；答案 sol 約 US$0.0081、luna 約 US$0.000405、貴 20 倍 |
+| 3 | agent 跑完，Console 還沒重新整理 | 仍是 US$0.98363（Console 不會自己更新） |
+| 4 | Console 按 F5 | **US$0.97555**（已用 US$0.02445）：少 **0.00808 ＝ 8,080 micro-USD**，與 agent 印的總額一致 |
+| 5 | Grafana（`env=local`、Last 15 minutes） | bob **$0.008140**（＝ 60＋8,080）；luna $0.000060、sol $0.008080；`ok` 9（Console 1＋agent 8）；被擋 0 |
+
+**錄影與截圖：**
+- 錄影：本人電腦 `Videos\llm-gateway-mp4\m7-agent-4-shared-quota-with-console.mp4`（約 97 秒；提示字元 `PS> `、Key 用 `getpass`，畫面沒有 Key 與使用者資料夾名稱；Claude 逐格看過）
+- 截圖（從錄影抽格）：`docs/screenshots/m7-agent-4a-terminal-final.png`（52 秒）、`m7-agent-4b-console-before.png`（60 秒，agent 跑完、還沒重新整理）、`m7-agent-4c-console-after.png`（66 秒）、`m7-agent-4d-grafana-bob.png`（94 秒）
+
+**誠實記錄：**
+- 又是第 8 步、上限的最後一步才完成（和 E157 的 bob 一樣），8 步沒有餘裕；多花的 2 步一樣在找便宜模型的名字
+- 錄影順序是先跑 agent、再看 Console（原本計畫先拍 Console）；開頭的 US$0.98363 在第 60 秒那格看得到，故事不受影響
+- 花費：OpenAI 約 8,140 micro-USD（約 US$0.008），AWS 0
