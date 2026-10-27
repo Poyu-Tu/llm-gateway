@@ -56,3 +56,34 @@
 - `scripts/agent_tools.py` 打完；Claude 逐行比對抓到一處：`evaluate()` 最後一行 `raise ToolError(...)` 打成 **`return ToolError(...)`** → 錯誤被當成普通的值交回去，`2 ** 10`、`True + 1` 這些該擋的沒擋（「拒絕」那組測試紅）；改回 `raise` 後與驗證版一致（只差檔尾換行）
 - 兩個測試檔由 Claude 放進 repo（大小核對過）
 - 還沒做：`scripts/agent_demo.py`、`seed.py` 加 carol、整套 `pytest`；實跑與兩條驗收（要在個人電腦，本機 Gateway 讀 `.env` 的金鑰）
+
+---
+
+## E157. 程式打完、實跑兩條驗收（2026-10-27 18:55～19:47，個人電腦；分支 `feat/m7-agent`）
+
+**程式：**
+- 本人打 `scripts/agent_demo.py`、`seed.py` 加 carol。Claude 逐行比對第一次抓到 3 處會壞的：`AgentRun` 的 `stop_reason: str` 少了 `= ""`（一建就 `TypeError`）；`"Bearer" + api_key` 少一個空白（實跑每步 401，**測試抓不到**，因為測試用假 Gateway）；`reply.bosy` 打錯字＋半形 `|`、`micro_USD`。改完後只剩 `step = step + 1`、`x = x + cost` 兩行寫法不同（意思同 `+=`）
+- `uv run pytest -q`：**444 passed**（32 秒）
+
+**起本機 Gateway 撞到的（都不用改程式）：**
+1. `KeyError: 'CHARGE_QUEUE_URL'`：`.env` 沒有這個設定（M5 加的；`compose.yaml` 的 gateway 容器有寫 `disabled`，直接跑 `uvicorn` 讀不到）。改成只在當下 PowerShell 設 `$env:CHARGE_QUEUE_URL="disabled"`，`.env` 不動
+2. `[WinError 10048]`：8000 埠已被佔用；本人關掉佔用的程式後正常啟動（log 有 `"mode": "disabled"`）
+- 錄影前把 PowerShell 提示字元改成 `PS> `（`function prompt { "PS> " }`），路徑裡的使用者資料夾名稱不入鏡；Key 用 `getpass`，畫面沒有 Key
+
+**實跑結果（三段錄影，存本人電腦；最後一格截圖在 `docs/screenshots/`）：**
+
+| 段 | 帳號、參數 | 步數 | 停止理由 | 花費（micro-USD） | 檔名 |
+|---|---|---|---|---|---|
+| ① | bob，預設（8 步、30,000） | 8 | `final`（剛好在第 8 步、上限的最後一步） | 8,326 | `m7-agent-1-bob-final` |
+| ②-1 | carol，`--max-steps 0 --budget 0` | 8 | `final`（**沒被擋**） | 8,122 | `m7-agent-2-carol-self-correct` |
+| ②-2 | carol，同上，再跑一次 | 3＋第 4 步 429 | `quota` ✅ | 2,384 | `m7-agent-3-carol-quota-429` |
+
+- 答案三次都對：sol 約 US$0.0081、luna 約 US$0.000405、貴 20 倍
+- 每步都走 `gpt-6-sol`（理由 `keyword`），跟 E155 預期一樣
+- **對帳（`/metrics`）：** `llm_cost_usd_total` bob 0.008326、carol 0.010506（= 8,122＋2,384，與畫面加總一致，超過 carol 的 10,000 才被擋）；`llm_requests` 有 carol `status="quota_exceeded"`；`llm_rate_limit_rejected_total{reason="quota"} 1.0`
+- 被擋的那一筆 Gateway 不回單號（429 沒有 body 內容），所以用監控計數器對帳，不用 `show_audit`
+
+**跟預估不一樣的（誠實記錄）：**
+1. **一步只花 626～1,460 micro-USD，E155 估 2,000～4,000，高估 2～3 倍。** 模型每次只回一行，輸出很短。所以 carol 的 10,000 第一次跑不完、整題做完；第二次才在第 3 步後被擋。驗收照樣成立，故事改成「第一次做完、第二次做到一半額度用完」。`seed.py` 註解的「大約跑 3 步」已改
+2. **多花的 2 步都在找便宜模型的名字：** ① 的第 4 步 `route(便宜模型)`；②-1 的第 4 步自己編出 `gpt-6-mini`，工具回「沒有這個模型（有：gpt-6-luna、gpt-6-sol）」，第 5 步就改問對的（agent 自己修正的證據）。剛好吻合 E155 的「6 步＋2 步讓模型修正」，但 bob 在上限的最後一步才完成，**8 步沒有餘裕**。不改 `RULES`（把模型名寫進規則等於把答案給它）
+3. 一整題 8 步約 US$0.008：agent 每輪重送全部內容，所以比單次聊天貴，但仍不到 1 美分
