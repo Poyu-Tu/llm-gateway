@@ -12,10 +12,12 @@ from scripts.create_tables import create_tables
 # Key 的固定開頭：一眼看得出是這個 Gateway 的 Key，外流時也方便用掃描工具找
 API_KEY_PREFIX = "gw_"
 
-# 示範用的兩個人與每月額度（micro-USD）：alice 很快就會用完，bob 用不完
+# 示範用的三個人與每月額度（micro-USD）：alice 很快就會用完，bob 用不完
+# carol 給 M7 的 agent 驗收用：第一次跑得完整題（約 8,000），再跑一次到第 3 步後被 429 擋下（E157）
 DEMO_USERS = {
     "alice": 1_000,
     "bob": 1_000_000,
+    "carol": 10_000,
 }
 
 
