@@ -50,7 +50,10 @@ $cases = @(
   @(19, '給自己加權限',                    'iam:PutRolePolicy',               $role,                                              '',      'explicitDeny'),
   @(20, '讀每日層的帳本',                  's3:GetObject',                    "arn:aws:s3:::${bucket}/daily/terraform.tfstate",   '',      'allowed'),
   @(21, '寫每日層的帳本',                  's3:PutObject',                    "arn:aws:s3:::${bucket}/daily/terraform.tfstate",   '',      'allowed'),
-  @(22, '寫長期層的帳本',                  's3:PutObject',                    "arn:aws:s3:::${bucket}/persistent/terraform.tfstate", '',   'implicitDeny')
+  @(22, '寫長期層的帳本',                  's3:PutObject',                    "arn:aws:s3:::${bucket}/persistent/terraform.tfstate", '',   'implicitDeny'),
+  @(23, '看服務的部署紀錄（等穩定用）',    'ecs:ListServiceDeployments',      $service,                                           '',      'allowed'),
+  @(24, '看某一次部署的細節',              'ecs:DescribeServiceDeployments',  "arn:aws:ecs:${p}:service-deployment/llm-gateway/llm-gateway/test", '', 'allowed'),
+  @(25, '看別的服務的部署紀錄',            'ecs:ListServiceDeployments',      "arn:aws:ecs:${p}:service/llm-gateway/other",       '',      'implicitDeny')
 )
 
 $cases | ForEach-Object {

@@ -166,6 +166,22 @@ data "aws_iam_policy_document" "deploy_permissions" {
     }
   }
 
+  # 換版之後等它穩定：AWS provider 6.x 用「服務部署紀錄」判斷新版有沒有成功（只讀，限這一個服務）
+  statement {
+    sid    = "WatchGatewayRollout"
+    effect = "Allow"
+    actions = [
+      "ecs:ListServiceDeployments",
+      "ecs:DescribeServiceDeployments",
+      "ecs:DescribeServiceRevisions",
+    ]
+    resources = [
+      local.gateway_service_arn,
+      "arn:aws:ecs:${local.account_region}:service-deployment/llm-gateway/llm-gateway/*",
+      "arn:aws:ecs:${local.account_region}:service-revision/llm-gateway/llm-gateway/*",
+    ]
+  }
+
   # ---- 明文 Deny：不准給自己加權限、改信任條件、把自己刪掉 ----
   statement {
     sid    = "DenySelfChange"
