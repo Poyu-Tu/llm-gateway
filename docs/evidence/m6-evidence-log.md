@@ -280,7 +280,8 @@
 **還沒證明（上雲那天）：** 每日層建著時 `plan` 要 Describe 現有的 42 個資源，deploy 角色讀的權限夠不夠；只換映像時守門放不放行（Worker zip 跨系統的指紋，E152 已知風險）；`apply`、`wait_for_steady_state`、部署斷路器。
 
 **觀察：**
-- Linux runner 算出的 Worker zip `source_code_hash` 是 `1z50L1kGoXaNff0iTZQ9eSbwx4gAKPbZOjKwNr8Q6k4=`。本人電腦（Windows）的 `plan` 若算出同一串，跨系統的風險就能在上雲前排除
+- **Worker zip 跨系統（E152 已知風險）當天就驗了：** Linux runner 算出的 `source_code_hash` 是 `1z50L1kGoXaNff0iTZQ9eSbwx4gAKPbZOjKwNr8Q6k4=`；14:43 本人在公司電腦（Windows）`terraform -chdir=infra/daily plan`（同樣 `admin_cidr=192.0.2.1/32`、`image_tag=8bcc043`）算出**同一串**。打包的 6 個檔在 Windows 上沒有 CR、`git hash-object` 與 `8bcc043` 的內容逐檔相同；`worker.tf` 用 `source { content = file(...) }` 放內容，不讀檔案權限與修改時間 → 兩台系統打出同一個 zip。剩下的前提：上雲那天建每日層的個人電腦也要是 LF（同一份 `.gitattributes`），建之前用同一行指令再對一次
+- 撞到的一次：在 repo 最上層跑 `terraform plan` → `Error: No configuration files`；改用 `terraform -chdir=infra/daily ...`，不用切換資料夾
 - `docker login` 印出「credentials are stored unencrypted」：runner 用完即丟，workflow 推完會 `docker logout`，目前接受
 
 **花費：** ECR 多一個映像（ECR 儲存每 GB 每月 US$0.10，一個映像每月不到 US$0.01）；Actions 用的是公開 repo 的免費額度。
