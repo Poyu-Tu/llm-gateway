@@ -3,7 +3,7 @@
 > 依決策書 11.5 遮蔽：AWS 帳號 ID、存取金鑰 ID、公開 IP；OpenAI 的 Project ID、金鑰 Tracking ID、金鑰末 4 碼、建立者 user ID；個人帳號名稱（含終端機提示字元與路徑中的使用者資料夾名稱，一律寫成 `<user>`）。
 > 本檔收錄「文字型」證據；截圖另存於 `docs/screenshots/`（檔名以 `m6-` 開頭，正式清單照決策書 11.4 的 S 編號），日誌另存於 `docs/logs/`。
 > E 編號接續 `m5-evidence-log.md`（E127～E144），從 E145 開始。E145 是 M5 的收尾（實際花費），因為 M5 的紀錄已隨結案合併，照交接約定記在這裡。
-> 紀錄日期：2026-10-25 建立（E145～E148）；10/26～10/27 補 E149～E154
+> 紀錄日期：2026-10-25 建立（E145～E148）；10/26～10/27 補 E149～E154；10/27 晚補 E158（E155～E157 是 M7，在 `m7-evidence-log.md`）
 
 ---
 
@@ -320,3 +320,47 @@ Trivy 的表（`llm-gateway:ci (debian 13.7)`）：**`Total: 1 (HIGH: 1, CRITICA
 **截圖：** `docs/screenshots/s16-trivy-block.png`（PR #39 的 Image scan：左側 Tests／Config scan 綠、Image scan 紅，右側 `Total: 1 (HIGH: 1)` 與 pcre2 那一列）、`docs/screenshots/s16-trivy-pass.png`（main 的 ci #84：三個都綠、debian 弱點 0）。由 Claude 用 Chrome 擷取，畫面不含帳號 ID 與個人資料。
 
 **收尾：** PR #39 關閉、不合併；分支 `test/s16-old-base` 刪除。
+
+---
+
+## E158. 上雲一次：CD 真的換版、`/metrics` 驗收、Console 三章、S15、告警、對帳、拆光（2026-10-27 22:18～23:56，個人電腦、家裡網路；`main` = `1af1ede` → `8a9a3d9`）
+
+**為什麼在家做：** 19:56 本人在咖啡店，本來要開始上雲；Claude 提醒 ALB 是 HTTP、只放行本人 IP，咖啡店整間共用一個對外 IP（門禁等於失效），開放 Wi-Fi 上送的 API Key 與 `/metrics` 通行證可能被同網路的人攔到。本人決定回家做（M7 收尾留在咖啡店做）。
+
+| # | 步驟 | 結果 |
+|---|---|---|
+| 1 | `aws login`、`export-credentials` | 成功 |
+| 2 | Worker 指紋 | 個人電腦 `plan` 的 `source_code_hash` 與 Linux runner、公司電腦相同（`1z50L1k…Q6k4=`） |
+| 3 | 每日層 apply（`image_tag = 8bcc043`） | `Apply complete! Resources: 42 added`；ECS 服務 1 分 8 秒建好；任務定義 `llm-gateway:3`；`/health` → `{"status":"ok"} 200` |
+| 4 | `ADMIN_CIDR` secret | 本人改成家裡 IP（與 `TF_VAR_admin_cidr` 同一個值，從 apply 那個分頁印出） |
+| 5 | **deploy #3**（`1af1ede`） | 建映像、Trivy、推 ECR 綠；`plan` 1 add／1 change／1 destroy（映像 `8bcc043` → `1af1ede`），Lambda 不在計畫裡；**守門放行**（`The plan only swaps the Gateway image`）；新任務定義登記、`UpdateService` 送出；**等穩定時 `AccessDenied`：deploy 角色沒有 `ecs:ListServiceDeployments`** → 紅（1 分 17 秒）。事後 `describe-services`：`PRIMARY COMPLETED llm-gateway:4`，換版本身成功，只是 Terraform 沒權限確認 |
+| 6 | 修正（分支 `fix/m6-deploy-watch-rollout`，PR #42） | `deploy_role.tf` 加 `WatchGatewayRollout`：`ListServiceDeployments`、`DescribeServiceDeployments`、`DescribeServiceRevisions`，資源只限這一個服務與它的部署、版本紀錄（AWS 文件的寫法），不加標籤條件（只讀、不確定支援）；模擬器加第 23～25 題；長期層 apply `0 added, 1 changed, 0 destroyed`；**模擬器 25 題全對**；PR #42 綠了合併（`8a9a3d9`） |
+| 7 | **deploy #4**（`8a9a3d9`） | **成功（3 分 14 秒）**：守門放行 → `aws_ecs_service.gateway: Modifications complete after 1m54s` → `Apply complete! Resources: 1 added, 1 changed, 1 destroyed.` CD 第一次從頭到尾真的換版、等到穩定 |
+| 8 | 雲端停舊 Key、發新 Key | `DYNAMODB_TARGET=aws`：`disable_key --user alice`、`--user bob`（M4、M5 的舊 Key）→ `seed` 發 alice、bob、carol（carol 第一次上雲端）→ 清掉 `DYNAMODB_TARGET` |
+| 9 | **`/metrics` 驗收** | 不帶 403、帶錯 403、**帶對 200**、`/metrics/`（帶對）403、`/health` 200、`/` 200；通行證用變數、`-o NUL`，畫面不出現。插曲：第一輪 `$tok` 因憑證過期是空的 → 帶空白通行證也是 403（正確） |
+| 10 | **Console 三章錄影**（Chrome、雲端 ALB） | ① 節費（bob）：簡單題 → luna、SQS／Kafka → sol；② 個資（bob）：四種假資料，luna 唸回 `TW_ID・PHONE・EMAIL・CARD`；③ 額度（**carol**）：5 題 sol，額度條一路掉，第 6 題被擋、寫出「11/1（日）00:00 恢復」 |
+| 11 | **S15：Grafana 抓雲端** | `monitoring/secrets/cloud-targets.json`（ALB 網址，Claude 放）＋`metrics-token`（本人 `Set-Content -NoNewline -Encoding ascii`）；Prometheus `gateway-cloud` **UP**（207 ms）；儀表板 bob $0.002270、carol $0.010140（= Console 的 US$0.01014）、`ok` 8、`quota_exceeded` 4 |
+| 12 | **告警響一次** | 往 `/ecs/llm-gateway` 新開 stream `alarm-test`，寫一行 `{"event":"provider_budget_exhausted","note":"alarm test"}` → 1～2 分鐘內 `llm-gateway-provider-budget-exhausted` 變 **`ALARM`** |
+| 13 | **與 OpenAI 對帳** | 後台 10/27：**27 個請求**、約 US$0.03；我們這邊：本機 M7 19 個（bob 8、carol 8＋3）＋雲端 Console 8 個（bob 3、carol 5）＝**27**；花費 18,832＋12,410＝31,242 micro-USD ≈ US$0.031。被擋的 5 次（alice 4、carol 1；agent 的 carol 1 次在本機）沒有出現在 OpenAI。10 月累計 US$0.13（Project 硬上限 US$2） |
+| 14 | **destroy #4** | 4 分 39 秒綠；之後直接問 AWS：NAT `[]`、ALB `[]`、ECS 服務 `[]` |
+
+**撞到的與學到的：**
+1. **deploy 角色缺「看換版進度」的權限**（上表 5～7）：模擬器 22 題全對，但沒有考到 Terraform 等穩定時會呼叫的 API → 只有實跑才知道。補權限後模擬器 25 題、實跑成功。面試說法：「模擬器只能驗我想得到的題目；第一次真的部署才發現 AWS provider 6.x 改用服務部署紀錄判斷成功，我補了三個只讀權限，限定到那一個服務，並把它加進模擬器，下次就考得到。」
+2. **臨時憑證 15 分鐘就過期：** `export-credentials | iex` 把通行證抄進環境變數，過期後重新 `aws login` 也沒用（CLI 先讀環境變數）。解法：`Remove-Item Env:AWS_*` 再匯出；只用 AWS CLI 時乾脆不匯出，CLI 會自己換新
+3. **`$env:` 變數只在設定它的分頁：** 第二個分頁印 `$env:TF_VAR_admin_cidr` 是空的
+4. **alice 一登入就沒額度：** `quotas` 在長期層，10/23 的 M5 演練已用完 10 月；`seed` 只發新 Key、重設上限，**不歸零本月已花**（決策書 12.5 早已記錄的限制，排錄影時 Claude 沒想到）。改用 carol 錄第三章；alice 的畫面留作備用（`m6-console-3b-alice-already-used.mp4`）
+5. **carol 超出額度 140 micro-USD：** 5 題累計 US$0.01014 ＞ US$0.01，因為「呼叫前檢查、不預扣」，第 5 題送出時還沒用完。最多超出一題的錢，刻意接受
+
+**誠實記錄：**
+- 告警驗的是「日誌篩選 → 告警 → SNS」這條管線；Gateway 程式真的印出 `provider_budget_exhausted` 由單元測試驗（OpenAI 預算不能真的用完）。測試 stream `alarm-test` 留在長期層的日誌群組裡
+- 告警信是否收到：**待本人確認**
+- 對帳的金額只對到「約 US$0.03」（後台只顯示兩位小數）；請求數精確對上
+- deploy #3 的紅燈是真的紅（權限不足），不是預期的紅
+- 雲端 `alice`、`bob` 的 10 月額度已用的部分不會因重灌歸零（同 12.5）
+
+**截圖、錄影：**
+- `docs/screenshots/m6-console-1-savings-bob.png`、`m6-console-2-pii-bob.png`、`m6-console-3-quota-carol.png`（三段錄影的最後一格）
+- `docs/screenshots/s15-grafana-cloud.jpg`（Claude 用 Chrome 擷取，畫面沒有帳號 ID、IP）
+- 錄影存本人電腦 `Videos\llm-gateway-mp4\m6-console-*.mp4`（Key 沒有入鏡，Claude 逐段看過）
+
+**花費：** 每日層約 1 小時 40 分（22:20 apply ～ 23:55 destroy）；OpenAI 雲端那段 12,410 micro-USD。AWS 實際金額等帳單出來再補（M6 報告）。
