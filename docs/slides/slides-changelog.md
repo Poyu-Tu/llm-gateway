@@ -2,6 +2,34 @@
 
 > 兩份簡報（10 分鐘期末報告版、6 分鐘廠商影片版）每次改版記在這裡；旁白稿另記版號。影片檔不進 repo（簡報裡嵌的是加速、1600 px、無聲的壓縮版）。
 
+## v5（2026-10-28；M6、M7 完成後）
+
+**頁數：** 46 頁（v4.1 為 43 頁，v4.1 檔案保留）。
+
+**為什麼改：** M6（Console、Grafana、CI 三綠、CD 真的換版、告警信）與 M7（agent 三段＋與 Console 共用額度）都有真的畫面了；留白全部補上。本人 10/28 決定**不砍頁**，超時先跳過打 ✓ 的頁，11/2 試報後照老師的意見再調。
+
+**做法：** Project `claude/slides-tools/build_v5.py`（v4.1 → v5：`add_slide.py` 加 3 頁、裁圖、改 XML、`clean.py` 清掉沒人用的示意圖、壓回），`make_narration_v5.py`（整份講稿重寫，時間表由程式算）。沒有手改 pptx。截圖都裁掉瀏覽器與空白，只留畫面（來源見 `docs/screenshots/`）。
+
+| 頁 | 改動 |
+|---|---|
+| 1 | 版本字樣 v5｜2026-10-28 |
+| 7 | 架構圖：agent、Grafana 兩個框從虛線改實線（已蓋好），拿掉 M6、M7 標籤 |
+| 10 | Demo Console：示意圖換成雲端 Console 三張真的畫面。左大圖 `m6-console-1-savings-bob.png`（bob 的設計題 → 強模型，右欄本次用量、剩餘額度）；右上 `m6-console-2-pii-bob.png` 裁「路由決策」卡（已遮罩 Email、信用卡號、電話、身分證字號 才送出）；右下 `m6-console-3-quota-carol.png` 裁「剩餘額度」卡（US$0、紅條、11/1 恢復） |
+| 13 | 右半留白換成 `s15-grafana-cloud.jpg`（雲端 Grafana：bob、carol 各花多少、被擋 4）；卡片副標「雲端 Grafana：誰花多少、被擋幾次」。「從外網打不進去」用講的 |
+| **28 新** | 看不到的地方 ①｜出錯會叫：`m6-alarm-email.png`（綠框 → 10/27 23:45 收到；橘框 → OK → ALARM）；第三張卡「誠實講：用一行假日誌觸發；真的預算用完還沒發生過」；底下一行「6 分鐘後恢復 OK，也有一封信」。接在「兩個安靜出錯」後面當對照 |
+| 29～34 | 原 28～33 頁，頁碼 +1 |
+| 34（原 33） | CI 三關卡片縮到上半（380 → 444 個測試）；下半左 `s16-trivy-pass.png`（CI 三關全綠，PR #40）、右 `m6-cd-1-runs.png`（綠框 deploy #4 綠 3 分 21 秒、橘框 #1 被守門擋下）；副標「推送先過三關；部署按一下，建置、掃描、推映像到換版全自動」；拿掉「CD（M6，設計）」虛線框 |
+| **35 新** | 看不到的地方 ③｜部署只准換映像：左 `m6-cd-2-deploy1-guard-blocked.png`（橘框 Plan: 42 to add、紅框 changes more than the Gateway image, so nothing was applied）；中 `m6-cd-3-deploy4-only-swaps.png`（橘框 1 to add, 1 to change, 1 to destroy、綠框 only swaps the Gateway image）；右 `m6-cd-4-deploy4-apply-complete.png`（Modifications complete after 1m54s、Apply complete）＋兩張卡「換版 1 分 54 秒」「#3 真的失敗：模擬器 22 題全對，仍缺一個只讀權限」 |
+| 36～42 | 原 34～40 頁，頁碼 +2 |
+| 43（原 41） | M7 拆成兩頁。第一頁「agent 會犯錯，也會被擋」：左 `m7-agent-2-carol-self-correct.png`（裁終端機內容；紅框第 4 步 price(gpt-6-mini) → 沒有這個模型、綠框 停止：完成；共花 8,122）；右 `m7-agent-3-carol-quota-429.png` 裁第二次執行（紅框 停止：被 Gateway 擋下：額度用完（429）；共花 2,384）＋三張卡。原本的流程圖與驗收條件拿掉，留在副標一句 |
+| **44 新** | 小型 agent｜人和 agent 共用一本帳：左上 `m7-agent-4a-terminal-final.png`（紅框第 3 步編錯模型名、綠框 停止：完成；共花 8080）；左下 `m7-agent-4d-grafana-bob.png` 裁上排統計（綠框 bob $0.008140）；右 `m7-agent-4b-console-before.png` → `4c-console-after.png` 各裁「剩餘額度」卡（US$0.98363 → US$0.97555）；底部橘條「少了 0.00808 ＝ agent 印的 8,080 micro-USD；Gateway 的程式一行沒改」 |
+| 45（原 42） | 結語：三張數字卡縮矮；「評估後不做」那列之下加「下一步」一列（管理員 Console、SSO 與角色、部門拆帳；訂閱制（ChatGPT）不經過這道門）。US$0.5 先不改（M6 的 AWS 帳單還沒查） |
+| 46（原 43） | 謝謝聆聽 |
+
+**講稿：** `narration-10min-v5.md`，整份重寫成「兩種混搭」：每一大段開頭一個問句（第 4、6、10、19、22、25、35、43 頁）、關鍵頁講故事（第 28 告警、35 部署、42 四道檢查、43 agent）、其他頁最後一句回答「所以呢？」。標【待換】的句子是 Claude 擬的，本人改成自己的口氣。**合計 12 分 28 秒（配給）；跳過打 ✓ 的 6 頁回到 11 分 31 秒**——v5 多了 3 頁、問句與故事約 2 分鐘，本人 10/28 選擇不砍、11/2 試報後再定。
+
+**還留白：** 第 42 頁副標要換成本人的話；`/metrics` 403／200 沒有畫面（只能講）；M6 的 AWS 實際花費（結語 US$0.5）；動畫順序；6 分鐘影片版仍是 v2.0。
+
 ## v4.1（2026-10-25；M5 實際花費）
 
 **頁數：** 43 頁（v4 為 42 頁，v4 檔案保留）。
