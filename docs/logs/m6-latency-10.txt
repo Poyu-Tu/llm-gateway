@@ -1,0 +1,10 @@
+  2.91 s  gpt-6-luna    4 uUSD  What is 1+1?
+  1.76 s  gpt-6-luna    4 uUSD  Capital of Japan?
+  1.91 s  gpt-6-luna    8 uUSD  How many days in a week?
+  1.76 s  gpt-6-luna    9 uUSD  Chemical formula of water?
+  1.83 s  gpt-6-luna    5 uUSD  How many months in a year?
+  1.97 s  gpt-6-luna   16 uUSD  What color is the sky?
+  1.25 s  gpt-6-luna    4 uUSD  Opposite of hot?
+  1.55 s  gpt-6-luna    6 uUSD  How many legs does a cat have?
+  1.66 s  gpt-6-luna    7 uUSD  What is 3 times 4?
+  0.92 s  gpt-6-luna    4 uUSD  First letter of the alphabet?
