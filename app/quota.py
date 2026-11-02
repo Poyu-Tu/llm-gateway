@@ -91,7 +91,8 @@ def add_usage(client: BaseClient, user_id: str, period: str, amount_micro_usd: i
     }
     client.update_item(
         TableName=QUOTAS_TABLE,
-        Key=key,
+        Key=key,    # user_id + period
         UpdateExpression="ADD used_micro_usd :amount",
+        # ADD：資料庫內部一次做完（原子操作），叫 DynamoDB 自己把數字加上去。這筆紀錄不存在的話，它會自動建一筆。
         ExpressionAttributeValues={":amount": {"N": str(amount_micro_usd)}},
     )

@@ -29,12 +29,12 @@ def contains_keyword(lowered: str, keyword: str) -> bool:
 # 夠長或含關鍵字就用強模型，其餘用便宜模型；只看文字和規則，不碰網路和資料庫
 def choose_model(text: str, routing: RoutingConfig) -> RouteDecision:
     """Return the model for the text, together with the reason."""
-    if len(text) >= routing.min_chars:
+    if len(text) >= routing.min_chars:  # 先看長度
         return RouteDecision(model=routing.strong_model, reason="length")
 
     # 英文關鍵字不分大小寫：兩邊都先轉成小寫再比
-    lowered = text.lower()
+    lowered = text.lower()  # 英文不分大小寫
     for keyword in routing.keywords:
-        if contains_keyword(lowered, keyword):
+        if contains_keyword(lowered, keyword):  # 再看關鍵字
             return RouteDecision(model=routing.strong_model, reason="keyword")
     return RouteDecision(model=routing.cheap_model, reason="default")

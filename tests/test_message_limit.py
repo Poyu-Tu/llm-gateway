@@ -42,9 +42,9 @@ def test_rejected_message_never_reaches_the_model(tmp_path):
 
     response = client.post("/v1/chat", json={"message": "a" * (MAX_MESSAGE_CHARS + 1)})
 
-    assert response.status_code == 422
-    assert completions.requests == []
-    assert not audit_path.exists()
+    assert response.status_code == 422  # ① 先確認真的被擋在 422
+    assert completions.requests == []   # ② 假的 OpenAI 沒收到任何請求
+    assert not audit_path.exists()  # ③ 稽核檔沒被建立
 
 
 # 算的是「字」不是「位元組」：4,000 個中文字（約 12,000 位元組）照樣放行

@@ -61,7 +61,7 @@ def log_queue_mode(queue_url: str | None) -> None:
 log_queue_mode(CHARGE_QUEUE_URL)
 
 # 說明頁（/docs、/redoc、/openapi.json）一律關閉：使用者用不到，只會把 API 的地圖交給想攻擊的人
-app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None) # 開店：建立整個 Web 服務。後面所有門牌都貼在 app 上。
 
 # Demo Console 的檔案（HTML、CSS、JS）跟著 Gateway 打包，不另開 S3（決策書 3.1）
 STATIC_DIR = Path(__file__).parent / "static"
@@ -92,7 +92,7 @@ async def add_security_headers(request: Request, call_next):
 class ChatRequest(BaseModel):
     """What the caller sends. The caller cannot choose the model."""
 
-    message: str = Field(min_length=1, max_length=4000)
+    message: str = Field(min_length=1, max_length=4000) # 點餐單的格式。只收一個欄位 message，必須是文字，長度 1～4000 字。
 
 
 # 領用窗口：OpenAI 連線（測試時會換成假的）
@@ -273,41 +273,45 @@ def save_charge(sqs: BaseClient | None, queue_url: str | None, dynamodb: BaseCli
 
 # 對話入口：開單號 → 遮罩 → 呼叫模型 → 寫稽核紀錄 → 回傳
 @app.post("/v1/chat")
+# @：Python 的「裝飾器」，可以想成把一張標籤貼在下一行的函式上。
+# post：HTTP 的方法。GET 是「去櫃檯看一眼」，例如 /health 只是問「你活著嗎」；POST 是「遞一張單子進去請店家處理」，要帶內容（message）。
+# "/v1/chat"：路徑。v1 是第 1 版，以後要改格式可以開 /v2/chat，舊的程式不會壞。
 def chat_endpoint(
-    request: ChatRequest,
-    client: OpenAI = Depends(get_client),
-    hmac_key: bytes = Depends(get_hmac_key),
-    write_audit_record: Callable[[dict], None] = Depends(get_audit_writer),
-    user_id: str = Depends(get_user_id),
-    quota: tuple[int, int] = Depends(get_quota),
-    now: datetime = Depends(get_now),
-    dynamodb: BaseClient = Depends(get_dynamodb),
-    sqs: BaseClient | None = Depends(get_sqs),
-    queue_url: str | None = Depends(get_queue_url),
-    config: GatewayConfig = Depends(get_config),
+    # Depends(...)：店員上工前，先去「領用窗口」領工具。FastAPI 會先執行 get_client()，再把結果交給 client。
+    request: ChatRequest,   # 點餐單，FastAPI 已檢查過
+    client: OpenAI = Depends(get_client),   # 領用窗口：OpenAI 連線
+    hmac_key: bytes = Depends(get_hmac_key),    # 領用窗口：雜湊值用的金鑰
+    write_audit_record: Callable[[dict], None] = Depends(get_audit_writer), # 領用窗口：寫進 audit 表
+    user_id: str = Depends(get_user_id),    # 領用窗口：驗 Key → 是誰
+    quota: tuple[int, int] = Depends(get_quota),    # 領用窗口：額度、已用量
+    now: datetime = Depends(get_now),   # 領用窗口：現在時間
+    dynamodb: BaseClient = Depends(get_dynamodb),   # 領用窗口：資料庫連線
+    sqs: BaseClient | None = Depends(get_sqs),  # 領用窗口：記帳佇列
+    queue_url: str | None = Depends(get_queue_url), # 領用窗口：佇列網址
+    config: GatewayConfig = Depends(get_config),    # 領用窗口：設定檔
 ):
     """Send the masked message to the model and write an audit record."""
     # 開始計時：每條路結束前把花了多久記進監控
-    started = time.perf_counter()
-    request_id = str(uuid.uuid4())
-    masked = mask(request.message)
+    started = time.perf_counter()   # 開始計時，給監控記「花了幾秒」
+    request_id = str(uuid.uuid4())  # 隨機單號，不會撞號、猜不到下一號
+    masked = mask(request.message)  # 送給 OpenAI 的是這個
 
     # 先準備紀錄的前半段：不管成功或失敗都要記的欄位
     record = {
-        "request_id": request_id,
-        "user_id": user_id,
-        "timestamp": now.isoformat(),
-        "prompt_hash": hash_prompt(request.message, hmac_key),
-        "summary": make_summary(request.message),
-        "pii_types": detect_pii_types(request.message)
+        "request_id": request_id,   # audit 表的主鍵
+        "user_id": user_id, # who
+        "timestamp": now.isoformat(),   # 改用 get_now()，測試能固定時間
+        "prompt_hash": hash_prompt(request.message, hmac_key),  # 原文的 HMAC 雜湊值，64 個字
+        "summary": make_summary(request.message),   # 先遮罩、再取前 50 個字
+        "pii_types": detect_pii_types(request.message)  # 偵測到哪幾類個資（只記類別）
     }
 
     # 額度用完就擋：先記一筆稽核（查得到誰在用完後還一直送），再回 429 並告知何時恢復
-    limit_micro_usd, used_micro_usd = quota
+    limit_micro_usd, used_micro_usd = quota # 拆開兩個數字（額度、本月已用）
     if is_over_quota(limit_micro_usd, used_micro_usd):
         record["status"] = "quota_exceeded"
-        write_audit_record(record)
-        observe_request(record, time.perf_counter() - started)
+        write_audit_record(record)  # 被擋的也記：查得到誰用完了還一直送
+        observe_request(record, time.perf_counter() - started)  # Grafana 上「被擋了幾次」
         raise HTTPException(
             status_code=429,
             detail="Monthly quota exceeded",
@@ -315,22 +319,22 @@ def chat_endpoint(
         )
 
     # 花錢之前先確認扣得了帳：對當月那一筆加 0，寫不進去就回 503，一毛都還沒花
-    period = period_of(now)
+    period = period_of(now) # 這個月，例如 "2026-11"（台北時間）
     try:
-        add_usage(dynamodb, user_id, period, 0)
-    except (BotoCoreError, ClientError):
-        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+        add_usage(dynamodb, user_id, period, 0) # 加 0 元
+    except (BotoCoreError, ClientError):    # 連不上（BotoCoreError）或 AWS 拒絕（ClientError）
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")  # 一毛都還沒花
 
     # 依遮罩後的內容選模型，理由記進稽核；再查到這顆模型的設定（含單價）：查不到就不呼叫
     decision = choose_model(masked, config.routing)
-    record["route_reason"] = decision.reason
-    record["routed_model"] = decision.model
+    record["route_reason"] = decision.reason    # length / keyword / default
+    record["routed_model"] = decision.model     # 路由選的那顆
     # 查不到設定是我們自己的設定問題：記一筆失敗、回 500，不呼叫模型、不扣錢
     try:
         settings = find_model_config(config.models, decision.model)
     except ModelNotConfiguredError as exc:
         record["status"] = "error"
-        record["error_type"] = type(exc).__name__
+        record["error_type"] = type(exc).__name__   # 記下錯誤類別名稱 "ModelNotConfiguredError"
         write_audit_record(record)
         observe_request(record, time.perf_counter() - started)
         raise HTTPException(status_code=500, detail="Internal server error")
