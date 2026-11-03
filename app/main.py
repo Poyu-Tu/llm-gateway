@@ -91,7 +91,7 @@ async def add_security_headers(request: Request, call_next):
 # 請求格式：只收 message，沒有 model 欄位，使用者不能指定模型（D9）
 class ChatRequest(BaseModel):
     """What the caller sends. The caller cannot choose the model."""
-
+    # message 是空的或超過 4000 字，Pydantic 自動回422，格式不對
     message: str = Field(min_length=1, max_length=4000) # 點餐單的格式。只收一個欄位 message，必須是文字，長度 1～4000 字。
 
 
@@ -339,60 +339,62 @@ def chat_endpoint(
         observe_request(record, time.perf_counter() - started)
         raise HTTPException(status_code=500, detail="Internal server error")
 
-    # 呼叫模型：強模型被限流時改用便宜模型一次；不論成功失敗，都交回一個結果（不往外丟錯誤）
+    # 呼叫模型：強模型被限流時改用便宜模型一次；不論成功失敗，都交回一個結果（不往外丟錯誤：成功或失敗都包成一個 CallOutcome 交回來）
     outcome = chat_with_fallback(
         client,
-        [{"role": "user", "content": masked}],
-        decision.model,
-        settings,
-        config,
+        [{"role": "user", "content": masked}],  # 遮罩後的內容
+        decision.model, # 路由選的那顆模型
+        settings,   # 模型的設定
+        config, 
     )
 
     # 稽核：有沒有降級；降級了才記原因（成功、失敗都記，所以寫在判斷成敗之前）
-    record["fallback"] = outcome.fallback
-    if outcome.fallback:
+    record["fallback"] = outcome.fallback   # 記 fallback（成功、失敗都記）
+    if outcome.fallback:    # 降級了才記 fallback_reason
         record["fallback_reason"] = outcome.fallback_reason
 
     # 沒拿到回答：記一筆失敗
-    if outcome.error is not None:
+    if outcome.error is not None:   # 有錯誤嗎？
         record["status"] = "error"
-        record["error_type"] = type(outcome.error).__name__
+        record["error_type"] = type(outcome.error).__name__ # 錯誤類別名
         # 供應商有回應的錯誤才有代碼（例如 rate_limit_exceeded、project_spend_limit_exceeded）：
         # 只記這個短代碼、不記錯誤訊息，事後才分得出是哪一種問題
-        if isinstance(outcome.error, APIError):
+        if isinstance(outcome.error, APIError): # OpenAI 有回應的錯誤（APIError） → 記 error_code（短代碼）不記錯誤訊息全文，因為訊息可能帶到使用者內容，也很長。只記代碼，之後查得到是哪一種問題，又不會把東西洩漏出去。
             record["error_code"] = outcome.error.code
-        write_audit_record(record)
-        observe_request(record, time.perf_counter() - started)
+        write_audit_record(record)  # 寫稽核
+        observe_request(record, time.perf_counter() - started)  # 記監控數字，失敗也算進請求數和耗時。
         # 供應商回 429（限流或預算用完）：回 503
-        if isinstance(outcome.error, RateLimitError):
+        if isinstance(outcome.error, RateLimitError):   # 是 429？
             # 供應商的預算用完：多久會恢復無從得知，要有人處理，所以不附 Retry-After
-            if is_budget_exhausted(outcome.error):
-                report_budget_exhausted(record)
-                raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+            if is_budget_exhausted(outcome.error):  # 預算用完？
+                report_budget_exhausted(record) # 印一行日誌給長期層的告警看
+                raise HTTPException(status_code=503, detail="Service temporarily unavailable")  # 503（不附 Retry-After）
             # 限流（降級後的便宜模型，或路由一開始就選便宜模型）：告訴對方大約多久後再試
-            raise HTTPException(
+            raise HTTPException(    # 503 + Retry-After
                 status_code=503,
                 detail="Service temporarily unavailable",
                 headers={"Retry-After": str(retry_after_seconds(outcome.error))},
             )
-        raise HTTPException(status_code=502, detail="Upstream model error")
+        raise HTTPException(status_code=502, detail="Upstream model error") # 502 Bad Gateway：上游模型出錯，Gateway 只是轉送，不是自己的問題
 
     # 成功：補上模型和用量，再寫入
     # model 記實際回答、也拿來計費的那一顆（降級後是便宜模型）；provider_model 記 OpenAI 回報的名稱
-    result = outcome.result
+    result = outcome.result # 走到這裡代表 error is None，所以 result 一定有值。
+    # model 記 outcome.model，不是 decision.model。路由選了誰，已經在 :331 記成 routed_model。
+    # 所以一筆降級的紀錄會同時有「路由選 sol」和「實際由 luna 回答」
     record["model"] = outcome.model
-    record["provider_model"] = result.model
+    record["provider_model"] = result.model # OpenAI 回報的名稱，把「我們要求的」和「對方實際給的」分開記，萬一 OpenAI 悄悄換了版本，事後查得到。
     record["input_tokens"] = result.input_tokens
-    record["output_tokens"] = result.output_tokens
-    record["reasoning_tokens"] = result.reasoning_tokens
+    record["output_tokens"] = result.output_tokens  # output_tokens 已經包含 reasoning_tokens（OpenAI 的 completion_tokens 本來就把思考算在裡面）。
+    record["reasoning_tokens"] = result.reasoning_tokens    # 輸出裡有多少是在思考
     # 結束原因：被輸出上限截斷（length）時，回答可能只有一半甚至是空的，但照樣計費
-    record["finish_reason"] = result.finish_reason
+    record["finish_reason"] = result.finish_reason  # "stop" 或 "length"
     record["status"] = "ok"
 
     # 把這次的成本放進紀錄，交給 save_charge()：送 SQS 讓 Worker 記，送不進去就自己記；記帳出問題也照樣把回答交出去
     cost = cost_micro_usd(outcome.settings, result.input_tokens, result.output_tokens)
     record["cost_micro_usd"] = cost
-    save_charge(sqs, queue_url, dynamodb, record, period)
+    save_charge(sqs, queue_url, dynamodb, record, period)   # 成功的那筆稽核就是在這裡寫的，不是用 write_audit_record()
     observe_request(record, time.perf_counter() - started)
     # 回應除了回答，也把 Console 要顯示的東西一起帶回去：路由理由、有沒有降級、用量、成本、額度
     # 額度的已用＝呼叫前讀到的已用＋這次成本：帳由 Worker 非同步記，回頭讀資料庫可能還沒入帳
@@ -401,8 +403,8 @@ def chat_endpoint(
         "reply": result.text,
         "model": outcome.model,
         "route": {
-            "reason": decision.reason,
-            "fallback": outcome.fallback,
+            "reason": decision.reason,  # 路由理由：length / keyword / default
+            "fallback": outcome.fallback,   # 有沒有降級
         },
         "usage": {
             "input_tokens": result.input_tokens,
@@ -411,9 +413,9 @@ def chat_endpoint(
         },
         "cost_micro_usd": cost,
         # 只回「有哪幾類個資被遮掉」，不回個資本身（跟稽核紀錄同一份）
-        "pii_types": record["pii_types"],
+        "pii_types": record["pii_types"],   # 只回類別，不回個資本身
         "quota": {
             "limit_micro_usd": limit_micro_usd,
-            "used_micro_usd": used_micro_usd + cost,
+            "used_micro_usd": used_micro_usd + cost,    # 呼叫前讀到的已用＋這次成本：帳由 Worker 非同步記，回頭讀資料庫可能還沒入帳
         },
     }

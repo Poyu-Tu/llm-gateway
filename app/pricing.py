@@ -17,7 +17,7 @@ def find_model_config(models: dict[str, ModelConfig], model: str) -> ModelConfig
     return models[model]
 
 
-# 金額全程用整數算，避免小數誤差；額度就是靠這個數字扣的
+# 金額全程用整數算，無條件進位，避免小數誤差；額度就是靠這個數字扣的
 def cost_micro_usd(settings: ModelConfig, input_tokens: int, output_tokens: int) -> int:
     """Return the cost of one call in micro-USD, rounded up to a whole number."""
     total = input_tokens * settings.input_price + output_tokens * settings.output_price
