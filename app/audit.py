@@ -39,15 +39,15 @@ def hash_prompt(text: str, key: bytes) -> str:
 def luhn_valid(digits: str) -> bool:
     """Return True when the digits pass the Luhn checksum."""
     total = 0
-    for index, ch in enumerate(reversed(digits)):
+    for index, ch in enumerate(reversed(digits)):   # 從最右邊開始數
         num = int(ch)
-        if index % 2 != 0:
+        if index % 2 != 0:  # 右邊數來第 2、4、6…位
             num = num * 2
             if num > 9:
                 num = num - 9
         total = total + num
 
-    if total % 10 == 0:
+    if total % 10 == 0: # 加總是 10 的倍數才算過
         return True
     else:
         return False
@@ -56,12 +56,12 @@ def luhn_valid(digits: str) -> bool:
 # 抓到像卡號的數字時先驗算，過了才遮，沒過就原樣放回去
 def replace_card_if_valid(match: re.Match) -> str:
     """Return the card label when the digits pass Luhn, otherwise the original text."""
-    found = match.group(0)
-    digits = re.sub(r"[- ]", "", found)
+    found = match.group(0)  # 正規表示式抓到的那一段，例如 "4111-1111-1111-1111"
+    digits = re.sub(r"[- ]", "", found) # 拿掉橫線和空格
     if luhn_valid(digits):
         return "[CARD]"
     else:
-        return found
+        return found    # 沒過：原封不動放回去
 
 
 # 遮罩和類別由同一次處理算出來，兩邊才不會對不上（遮了沒記、記了沒遮）

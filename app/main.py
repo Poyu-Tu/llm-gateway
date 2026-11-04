@@ -141,28 +141,28 @@ def get_audit_writer(dynamodb: BaseClient = Depends(get_dynamodb)) -> Callable[[
 
 # 驗票口：通過才交出「這個請求是誰」；沒通過在這裡就結束，進不了對話入口
 def get_user_id(
-    authorization: str | None = Header(default=None),
-    dynamodb: BaseClient = Depends(get_dynamodb),
+    authorization: str | None = Header(default=None),   # 標頭可以不帶，沒帶就是 None
+    dynamodb: BaseClient = Depends(get_dynamodb),   # 資料庫連線由領用窗口給（測試時換成考場）
 ) -> str:
     """Return the caller's user id, or stop the request with 401 or 503."""
-    token = extract_bearer_token(authorization)
+    token = extract_bearer_token(authorization)  # extract_bearer_token 從標頭拿出 Key
     if token is None:
         raise HTTPException(
             status_code=401,
             detail="Authentication failed",
-            headers={"WWW-Authenticate": "Bearer"},
+            headers={"WWW-Authenticate": "Bearer"}, # HTTP 規範：回 401 要告訴對方「該用哪種方式驗證」
         )
-    key_hash = hash_api_key(token)
+    key_hash = hash_api_key(token)  # 請求進來時，在 get_user_id() 裡算雜湊
     # 資料庫讀不到時不放行，也不說成是 Key 的問題：回 503，請對方稍後再試
     try:
-        user_id = find_user_id(dynamodb, key_hash)
-    except (BotoCoreError, ClientError):
+        user_id = find_user_id(dynamodb, key_hash) # find_user_id 拿雜湊去查表
+    except (BotoCoreError, ClientError):    # BotoCoreError 是連不上、逾時這類；ClientError 是 AWS 有回、但辦不到，例如表不存在、沒權限
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
     if user_id is None:
         raise HTTPException(
             status_code=401,
             detail="Authentication failed",
-            headers={"WWW-Authenticate": "Bearer"},
+            headers={"WWW-Authenticate": "Bearer"}, # HTTP 規範：回 401 要告訴對方「該用哪種方式驗證」
         )
     return user_id
 
@@ -174,7 +174,7 @@ def get_now() -> datetime:
 
 # 領用窗口：這個人的額度與本月已用量；讀不到就不放行
 def get_quota(
-    user_id: str = Depends(get_user_id),
+    user_id: str = Depends(get_user_id),    # 要先過驗票口，沒過驗票口就不會讀額度，也不會把別人的額度讀出來
     dynamodb: BaseClient = Depends(get_dynamodb),
     now: datetime = Depends(get_now),
 ) -> tuple[int, int]:
@@ -184,7 +184,7 @@ def get_quota(
         used_micro_usd = read_used(dynamodb, user_id, period_of(now))
     except (BotoCoreError, ClientError):
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
-    return limit_micro_usd, used_micro_usd
+    return limit_micro_usd, used_micro_usd  # 只回數字，不判斷，判斷留給 chat_endpoint：超額要寫一筆稽核再回 429
 
 
 # 健康檢查：只回狀態，不透露版本等資訊

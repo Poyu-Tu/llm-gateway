@@ -32,7 +32,7 @@ def seed_user(client: BaseClient, user_id: str, limit_micro_usd: int) -> str:
     """Store a new active API key and the monthly limit for the user, and return the key."""
     key = generate_api_key()
     key_item = {
-        "key_hash": {"S": hash_api_key(key)},
+        "key_hash": {"S": hash_api_key(key)},   # 發 Key 時，只把雜湊寫進表
         "user_id": {"S": user_id},
         "status": {"S": "active"},
     }

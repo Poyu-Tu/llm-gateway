@@ -49,7 +49,7 @@ def disable_key_hash(client: BaseClient, key_hash: str) -> None:
 # 停用一把外流的 Key：手上有的是 Key 本身，資料庫裡存的是它的雜湊
 def disable_key(client: BaseClient, key: str) -> None:
     """Disable one API key, or raise KeyNotFoundError when it is not in the database."""
-    disable_key_hash(client, hash_api_key(key))
+    disable_key_hash(client, hash_api_key(key)) # 停用 Key 時，先算雜湊才找得到那一列
 
 
 # 停用一個人的所有 Key：表是用雜湊當主鍵，只能整張表掃過去、挑出這個人的

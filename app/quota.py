@@ -57,12 +57,12 @@ def read_limit(client: BaseClient, user_id: str) -> int:
     }
     # 強一致讀取：剛扣完的錢、剛改的額度，下一個請求就要看得到
     response = client.get_item(TableName=QUOTAS_TABLE, Key=key, ConsistentRead=True)
-    if "Item" not in response:
+    if "Item" not in response:  # 沒有上限卡 → 0 → 等於擋下
         return 0
     item = response["Item"]
     if "limit_micro_usd" not in item:
         return 0
-    return int(item["limit_micro_usd"]["N"])
+    return int(item["limit_micro_usd"]["N"])    # # N 型別回來是字串，要轉 int
 
 
 # 已用量一個月一筆；這個月還沒有紀錄就是 0，換月不用任何人動手
@@ -74,7 +74,7 @@ def read_used(client: BaseClient, user_id: str, period: str) -> int:
     }
     # 強一致讀取：剛扣完的錢、剛改的額度，下一個請求就要看得到
     response = client.get_item(TableName=QUOTAS_TABLE, Key=key, ConsistentRead=True)
-    if "Item" not in response:
+    if "Item" not in response:  # 這個月還沒用 → 0
         return 0
     item = response["Item"]
     if "used_micro_usd" not in item:
