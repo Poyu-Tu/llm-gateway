@@ -30,9 +30,9 @@ def generate_api_key() -> str:
 # 資料庫只收到雜湊；Key 本身只在這裡交回去一次，之後沒有任何地方查得到
 def seed_user(client: BaseClient, user_id: str, limit_micro_usd: int) -> str:
     """Store a new active API key and the monthly limit for the user, and return the key."""
-    key = generate_api_key()
+    key = generate_api_key()    # "gw_" + 64 個亂數字元
     key_item = {
-        "key_hash": {"S": hash_api_key(key)},   # 發 Key 時，只把雜湊寫進表
+        "key_hash": {"S": hash_api_key(key)},   # 發 Key 時，只把雜湊值寫進表，資料庫外洩時，攻擊者拿到的只有雜湊值
         "user_id": {"S": user_id},
         "status": {"S": "active"},
     }
@@ -43,7 +43,7 @@ def seed_user(client: BaseClient, user_id: str, limit_micro_usd: int) -> str:
         "limit_micro_usd": {"N": str(limit_micro_usd)},
     }
     client.put_item(TableName=QUOTAS_TABLE, Item=limit_item)
-    return key
+    return key  # 明文 Key 只在這裡出現一次
 
 
 # 直接執行這個檔時才塞資料；Key 只印這一次，要當場抄下來
@@ -52,4 +52,4 @@ if __name__ == "__main__":
     create_tables(client)
     for user_id, limit_micro_usd in DEMO_USERS.items():
         key = seed_user(client, user_id, limit_micro_usd)
-        print(f"{user_id}: {key}")
+        print(f"{user_id}: {key}")  # 唯一一次看到明文
