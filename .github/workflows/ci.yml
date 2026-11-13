@@ -84,6 +84,7 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           format: table
+          trivyignores: .trivyignore
 
   # 掃設定檔寫錯的地方（Terraform、Dockerfile）：不用建映像、不用連 AWS，只讀檔案
   config-scan:
